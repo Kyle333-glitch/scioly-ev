@@ -1,9 +1,11 @@
 #include <Arduino.h>
 
-constexpr unsigned long SERIAL_BAUD = 115200;
-constexpr unsigned long BLINK_INTERVAL_MS = 500;
+#include <IntervalTimer.h>
 
-unsigned long lastBlinkMs = 0;
+constexpr unsigned long SERIAL_BAUD = 115200;
+constexpr uint32_t BLINK_INTERVAL_MS = 500;
+
+IntervalTimer blinkTimer(BLINK_INTERVAL_MS);
 bool ledState = false;
 
 void setup() {
@@ -22,10 +24,7 @@ void setup() {
 }
 
 void loop() {
-    const unsigned long now = millis();
-
-    if (now - lastBlinkMs >= BLINK_INTERVAL_MS) {
-        lastBlinkMs = now;
+    if (blinkTimer.elapsed(millis())) {
         ledState = !ledState;
         digitalWrite(LED_BUILTIN, ledState ? HIGH : LOW);
     }
