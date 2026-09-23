@@ -57,7 +57,7 @@ say nothing about the vehicle.
 |------|--------|----------|
 | `env:nano_r4` firmware builds | VERIFIED | `pio run` succeeds (see `DEVELOPMENT_LOG.md`) |
 | Host logic tests build and run with the `native` environment | VERIFIED | `pio test -e native` succeeds (see `DEVELOPMENT_LOG.md`) |
-| The pure core compiles for the ARM target | VERIFIED | `arm-none-eabi-g++ -fsyntax-only` over all `lib/evcore/src` headers, no warnings |
+| The pure core compiles for the ARM target | VERIFIED | `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only` over all `lib/evcore/src` headers: exit 0. The only diagnostics are the expected `#pragma once in main file` artifacts of checking headers standalone (one per header); any other diagnostic is a real warning to investigate. |
 
 ## Rule source
 

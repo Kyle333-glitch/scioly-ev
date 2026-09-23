@@ -16,6 +16,15 @@
 // fixtures only; they are deliberately not calibration or limit values for any
 // real vehicle.
 
+// Pinned at compile time: provenance is not optional. If any of these types ever
+// gains a default constructor, the contract in SOFTWARE_ARCHITECTURE.md section 7
+// is broken and this test target stops compiling.
+static_assert(!std::is_default_constructible<ev::Sourced<double>>::value,
+              "no silent defaults");
+static_assert(!std::is_default_constructible<ev::VehicleCalibration>::value,
+              "no silent defaults");
+static_assert(!std::is_default_constructible<ev::SafetyLimits>::value, "no silent defaults");
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -46,6 +55,7 @@ ev::SafetyLimits limitsWith(ev::ValueSource source) {
 void expectEffortInvalid(ev::MotorEffortError expected, const ev::MotorEffort& effort) {
     const ev::MotorEffortValidation result = ev::validateMotorEffort(effort);
     TEST_ASSERT_FALSE(result.ok);
+    TEST_ASSERT_TRUE(result.error != ev::MotorEffortError::None);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(result.error));
 }
 
@@ -53,6 +63,7 @@ void expectMotionRequestInvalid(ev::MotionRequestError expected,
                                 const ev::MotionRequest& request) {
     const ev::MotionRequestValidation result = ev::validateMotionRequest(request);
     TEST_ASSERT_FALSE(result.ok);
+    TEST_ASSERT_TRUE(result.error != ev::MotionRequestError::None);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(result.error));
 }
 
@@ -108,10 +119,14 @@ void test_disabled_motor_mode_is_the_safe_zero_value(void) {
 
 void test_motor_effort_magnitude_is_checked_against_full_scale(void) {
     const ev::MotorEffort atFullScale(ev::MotorMode::DriveForward, 1000);
-    TEST_ASSERT_TRUE(ev::validateMotorEffort(atFullScale).ok);
+    const ev::MotorEffortValidation fullScaleResult = ev::validateMotorEffort(atFullScale);
+    TEST_ASSERT_TRUE(fullScaleResult.ok);
+    TEST_ASSERT_TRUE(fullScaleResult.error == ev::MotorEffortError::None);
 
     const ev::MotorEffort atZero(ev::MotorMode::DriveReverse, 0);
-    TEST_ASSERT_TRUE(ev::validateMotorEffort(atZero).ok);
+    const ev::MotorEffortValidation zeroResult = ev::validateMotorEffort(atZero);
+    TEST_ASSERT_TRUE(zeroResult.ok);
+    TEST_ASSERT_TRUE(zeroResult.error == ev::MotorEffortError::None);
 
     expectEffortInvalid(ev::MotorEffortError::MagnitudeOutOfRange,
                         ev::MotorEffort(ev::MotorMode::DriveForward, 1001));
@@ -140,10 +155,15 @@ void test_motor_effort_rejects_an_undefined_mode(void) {
 // --- Motion requests --------------------------------------------------------
 
 void test_motion_request_accepts_positive_distance_and_time(void) {
-    TEST_ASSERT_TRUE(
-        ev::validateMotionRequest(ev::MotionRequest(ev::MotionDirection::Forward, 7.0, 14.0)).ok);
-    TEST_ASSERT_TRUE(
-        ev::validateMotionRequest(ev::MotionRequest(ev::MotionDirection::Reverse, 0.5, 2.0)).ok);
+    const ev::MotionRequestValidation forward =
+        ev::validateMotionRequest(ev::MotionRequest(ev::MotionDirection::Forward, 7.0, 14.0));
+    TEST_ASSERT_TRUE(forward.ok);
+    TEST_ASSERT_TRUE(forward.error == ev::MotionRequestError::None);
+
+    const ev::MotionRequestValidation reverse =
+        ev::validateMotionRequest(ev::MotionRequest(ev::MotionDirection::Reverse, 0.5, 2.0));
+    TEST_ASSERT_TRUE(reverse.ok);
+    TEST_ASSERT_TRUE(reverse.error == ev::MotionRequestError::None);
 }
 
 void test_motion_request_rejects_non_positive_distance_or_time(void) {

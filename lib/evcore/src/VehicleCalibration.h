@@ -2,6 +2,8 @@
 
 #include "Units.h"
 
+#include <type_traits>
+
 namespace ev {
 
 // Properties measured from one specific vehicle. Every value must come from a
@@ -32,5 +34,10 @@ struct VehicleCalibration {
                reverseBrakeOffsetM.isMeasured();
     }
 };
+
+// Pin the provenance contract: a calibration with an unstated source is a
+// compile error, not something to be filled in later.
+static_assert(!std::is_default_constructible<VehicleCalibration>::value,
+              "no silent defaults; every value must be supplied with its source");
 
 }  // namespace ev

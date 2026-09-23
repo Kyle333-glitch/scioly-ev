@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 
 namespace ev {
 
@@ -120,6 +121,11 @@ struct RunConfig {
     double bottleStartDistanceM;  // rule 7.c.ii.(5), from the Start Point
 };
 
+// Pin the geometry contract: an announced run with a missing value is a compile
+// error, not something to be filled in with a default.
+static_assert(!std::is_default_constructible<RunConfig>::value,
+              "no silent defaults; every announced run parameter must be supplied");
+
 enum class ConfigError : uint8_t {
     None = 0,
     NonFiniteValue,              // NaN or infinity
@@ -135,6 +141,7 @@ enum class ConfigError : uint8_t {
 };
 
 struct RunConfigValidation {
+    // Invariant: error == None exactly when ok is true.
     bool ok;
     ConfigError error;
 };
@@ -154,6 +161,15 @@ inline RunConfigValidation validateRunConfig(const RunConfig& config) {
         return {false, ConfigError::InvalidTournamentLevel};
     }
 
+    // Range is checked before the announced grid below. That order only gives
+    // the intended error for legal-but-off-grid values because every range
+    // boundary here (5.00/9.00 m for Target Distance, 1.00/3.00 m for Bottle
+    // Line Distance) is an integer multiple of every level's interval
+    // (0.25/0.10/0.01 m). A boundary that fell off the grid would be reported
+    // as off-interval and falsely rejected as illegal. The test
+    // `test_range_boundaries_sit_on_every_levels_grid` guards this assumption
+    // against a future Rules Correction that changes an interval.
+    //
     // Target Distance (rule 8.h).
     if (config.targetDistanceM < rules2027::kTargetDistanceMinM ||
         config.targetDistanceM > rules2027::kTargetDistanceMaxM) {

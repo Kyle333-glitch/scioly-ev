@@ -2,6 +2,8 @@
 
 #include "Units.h"
 
+#include <type_traits>
+
 namespace ev {
 
 // Ceilings the vehicle must never exceed. Kept separate from
@@ -38,5 +40,11 @@ struct SafetyLimits {
                minBatteryV.isMeasured();
     }
 };
+
+// Pin the provenance contract: a safety ceiling with an unstated source is a
+// compile error. This matters most here, because a guessed limit cannot be
+// distinguished from a measured one at runtime.
+static_assert(!std::is_default_constructible<SafetyLimits>::value,
+              "no silent defaults; every value must be supplied with its source");
 
 }  // namespace ev

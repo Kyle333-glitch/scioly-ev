@@ -53,6 +53,7 @@ enum class MotorEffortError : uint8_t {
 };
 
 struct MotorEffortValidation {
+    // Invariant: error == None exactly when ok is true.
     bool ok;
     MotorEffortError error;
 };
@@ -86,6 +87,10 @@ private:
     // explicit; implemented in a later stage.
     friend class SafetyAuthority;
 
+    // Precondition: the caller must have accepted this effort via
+    // validateMotorEffort() (mode known, magnitude in range, magnitude rules
+    // respected). Enforcing that here is a SafetyAuthority (P2)
+    // responsibility.
     explicit AuthorizedMotorCommand(const MotorEffort& effort)
         : mode_(effort.mode), magnitudePermille_(effort.magnitudePermille) {}
 
@@ -118,6 +123,7 @@ enum class MotionRequestError : uint8_t {
 };
 
 struct MotionRequestValidation {
+    // Invariant: error == None exactly when ok is true.
     bool ok;
     MotionRequestError error;
 };

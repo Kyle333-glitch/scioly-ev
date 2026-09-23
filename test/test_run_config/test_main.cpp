@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 #include <unity.h>
 
@@ -12,6 +13,10 @@
 //   rule 8.i  Target Time 10.0-20.0 s, interval 0.5 s
 //   rule 8.j  Bottle Line Distance 1.00-3.00 m, same interval as Target Distance
 //   rule 7.c.ii.(5)  bottle placed 2.0/3.0/4.0 m from the Start Point by level
+
+// Pinned at compile time: an announced run with a missing field must not be
+// constructible. See SOFTWARE_ARCHITECTURE.md section 7.
+static_assert(!std::is_default_constructible<ev::RunConfig>::value, "no default geometry");
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -33,9 +38,12 @@ ev::RunConfig configFor(ev::TournamentLevel level, double targetDistanceM, doubl
                          ev::bottleStartDistanceM(level));
 }
 
+// Every case, valid or invalid, also pins the documented invariant
+// ok == (error == None).
 void expectValid(const ev::RunConfig& config) {
     const ev::RunConfigValidation result = ev::validateRunConfig(config);
     TEST_ASSERT_TRUE(result.ok);
+    TEST_ASSERT_TRUE(result.error == ev::ConfigError::None);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ConfigError::None),
                           static_cast<int>(result.error));
 }
@@ -43,6 +51,7 @@ void expectValid(const ev::RunConfig& config) {
 void expectInvalid(ev::ConfigError expected, const ev::RunConfig& config) {
     const ev::RunConfigValidation result = ev::validateRunConfig(config);
     TEST_ASSERT_FALSE(result.ok);
+    TEST_ASSERT_TRUE(result.error != ev::ConfigError::None);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(result.error));
 }
 
@@ -181,6 +190,27 @@ void test_announced_bottle_distances_match_the_rules(void) {
     TEST_ASSERT_TRUE(std::fabs(ev::announcedIntervalM(kNational) - 0.01) < 1e-12);
 }
 
+// validateRunConfig checks each range before its announced grid, which is only
+// correct while every range boundary sits on the grid of every level. If a
+// future Rules Correction changes an interval, this fails and legal event
+// supervisor values would start being falsely rejected.
+void test_range_boundaries_sit_on_every_levels_grid(void) {
+    const double distBounds[2] = {ev::rules2027::kTargetDistanceMinM,
+                                  ev::rules2027::kTargetDistanceMaxM};
+    const double lineBounds[2] = {ev::rules2027::kBottleLineDistanceMinM,
+                                  ev::rules2027::kBottleLineDistanceMaxM};
+    const ev::TournamentLevel levels[3] = {kRegional, kState, kNational};
+    for (int li = 0; li < 3; ++li) {
+        const double interval = ev::announcedIntervalM(levels[li]);
+        for (int bi = 0; bi < 2; ++bi) {
+            TEST_ASSERT_TRUE(
+                ev::isOnInterval(distBounds[bi], interval, ev::rules2027::kToleranceM));
+            TEST_ASSERT_TRUE(
+                ev::isOnInterval(lineBounds[bi], interval, ev::rules2027::kToleranceM));
+        }
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_official_range_boundaries_are_accepted);
@@ -196,5 +226,6 @@ int main(int, char**) {
     RUN_TEST(test_finiteness_is_checked_before_everything_else);
     RUN_TEST(test_level_is_checked_before_field_ranges);
     RUN_TEST(test_announced_bottle_distances_match_the_rules);
+    RUN_TEST(test_range_boundaries_sit_on_every_levels_grid);
     return UNITY_END();
 }

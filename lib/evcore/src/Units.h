@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ev {
 
@@ -28,5 +29,11 @@ struct Sourced {
     T value;
     ValueSource source;
 };
+
+// Pin the "no silent defaults" contract at compile time rather than relying on
+// the absence of a default constructor being noticed. A value without a source
+// must be impossible to write, not merely inconvenient.
+static_assert(!std::is_default_constructible<Sourced<double>>::value,
+              "Sourced must never default-construct; unmeasured values must be explicit");
 
 }  // namespace ev

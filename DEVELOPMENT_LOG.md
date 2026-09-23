@@ -177,3 +177,83 @@ has been performed at any point in this project so far.
 
 P2: the arming authority and motor-driver bring-up with the drivetrain
 unloaded, still with the wheel off the floor and conservative effort.
+
+---
+
+## D2 - 2026-09-22 - P1 audit fixes - Compile-time contracts and evidence accuracy
+
+**Why**
+
+An entry-gate audit of the P1 commit (`7693a9f`) found one IMPORTANT and four
+MINOR issues. All five were in the P1 stage boundary: documentation and pure-core
+types. No P2+ behavior was added (no arming logic, no `SafetyAuthority`
+implementation, no state machine).
+
+The IMPORTANT finding was that the "no silent defaults" contract in
+`SOFTWARE_ARCHITECTURE.md` section 7 held only incidentally: it depended on the
+fact that `Sourced<T>` happens to have no default constructor. Nothing failed if
+someone later added one. The MINOR findings were: an undocumented ordering
+assumption in `validateRunConfig()`, an unpinned `ok`/`error` invariant on the
+validation result structs, an undocumented precondition on the
+`AuthorizedMotorCommand` constructor, and an inaccurate evidence row in
+`VERIFIED_STATE.md`.
+
+**Fixes**
+
+1. **IMPORTANT - pinned the provenance contract at compile time.** Added
+   `#include <type_traits>` and a `static_assert(!std::is_default_constructible<...>)`
+   to `Units.h` (`Sourced<double>`), `VehicleCalibration.h`, `SafetyLimits.h` and
+   `RunConfig.h`. A future change that makes any of these default-constructible
+   now fails the build instead of silently weakening the contract. The same
+   assertions are mirrored in `test/test_core_types` and `test/test_run_config`,
+   so a regression stops a host test target from compiling.
+2. **MINOR - documented the range-before-grid ordering.** `validateRunConfig()`
+   reports a range violation before an off-grid violation. That order is only
+   correct because every range boundary (5.00/9.00 m Target Distance,
+   1.00/3.00 m Bottle Line Distance) is an integer multiple of every level's
+   interval (0.25/0.10/0.01 m). The invariant is now stated at the range checks,
+   and `test_range_boundaries_sit_on_every_levels_grid` fails if a future Rules
+   Correction moves an interval so a legal boundary falls off the grid.
+3. **MINOR - pinned the `ok`/`error` invariant.** `RunConfigValidation`,
+   `MotorEffortValidation` and `MotionRequestValidation` now document
+   "error == None exactly when ok is true", and every existing valid/invalid case
+   asserts it through the `expectValid` / `expectInvalid` / `expectEffortInvalid`
+   / `expectMotionRequestInvalid` helpers rather than new tests.
+4. **MINOR - documented the `AuthorizedMotorCommand` precondition.** The private
+   constructor enforces *who* may authorize an effort, not that the effort is
+   valid; that is stated at the constructor as a P2 (`SafetyAuthority`)
+   responsibility. No `SafetyAuthority` code or validation call was added, and
+   the deferred P2 regression test (refusing an out-of-range `MotorEffort`) was
+   deliberately not written now.
+5. **MINOR - corrected an evidence row.** `VERIFIED_STATE.md` claimed the ARM
+   syntax check produced "no warnings". Checking a header standalone necessarily
+   emits one `#pragma once in main file` artifact per header; the row now states
+   the exact expected output and that any other diagnostic is a real warning.
+
+**Evidence (software verification; no physical test is applicable)**
+
+- `pio run` - nano_r4 SUCCESS, RAM 7.8% (2564 / 32768 bytes), Flash 13.0%
+  (34152 / 262144 bytes). Unchanged from D1, as expected: the pure core is still
+  not referenced by `main.cpp`, and no new warnings were produced.
+- `pio test -e native` - 36 test cases, 36 succeeded (was 35; the single new case
+  is `test_range_boundaries_sit_on_every_levels_grid`). Breakdown:
+  `test_interval_timer` 6/6, `test_run_config` 14/14, `test_core_types` 16/16.
+- `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only -Ilib/evcore/src`
+  over all eight `lib/evcore/src` headers: exit 0 for every header. The only
+  diagnostics are the expected `#pragma once in main file` artifacts, one per
+  header. This remains the only check that compiles the pure core, because
+  `main.cpp` does not include it yet.
+- `git diff` reviewed: it touches only the four headers named in fix 1,
+  `Motion.h`, the two test translation units, `VERIFIED_STATE.md` and this file.
+  No unrelated cleanup or reformatting.
+
+**Not verified**
+
+Nothing about the vehicle. These are compile-time and documentation changes
+only, so there is no pending physical test and no hardware behavior is claimed.
+Every hardware fact in `VERIFIED_STATE.md` stays UNVERIFIED.
+
+**Next stage**
+
+Unchanged from D1: P2 is the arming authority and motor-driver bring-up with the
+drivetrain unloaded.
