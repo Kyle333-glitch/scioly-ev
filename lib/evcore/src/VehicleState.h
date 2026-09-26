@@ -4,30 +4,22 @@
 
 namespace ev {
 
-// Run states.
-//
-// This is vocabulary only: no transition logic exists in this stage, and the
-// list may change as the physical design becomes clear (AGENTS.md section 12).
-// SafeDisarmed is intentionally the zero value, so a default-initialized state
-// is the safe one.
-enum class CompetitionState : uint8_t {
-    SafeDisarmed = 0,
-    Ready = 1,
-    ForwardAccel = 2,
-    ForwardCruise = 3,
-    ForwardDecel = 4,
-    BottleApproach = 5,
-    BottlePush = 6,
-    ForwardBrake = 7,
-    Settle = 8,
-    ReverseAccel = 9,
-    ReverseCruise = 10,
-    FinalApproach = 11,
-    FinalBrake = 12,
-    Finished = 13,
-    Fault = 14,
-};
+// Run-state vocabulary lives in exactly one place: `RunPhase` in
+// `CompetitionStateMachine.h`. It replaced the earlier provisional
+// `CompetitionState` list, whose names were explicitly vocabulary-only and were
+// frozen into a real, tested state machine in the run-policy stage. There is no
+// second, competing phase list here: a phase name that exists in two headers is
+// a name that will disagree with itself.
 
+// What went wrong. This is fault *identity* only; the electrical response to a
+// fault is a separate decision (`FaultStopPolicy` in SafetyAuthority.h).
+//
+// Faults raised before the run policy existed are all data/configuration
+// problems. The run policy adds the sequencing faults: a phase that never got
+// its evidence, a reversal that never verified a stop, a run that lost its armed
+// state, and an inconsistent sequencing request. None of these describes a
+// measured electrical condition, so none of them carries an electrical behavior
+// of its own.
 enum class FaultCode : uint8_t {
     // No fault. The value a default-constructed FaultState carries.
     None = 0,
@@ -39,10 +31,24 @@ enum class FaultCode : uint8_t {
     MissingSafetyLimits,
     // A commanded motor effort was invalid.
     InvalidMotorEffort,
+    // A run phase exceeded its configured bound without receiving the evidence
+    // that ends it.
+    PhaseTimeout,
+    // The near-zero stop a reversal depends on was not verified within the
+    // configured reversal timeout.
+    ReversalNotVerified,
+    // The safety authority was disarmed while the run was underway, so nothing
+    // that was still being asked for could be powered.
+    DisarmedDuringRun,
+    // The run policy observed a sequencing inconsistency it must not act on
+    // (a direction change requested that is not a change of direction, or a
+    // reversal requested while one is already being sequenced).
+    RunSequencingError,
 };
 
 // A fault together with when it happened and whether it is latched. Fault
-// handling behavior belongs to a later stage; this stage only carries the data.
+// handling behavior belongs to the safety boundary; this type only carries the
+// data.
 struct FaultState {
     FaultCode code = FaultCode::None;
     bool latched = false;

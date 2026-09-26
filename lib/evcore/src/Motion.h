@@ -30,8 +30,69 @@ inline bool isKnownMotorMode(MotorMode mode) {
     return false;
 }
 
+// True for DriveForward/DriveReverse at any magnitude, including 0.
+// A zero-effort Drive still carries a PoweredDirection and, when
+// authorized, still latches direction in SafetyAuthority. A true
+// non-powered stop is Disabled/Coast/Brake with 0; do not use
+// Drive-with-zero as a stop.
 inline bool isDrivingMode(MotorMode mode) {
     return mode == MotorMode::DriveForward || mode == MotorMode::DriveReverse;
+}
+
+// The coarse electrical-action class a mode belongs to. This is the vocabulary
+// the safety boundary reasons about: whether an action is DISABLED, BRAKE or
+// DRIVE. Direction and effort are meaningful only for a Drive action.
+//
+// Coast is grouped with Disabled here because both remove powered output; the
+// difference between them is a driver detail that is not yet verified
+// (VERIFIED_STATE.md #2), so the safety boundary must not depend on it.
+//
+// A future MotorDriver must NOT switch on this class: it must switch on
+// MotorMode directly so Disabled (outputs off) and Coast (high-Z) stay
+// distinct even though the safety boundary groups them.
+enum class ActuationClass : uint8_t {
+    Disabled = 0,  // no powered output (Disabled or Coast)
+    Brake = 1,     // active braking, no direction, no effort
+    Drive = 2,     // powered drive; direction and effort are meaningful
+};
+
+inline ActuationClass actuationClassOf(MotorMode mode) {
+    switch (mode) {
+        case MotorMode::Disabled:
+        case MotorMode::Coast:
+            return ActuationClass::Disabled;
+        case MotorMode::Brake:
+            return ActuationClass::Brake;
+        case MotorMode::DriveForward:
+        case MotorMode::DriveReverse:
+            return ActuationClass::Drive;
+    }
+    // An unknown mode is never a powered request.
+    return ActuationClass::Disabled;
+}
+
+// Which way the motor is powered. None means no powered output; it is
+// intentionally the zero value so a default-initialized direction is the
+// non-powered one. These are distinct identities, not a scale: order carries
+// no meaning; never compare relationally.
+enum class PoweredDirection : uint8_t {
+    None = 0,
+    Forward = 1,
+    Reverse = 2,
+};
+
+inline PoweredDirection poweredDirectionOf(MotorMode mode) {
+    switch (mode) {
+        case MotorMode::DriveForward:
+            return PoweredDirection::Forward;
+        case MotorMode::DriveReverse:
+            return PoweredDirection::Reverse;
+        case MotorMode::Disabled:
+        case MotorMode::Coast:
+        case MotorMode::Brake:
+            return PoweredDirection::None;
+    }
+    return PoweredDirection::None;
 }
 
 // A requested motor effort before authorization. Magnitude is a fraction of
@@ -80,7 +141,22 @@ inline MotorEffortValidation validateMotorEffort(const MotorEffort& effort) {
 class AuthorizedMotorCommand {
 public:
     MotorMode mode() const { return mode_; }
+
+    // Effective effort, permille of full scale (0-1000). Meaningful only for a
+    // Drive command; every non-Drive command is constructed with magnitude 0.
     uint16_t magnitudePermille() const { return magnitudePermille_; }
+
+    ActuationClass actuationClass() const { return actuationClassOf(mode_); }
+    bool isDisabled() const { return mode_ == MotorMode::Disabled; }
+    bool isCoasting() const { return mode_ == MotorMode::Coast; }
+    bool isBraking() const { return mode_ == MotorMode::Brake; }
+    // True for DriveForward/DriveReverse even when magnitude is 0. A
+    // zero-effort Drive still latches PoweredDirection in SafetyAuthority
+    // and still requires a zero-speed stop to reverse.
+    bool isDriving() const { return isDrivingMode(mode_); }
+
+    // None unless this is a Drive command.
+    PoweredDirection poweredDirection() const { return poweredDirectionOf(mode_); }
 
 private:
     // The authority that may arm the vehicle. Declared here so the boundary is
@@ -103,8 +179,20 @@ enum class MotionDirection : uint8_t {
     Reverse = 1,
 };
 
-// A primitive motion intent for the controller: travel this far, in this
-// direction, within this time budget.
+// VOCABULARY ONLY - no firmware path may consume this type.
+//
+// The single owner of a run's target and time contract is
+// `MotionProfileInputs` together with `MotionTimingIntent`, both in
+// MotionProfile.h: the remaining distance and elapsed time are profile inputs,
+// and Target Time and the intentional delay are timing intent. This struct is a
+// leftover primitive intent that nothing constructs and nothing consumes; it is
+// validated and tested because it exists, not because a run uses it, and its
+// `timeBudgetS` duplicates `MotionTimingIntent::targetTimeS`.
+//
+// Do not wire it into a run without superseding the target/time ownership
+// recorded in SOFTWARE_ARCHITECTURE.md section 13 and logging the change in
+// DEVELOPMENT_LOG.md. When that decision is made, this type should be deleted
+// rather than kept as a second, competing time budget.
 struct MotionRequest {
     constexpr MotionRequest(MotionDirection direction_, double targetDistanceM_,
                             double timeBudgetS_)

@@ -31,8 +31,8 @@ disagree, the code and the rules document win and this table is the bug.
 | Bottle Line interval | 8.j | same interval as Target Distance |
 | Bottle placement | 7.c.ii.(5) | 2.0 m Regional/Invitational, 3.0 m State, 4.0 m National from the Start Point |
 
-Related rules that the firmware does not yet encode, recorded here so they are
-not lost:
+Related rules, recorded here so they are not lost. Where a value is encoded in
+the firmware, the authoritative copy is named; the rest are still unencoded.
 
 | Value | Rule | Official limits |
 |-------|------|-----------------|
@@ -40,7 +40,7 @@ not lost:
 | Vehicle width | 3.e | at most 35.0 cm |
 | Measurement Point height | 8.f.ii | at most 1.0 cm above the track |
 | Start placement tolerance | 4.d.vii.(1) | MP within approximately 1 cm of the Start Point |
-| Complete Stop | 8.p | stationary 3 or more seconds; not part of Run Time |
+| Complete Stop | 8.p | stationary 3 or more seconds; not part of Run Time. Encoded as `ev::rules2027::kCompleteStopS`, which configures how long the run's final stop is held before the run may be complete. |
 | Run Time | 8.o | from actuation to complete stop, recorded in seconds |
 | Event Time | 2.c, 4.d.i.(1) | 8 minutes, at most 2 runs |
 | Battery pack | 3.a, 8.b | at most 8 AA batteries, 1.2-1.5 V each, no lithium or lead |

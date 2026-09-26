@@ -211,6 +211,13 @@ void test_range_boundaries_sit_on_every_levels_grid(void) {
     }
 }
 
+// Rule 8.p: a Complete Stop is the vehicle stationary for 3 or more seconds.
+// The run policy's final-stop dwell is configured from this value rather than
+// from a retyped 3.0 somewhere else, so the rule number is checkable here.
+void test_complete_stop_interval_matches_rule_8_p(void) {
+    TEST_ASSERT_TRUE(std::fabs(ev::rules2027::kCompleteStopS - 3.0) < 1e-12);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_official_range_boundaries_are_accepted);
@@ -227,5 +234,6 @@ int main(int, char**) {
     RUN_TEST(test_level_is_checked_before_field_ranges);
     RUN_TEST(test_announced_bottle_distances_match_the_rules);
     RUN_TEST(test_range_boundaries_sit_on_every_levels_grid);
+    RUN_TEST(test_complete_stop_interval_matches_rule_8_p);
     return UNITY_END();
 }

@@ -207,11 +207,9 @@ void test_odometry_snapshot_carries_its_own_validity(void) {
     TEST_ASSERT_TRUE(valid.valid);
 }
 
-void test_safe_competition_state_is_the_zero_value(void) {
-    TEST_ASSERT_EQUAL_INT(0, static_cast<int>(ev::CompetitionState::SafeDisarmed));
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::CompetitionState::SafeDisarmed),
-                          static_cast<int>(ev::CompetitionState{}));
-}
+// The run's phase vocabulary is a real state machine now, and its safe zero
+// value is pinned in test_competition_state next to that machine; this target
+// no longer keeps a second, competing phase list.
 
 void test_fault_state_defaults_to_no_fault(void) {
     const ev::FaultState fault;
@@ -237,7 +235,6 @@ int main(int, char**) {
     RUN_TEST(test_motion_request_rejects_non_finite_values);
     RUN_TEST(test_sensor_snapshot_reports_whether_it_has_a_battery_reading);
     RUN_TEST(test_odometry_snapshot_carries_its_own_validity);
-    RUN_TEST(test_safe_competition_state_is_the_zero_value);
     RUN_TEST(test_fault_state_defaults_to_no_fault);
     return UNITY_END();
 }

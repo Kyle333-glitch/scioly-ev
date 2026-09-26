@@ -36,4 +36,24 @@ struct Sourced {
 static_assert(!std::is_default_constructible<Sourced<double>>::value,
               "Sourced must never default-construct; unmeasured values must be explicit");
 
+// Whole milliseconds for a duration expressed in seconds.
+//
+// Durations are seconds in the pure core (SOFTWARE_ARCHITECTURE.md section 6)
+// while every elapsed-time comparison happens against a `millis()` reading, so
+// the one conversion between the two belongs in one place instead of being
+// retyped at every timer.
+//
+// A duration that is not a positive number is 0 (no time), never a large
+// interval, and a duration longer than the clock can express is the longest
+// representable interval, never a wrapped short one. A caller that means "no
+// bound" states that with its own configuration, not by passing an infinity to
+// a timer.
+inline uint32_t msFromSeconds(double seconds) {
+    if (!(seconds > 0.0)) {
+        return 0U;
+    }
+    const double ms = seconds * 1000.0;
+    return ms >= 4294967295.0 ? 0xFFFFFFFFu : static_cast<uint32_t>(ms);
+}
+
 }  // namespace ev

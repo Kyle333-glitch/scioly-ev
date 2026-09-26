@@ -47,6 +47,13 @@ constexpr double kBottleStartRegionalM = 2.0;
 constexpr double kBottleStartStateM = 3.0;
 constexpr double kBottleStartNationalM = 4.0;
 
+// Rule 8.p: a Complete Stop is the vehicle stationary for 3 or more seconds.
+// That interval is not part of Run Time, so it is the floor under how long a
+// run's final stop must be held before the run may be called complete. It is a
+// rule value, not a measurement, and the vehicle layer that configures the
+// run policy's stop dwell is where it is applied.
+constexpr double kCompleteStopS = 3.0;
+
 // The rules publish values to 0.01 m and 0.1 s. These tolerances are far below
 // that, so they only absorb decimal floating-point representation error and
 // never accept an off-grid value.
