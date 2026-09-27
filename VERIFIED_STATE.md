@@ -48,6 +48,11 @@ though these were known.
 | 11 | Bottle interaction behavior | UNVERIFIED | none | Recorded runs observing contact, push distance, and outcome |
 | 12 | Benefit of a ground / dead-wheel encoder | UNVERIFIED | none | Measured slip magnitude large enough to justify the added hardware |
 
+The planned interface and the bench procedure that would verify rows #1-#3 are
+recorded in `docs/hardware/motor-driver-drv8874.md`. That file is a plan, not
+evidence: it changes no status in the table above, and the pins it names
+(`src/PinMap.h`) are placeholders.
+
 ## Software and toolchain facts
 
 These are verified by reproducible commands, **not** by physical testing. They
@@ -57,7 +62,26 @@ say nothing about the vehicle.
 |------|--------|----------|
 | `env:nano_r4` firmware builds | VERIFIED | `pio run` succeeds (see `DEVELOPMENT_LOG.md`) |
 | Host logic tests build and run with the `native` environment | VERIFIED | `pio test -e native` succeeds (see `DEVELOPMENT_LOG.md`) |
+| The vehicle-layer runtime shell and the hardware boundary compile and link into the firmware (driver adapter, encoder interrupt, raw inputs, scheduler, tick order, watchdog adapter) | VERIFIED | `pio run` succeeds with `src/` compiled (see `DEVELOPMENT_LOG.md` D13). This is a build fact only. |
+| The watchdog adapter's library links into the firmware image | VERIFIED | `arm-none-eabi-nm` on `firmware.elf` lists the WDT symbols (see `DEVELOPMENT_LOG.md` D13). Linking is **not** evidence that the watchdog starts, counts, refreshes or resets. |
+| Nothing but the driver adapter writes the planned motor pins | VERIFIED | A static search over `src/` for the three planned pin names matches only `src/PinMap.h` and `src/MotorDriver.h` (see `DEVELOPMENT_LOG.md` D13). A search is evidence about the source, not about the hardware. |
 | The pure core compiles for the ARM target | VERIFIED | `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only` over all `lib/evcore/src` headers: exit 0. The only diagnostics are the expected `#pragma once in main file` artifacts of checking headers standalone (one per header); any other diagnostic is a real warning to investigate. |
+| The operator interface and the telemetry consumer compile and link into the firmware (command parser, operator policy, response formatter, telemetry schema/formatter/queue, line transport) | VERIFIED | `pio run` succeeds with `src/` compiled (see `DEVELOPMENT_LOG.md` D14), and the pure modules are covered by host tests (`test_serial_command_parser`, `test_operator_policy`, `test_operator_response`, `test_telemetry_format`, `test_telemetry_queue`). This is a build-and-logic fact only; no host was connected. |
+| No control path depends on the operator interface or the telemetry session, so ignoring or abusing serial cannot change what the chain decides | VERIFIED | `test_serial_independence` runs the same scripted run twice - once with the consumer hierarchy fully driven by a stalled host and a stream of admitted, rejected and refused commands, once without it - and asserts equal tick counts, equal dropped deadlines and an identical per-tick trace of authorization outcome, motor mode and effort; separately that no tick ever produced `AuthorizedDrive`/`AuthorizedClamped`, that the sample lane holds exactly `kTelemetrySampleLaneCapacity` before counting drops, and that every queued-plus-dropped sample is accounted for. This is evidence about the logic, not about a real serial link. |
+
+### Behavior this build depends on
+
+The first two rows are read from the **installed** Renesas core sources this build
+actually compiles, so they are statements about the code the firmware will run
+rather than about a datasheet or an example; the third is about the host test
+build. None of them is a bench observation: how a *real* host drains the port was
+not measured.
+
+| Fact | Status | Evidence |
+|------|--------|----------|
+| On this target `Serial` is USB-CDC, and `_SerialUSB::write(const uint8_t*, size_t)` **blocks** until the host drains the buffer; it also disables the USB interrupt while it waits and returns 0 when no host is connected. `availableForWrite()` does not block. | VERIFIED (source inspection) | `~/.platformio/packages/framework-arduinorenesas-uno/cores/arduino/usb/SerialUSB.cpp`: `write(const uint8_t *buf, size_t size)` loops on `tud_cdc_write_available()` until every byte is sent, with `usbd_int_set(false)` around the loop. `src/SerialTransport.h` therefore gates every write on `availableForWrite()`, as `SOFTWARE_ARCHITECTURE.md` section 9 requires. |
+| The USB-CDC endpoint buffers on this board are 256 bytes each way, with a 64-byte endpoint packet size. | VERIFIED (source inspection) | `~/.platformio/packages/framework-arduinorenesas-uno/variants/NANOR4/tusb_config.h` defines `CFG_TUD_CDC_RX_BUFSIZE` and `CFG_TUD_CDC_TX_BUFSIZE` as `(TUD_OPT_HIGH_SPEED ? 512 : 64) * 4` and `CFG_TUD_CDC_EP_BUFSIZE` as `(TUD_OPT_HIGH_SPEED ? 512 : 64)`. The high-speed branch does not apply here: the variant sets `CFG_TUD_MAX_SPEED` to `OPT_MODE_DEFAULT_SPEED`, which is `0x0000` (`tusb_option.h`), so `TUD_OPT_HIGH_SPEED` falls back to `TUP_RHPORT_HIGHSPEED`, and the RA family is not one of the MCUs that define it as `1` (`tusb_mcu.h`). The result is a small window, which is why a record is dropped rather than waited on. |
+| Unity's double assertions are disabled in this project's test build, so `TEST_ASSERT_EQUAL_DOUBLE` cannot be used and host tests compare doubles with an explicit tolerance and `fabs`. | VERIFIED | The vendored Unity (`Unity/src/unity_internals.h`) defines `UNITY_EXCLUDE_DOUBLE` unless `UNITY_INCLUDE_DOUBLE` is defined, and this project's `unity_config.h` does not define it. |
 
 ## Rule source
 

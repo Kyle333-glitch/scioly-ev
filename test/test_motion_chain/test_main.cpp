@@ -440,6 +440,49 @@ void test_the_two_polarity_encodings_must_agree(void) {
         measuredMode(ev::MotorMode::Brake)));
 }
 
+void test_the_tick_polarity_must_agree_with_the_command_polarity(void) {
+    // The third encoding of the same physical fact (#4): which direction the
+    // decoder's positive tick convention corresponds to. A pair that disagrees
+    // makes the regulator's error term the wrong sign - it would drive away from
+    // its target instead of toward it - and makes the run axis shrink while the
+    // run drives its forward leg.
+    TEST_ASSERT_TRUE(ev::tickPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Forward),
+        profileLimits(ev::MotionDirection::Forward).positiveCommandDirection));
+    TEST_ASSERT_TRUE(ev::tickPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Reverse),
+        profileLimits(ev::MotionDirection::Reverse).positiveCommandDirection));
+
+    TEST_ASSERT_FALSE(ev::tickPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Forward),
+        profileLimits(ev::MotionDirection::Reverse).positiveCommandDirection));
+    TEST_ASSERT_FALSE(ev::tickPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Reverse),
+        profileLimits(ev::MotionDirection::Forward).positiveCommandDirection));
+
+    // Both checks together are exactly "all three encodings name one physical
+    // direction": any single disagreement is refused, however the other two
+    // pair up.
+    const ev::MotionDirection directions[] = {ev::MotionDirection::Forward,
+                                              ev::MotionDirection::Reverse};
+    for (const ev::MotionDirection ticks : directions) {
+        for (const ev::MotionDirection command : directions) {
+            for (const ev::MotionDirection effort : directions) {
+                const ev::MotorMode effortMode = effort == ev::MotionDirection::Forward
+                                                     ? ev::MotorMode::DriveForward
+                                                     : ev::MotorMode::DriveReverse;
+                const bool chainAgrees =
+                    ev::tickPolarityAgrees(measuredDirection(ticks),
+                                           measuredDirection(command)) &&
+                    ev::polarityAgrees(measuredDirection(command), measuredMode(effortMode));
+                TEST_ASSERT_EQUAL_INT(
+                    (ticks == command && command == effort) ? 1 : 0,
+                    chainAgrees ? 1 : 0);
+            }
+        }
+    }
+}
+
 // --- New-run reset -----------------------------------------------------------
 
 void test_a_new_run_resets_every_module_and_never_arms(void) {
@@ -759,6 +802,7 @@ int main(int, char**) {
 
     RUN_TEST(test_the_two_effort_ceilings_are_meant_to_be_equal);
     RUN_TEST(test_the_two_polarity_encodings_must_agree);
+    RUN_TEST(test_the_tick_polarity_must_agree_with_the_command_polarity);
 
     RUN_TEST(test_a_new_run_resets_every_module_and_never_arms);
     RUN_TEST(test_a_new_run_reports_the_fault_it_discards);

@@ -275,10 +275,9 @@ ev::SafetySystemState readySafetyState() {
 }
 
 // The one request the vehicle layer presents for one run command. Travel is a
-// powered request in the direction the command names; every stop command is a
-// non-powered request with its leg tag deliberately dropped, because a
-// deliberate stop has no powered direction. RampDown* is no powered effort at
-// all (a zero-shaped target), Brake* is the active non-powered hold.
+// powered request in the direction the command names; every stop command is the
+// production non-powered mapping (`runStopEffort()`), so this reference request
+// cannot drift from what the firmware presents.
 ev::MotorEffort vehicleEffortFor(ev::RunMotionCommand command) {
     switch (command) {
         case ev::RunMotionCommand::DriveForward:
@@ -287,9 +286,9 @@ ev::MotorEffort vehicleEffortFor(ev::RunMotionCommand command) {
             return ev::MotorEffort(ev::MotorMode::DriveReverse, 300U);
         case ev::RunMotionCommand::BrakeForward:
         case ev::RunMotionCommand::BrakeReverse:
-            return ev::MotorEffort(ev::MotorMode::Brake, 0U);
         case ev::RunMotionCommand::RampDownForward:
         case ev::RunMotionCommand::RampDownReverse:
+            return ev::runStopEffort(command);
         case ev::RunMotionCommand::None:
             return ev::MotorEffort(ev::MotorMode::Disabled, 0U);
     }
@@ -1143,7 +1142,8 @@ void test_a_stop_command_is_a_leg_tag_the_authority_never_reads_as_direction(voi
     // RampDown*/Brake* says which leg the stop belongs to so it cannot be
     // attached to the wrong one - it is not a direction any consumer may act on,
     // and a stop is never "completed" with a drive in the tagged direction. The
-    // reference mapping below is the vehicle layer's obligation, pinned here.
+    // mapping pinned here is the production one (`runStopEffort()`), which is
+    // what the vehicle layer presents.
     const ev::RunMotionCommand stops[] = {
         ev::RunMotionCommand::RampDownForward, ev::RunMotionCommand::RampDownReverse,
         ev::RunMotionCommand::BrakeForward,    ev::RunMotionCommand::BrakeReverse,
@@ -1151,7 +1151,7 @@ void test_a_stop_command_is_a_leg_tag_the_authority_never_reads_as_direction(voi
     for (const ev::RunMotionCommand command : stops) {
         TEST_ASSERT_FALSE(ev::isRunTravelCommand(command));
         TEST_ASSERT_TRUE(ev::isRunStopCommand(command));
-        const ev::MotorEffort effort = vehicleEffortFor(command);
+        const ev::MotorEffort effort = ev::runStopEffort(command);
         TEST_ASSERT_TRUE(ev::validateMotorEffort(effort).ok);
         TEST_ASSERT_FALSE(ev::isDrivingMode(effort.mode));
         TEST_ASSERT_EQUAL_UINT16(0U, effort.magnitudePermille);
@@ -1159,13 +1159,37 @@ void test_a_stop_command_is_a_leg_tag_the_authority_never_reads_as_direction(voi
                               static_cast<int>(ev::poweredDirectionOf(effort.mode)));
     }
 
+    // RampDown* asks for no powered effort at all; Brake* is the active
+    // non-powered hold. Both drop the leg tag.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::RampDownForward).mode));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::RampDownReverse).mode));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Brake),
+                          static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::BrakeForward).mode));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Brake),
+                          static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::BrakeReverse).mode));
+
+    // A command that is not a stop command fails closed to no powered effort, so
+    // a caller bug cannot turn a travel command into a second, competing stop.
+    const ev::RunMotionCommand notStops[] = {ev::RunMotionCommand::None,
+                                             ev::RunMotionCommand::DriveForward,
+                                             ev::RunMotionCommand::DriveReverse};
+    for (const ev::RunMotionCommand command : notStops) {
+        const ev::MotorEffort effort = ev::runStopEffort(command);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                              static_cast<int>(effort.mode));
+        TEST_ASSERT_EQUAL_UINT16(0U, effort.magnitudePermille);
+    }
+
     // The two brake tags are indistinguishable to the authority: both present
     // the same non-powered hold, so no leg tag can become a direction.
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(vehicleEffortFor(ev::RunMotionCommand::BrakeForward).mode),
-                          static_cast<int>(vehicleEffortFor(ev::RunMotionCommand::BrakeReverse).mode));
     TEST_ASSERT_EQUAL_INT(
-        static_cast<int>(vehicleEffortFor(ev::RunMotionCommand::RampDownForward).mode),
-        static_cast<int>(vehicleEffortFor(ev::RunMotionCommand::RampDownReverse).mode));
+        static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::BrakeForward).mode),
+        static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::BrakeReverse).mode));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::RampDownForward).mode),
+        static_cast<int>(ev::runStopEffort(ev::RunMotionCommand::RampDownReverse).mode));
 
     // Travel commands do carry the powered direction they name, so the tag
     // dropping above is specific to stops rather than a lost direction.
@@ -1177,6 +1201,33 @@ void test_a_stop_command_is_a_leg_tag_the_authority_never_reads_as_direction(voi
         static_cast<int>(ev::PoweredDirection::Reverse),
         static_cast<int>(ev::poweredDirectionOf(
             vehicleEffortFor(ev::RunMotionCommand::DriveReverse).mode)));
+}
+
+void test_the_run_leg_is_the_leg_the_command_names(void) {
+    // Travel names the leg it travels; a stop names the leg it belongs to. This
+    // is the leg-tag interpretation the run axis and the along-leg gate consume,
+    // and it is a leg - never a powered direction. `None` names no leg at all: a
+    // caller keeps the leg it had, which is why the answer for `None` is not to
+    // be applied.
+    TEST_ASSERT_TRUE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::DriveForward));
+    TEST_ASSERT_TRUE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::RampDownForward));
+    TEST_ASSERT_TRUE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::BrakeForward));
+    TEST_ASSERT_FALSE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::DriveReverse));
+    TEST_ASSERT_FALSE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::RampDownReverse));
+    TEST_ASSERT_FALSE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::BrakeReverse));
+    TEST_ASSERT_FALSE(ev::runCommandNamesForwardLeg(ev::RunMotionCommand::None));
+
+    // The two mappings agree with each other and with the command vocabulary: a
+    // stop is a stop and a travel is a travel, so the leg tag is never the only
+    // thing a consumer has to go on.
+    const ev::RunMotionCommand allCommands[] = {
+        ev::RunMotionCommand::DriveForward, ev::RunMotionCommand::DriveReverse,
+        ev::RunMotionCommand::RampDownForward, ev::RunMotionCommand::RampDownReverse,
+        ev::RunMotionCommand::BrakeForward, ev::RunMotionCommand::BrakeReverse};
+    for (const ev::RunMotionCommand command : allCommands) {
+        TEST_ASSERT_EQUAL_INT(ev::isRunTravelCommand(command) ? 1 : 0,
+                              ev::isRunStopCommand(command) ? 0 : 1);
+    }
 }
 
 void test_the_authority_refuses_a_direct_reverse_independently(void) {
@@ -1358,6 +1409,7 @@ int main(int, char**) {
     RUN_TEST(test_only_an_underway_run_requires_the_armed_state);
     RUN_TEST(test_an_intention_is_current_only_for_its_own_cycle);
     RUN_TEST(test_a_stop_command_is_a_leg_tag_the_authority_never_reads_as_direction);
+    RUN_TEST(test_the_run_leg_is_the_leg_the_command_names);
     RUN_TEST(test_the_authority_refuses_a_direct_reverse_independently);
     RUN_TEST(test_the_run_and_the_authority_never_flip_direction_without_a_verified_stop);
     RUN_TEST(test_reversal_refusals_map_to_faults);

@@ -698,6 +698,40 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
                                 accelCeilingMps, decelCeilingMps};
 }
 
+// Whether a shaped target points along the run's commanded leg.
+//
+// The profile ramps a commanded reversal to zero before it flips the sign
+// (`DirectionChangeHold`), so the travel command that opens a new leg can be
+// shaped at a small target still on the *previous* direction's side. Handing that
+// target to the regulator makes it compute a powered effort in the direction the
+// run has just stopped travelling in - and after a verified stop the authority
+// has no latch left to refuse it with, because the stop that earned the reversal
+// is exactly what cleared that latch. This is the single verdict a consumer uses
+// to present a travel request as powered only once the shape agrees with the leg
+// it is for; while it is false the consumer presents its own unpowered output.
+//
+// A zero target asks for no powered motion and is always along the leg. A
+// non-finite target is not something this module produces (a refusal shapes
+// exactly zero), so it is refused here rather than being given a sign.
+//
+// This answers the shape's direction and nothing else: whether a request may be
+// presented at all also requires a current run intention
+// (`runIntentionIsCurrentFor()`) and fresh position data, and those verdicts are
+// owned elsewhere (SOFTWARE_ARCHITECTURE.md section 13).
+inline bool targetVelocityPointsAlongLeg(const MotionProfileCommand& shaped,
+                                         MotionDirection leg,
+                                         const MotionProfileLimits& limits) {
+    if (!std::isfinite(shaped.targetVelocityMps)) {
+        return false;
+    }
+    if (shaped.targetVelocityMps == 0.0) {
+        return true;
+    }
+    const bool positive = shaped.targetVelocityMps > 0.0;
+    const bool positiveAlongLeg = leg == limits.positiveCommandDirection.value;
+    return positive == positiveAlongLeg;
+}
+
 // Pin the "no silent answer" contracts and the safe zero values.
 static_assert(!std::is_default_constructible<MotionProfileCommand>::value,
               "a profile command must never default-construct into a shaped target");

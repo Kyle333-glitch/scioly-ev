@@ -142,6 +142,30 @@ inline bool polarityAgrees(const Sourced<MotionDirection>& profilePositiveComman
     return poweredDirectionOf(controllerPositiveEffortMode.value) == profileDirection;
 }
 
+// The third encoding of the one physical polarity fact: which direction the
+// decoder's positive tick convention corresponds to. `polarityAgrees()` above
+// ties the command sign to the powered effort; this ties the measured sign to the
+// command sign, and together the three must name one physical direction.
+//
+// The pairing matters because the regulator forms `target - measured` and demands
+// effort from that error: a positive command sign must therefore mean the same
+// physical direction as a positive measured speed, or the loop's error has the
+// wrong sign and it drives away from its target instead of toward it - positive
+// feedback, with no per-module validation able to see it. The run axis makes the
+// same requirement from the other side: a run travelling its forward leg must see
+// its position grow (`RunAxis.h`), which holds exactly when positive ticks are
+// forward travel.
+//
+// The comparison is over the physical directions the two values name, never over
+// their numeric values. Provenance is validated elsewhere -
+// `validateMotionProfileLimits()` for the command direction, and the run-axis
+// layer's own refusal for the tick direction - so this is the semantic agreement
+// only, and it is a configuration-build check, not a runtime clamp.
+inline bool tickPolarityAgrees(const Sourced<MotionDirection>& positiveTicksDirection,
+                               const Sourced<MotionDirection>& profilePositiveCommandDirection) {
+    return positiveTicksDirection.value == profilePositiveCommandDirection.value;
+}
+
 // Pin the provenance contract: a safety ceiling with an unstated source is a
 // compile error. This matters most here, because a guessed limit cannot be
 // distinguished from a measured one at runtime.

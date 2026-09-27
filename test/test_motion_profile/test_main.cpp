@@ -124,6 +124,14 @@ void expectSummary(double expectedTravelS, double expectedTotalS, double expecte
     TEST_ASSERT_TRUE(std::fabs(summary.marginS - expectedMarginS) <= kDurationToleranceS);
 }
 
+// A shaped command with a stated target, for testing the along-leg gate on its
+// own. Its ceilings play no part in the gate.
+ev::MotionProfileCommand commandAt(double targetVelocityMps) {
+    return ev::MotionProfileCommand(targetVelocityMps, ev::MotionProfileStatus::Ok,
+                                    ev::MotionProfilePhase::Cruising,
+                                    ev::MotionProfileLimit::CruiseCeiling, 2.0, 2.0, 2.0, 2.0);
+}
+
 }  // namespace
 
 // --- Shaping limits ---------------------------------------------------------
@@ -830,6 +838,76 @@ void test_the_target_never_exceeds_the_ceilings_or_flips_itself(void) {
     }
 }
 
+// --- The along-leg gate -------------------------------------------------------
+
+void test_a_shaped_target_points_along_the_leg_it_is_for(void) {
+    // The fixture polarity: a positive command sign means forward travel.
+    const ev::MotionProfileLimits limits = fixtureLimits();
+
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(commandAt(0.5),
+                                                      ev::MotionDirection::Forward, limits));
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(commandAt(-0.5),
+                                                       ev::MotionDirection::Forward, limits));
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(commandAt(-0.5),
+                                                      ev::MotionDirection::Reverse, limits));
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(commandAt(0.5),
+                                                       ev::MotionDirection::Reverse, limits));
+
+    // A zero target asks for no powered motion, so it is along any leg.
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(commandAt(0.0),
+                                                      ev::MotionDirection::Forward, limits));
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(commandAt(0.0),
+                                                      ev::MotionDirection::Reverse, limits));
+
+    // A non-finite target is not something the shaper produces (a refusal shapes
+    // zero), so it is refused rather than given a sign.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(commandAt(nan),
+                                                       ev::MotionDirection::Forward, limits));
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(commandAt(inf),
+                                                       ev::MotionDirection::Forward, limits));
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(commandAt(-inf),
+                                                       ev::MotionDirection::Reverse, limits));
+}
+
+void test_a_reversal_in_progress_does_not_point_along_the_new_leg(void) {
+    // This is the case the gate exists for. A travel for the reverse leg arrives
+    // while the target is still ramping down from the forward leg: the profile
+    // reports DirectionChangeHold and the shaped target is still positive, so
+    // presenting it as powered for the reverse leg would ask for effort in the
+    // direction the run has just left.
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const ev::MotionProfileCommand holding = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                1.0, 100U),
+        limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::DirectionChangeHold),
+                          static_cast<int>(holding.status));
+    TEST_ASSERT_TRUE(holding.targetVelocityMps > 0.0);
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(holding, ev::MotionDirection::Reverse, limits));
+    // The same shape is still along the leg it is finishing, which is why the
+    // gate is about the leg the run asked for and not about "moving".
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(holding, ev::MotionDirection::Forward, limits));
+
+    // Reaching zero is what lets the sign change, and a zero target is along any
+    // leg; the step after it carries the new sign and is along the new leg.
+    const ev::MotionProfileCommand zeroed = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                0.01, 100U),
+        limits);
+    TEST_ASSERT_TRUE(zeroed.targetVelocityMps == 0.0);
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(zeroed, ev::MotionDirection::Reverse, limits));
+
+    const ev::MotionProfileCommand rising = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                0.0, 20U),
+        limits);
+    TEST_ASSERT_TRUE(rising.targetVelocityMps < 0.0);
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(rising, ev::MotionDirection::Reverse, limits));
+    TEST_ASSERT_FALSE(ev::targetVelocityPointsAlongLeg(rising, ev::MotionDirection::Forward, limits));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -866,6 +944,9 @@ int main(int, char**) {
     RUN_TEST(test_the_directional_limits_are_selected_by_direction);
 
     RUN_TEST(test_the_target_never_exceeds_the_ceilings_or_flips_itself);
+
+    RUN_TEST(test_a_shaped_target_points_along_the_leg_it_is_for);
+    RUN_TEST(test_a_reversal_in_progress_does_not_point_along_the_new_leg);
 
     return UNITY_END();
 }

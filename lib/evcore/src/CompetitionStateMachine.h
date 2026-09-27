@@ -186,6 +186,61 @@ inline bool isRunStopCommand(RunMotionCommand command) {
     return false;
 }
 
+// The leg a run command names: a travel command names the leg it travels, and a
+// stop command names the leg the stop belongs to (`RampDownForward` and
+// `BrakeForward` both name the forward leg, and so on). `None` names no leg at
+// all - the caller keeps the leg it had - which is why this returns false for it
+// and why a caller must not apply the answer for `None`.
+//
+// This is the leg-tag interpretation and nothing more. It is never a powered
+// direction: a stop has none, and a caller that turned this into a
+// `PoweredDirection` would be deriving motion from a tag
+// (SOFTWARE_ARCHITECTURE.md section 14). The run's own leg is the leg its current
+// command names, so this is the one mapping every consumer uses.
+inline bool runCommandNamesForwardLeg(RunMotionCommand command) {
+    switch (command) {
+        case RunMotionCommand::DriveForward:
+        case RunMotionCommand::RampDownForward:
+        case RunMotionCommand::BrakeForward:
+            return true;
+        case RunMotionCommand::DriveReverse:
+        case RunMotionCommand::RampDownReverse:
+        case RunMotionCommand::BrakeReverse:
+            return false;
+        case RunMotionCommand::None:
+            break;
+    }
+    return false;
+}
+
+// The non-powered request a run stop command maps to, so every consumer maps the
+// stop vocabulary the same way:
+//
+//   RampDown*  -> Disabled: the profile's own target is what ramps the travel to
+//                 zero, and this request asks for no powered effort at all
+//   Brake*     -> Brake: the deliberate non-powered hold
+//
+// The leg tag is dropped here, exactly as it must be: a stop has no powered
+// direction, and neither mode above carries one. A command that is not a stop
+// command maps to `Disabled` with zero effort - fail closed rather than inventing
+// a stop - so a caller bug cannot turn a travel command into a second, competing
+// request.
+inline MotorEffort runStopEffort(RunMotionCommand command) {
+    switch (command) {
+        case RunMotionCommand::RampDownForward:
+        case RunMotionCommand::RampDownReverse:
+            return MotorEffort(MotorMode::Disabled, 0U);
+        case RunMotionCommand::BrakeForward:
+        case RunMotionCommand::BrakeReverse:
+            return MotorEffort(MotorMode::Brake, 0U);
+        case RunMotionCommand::None:
+        case RunMotionCommand::DriveForward:
+        case RunMotionCommand::DriveReverse:
+            break;
+    }
+    return MotorEffort(MotorMode::Disabled, 0U);
+}
+
 // One cycle's intent, stamped with the clock reading that produced it.
 struct RunMotionIntention {
     constexpr RunMotionIntention(RunMotionCommand command_, uint32_t emittedAtMs_)

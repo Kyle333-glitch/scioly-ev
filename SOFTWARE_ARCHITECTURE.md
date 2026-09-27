@@ -130,18 +130,61 @@ These invariants are frozen and are not negotiable for convenience:
 
 ## 9. Telemetry contract
 
-- Telemetry is machine-readable and emitted in a form that does not disturb
-  timing-sensitive behavior.
-- Serial logging is never performed inside an interrupt handler.
-- Serial output is not flooded so heavily that it changes control-loop timing.
+Telemetry is a **consumer** of the control loop, never a participant in it.
+
+- **Machine-readable, one line per record.** `ev::TelemetryFormat`
+  (`lib/evcore/src/TelemetryFormat.h`) writes each record as `key=value` fields
+  separated by `,` and nothing else: no prose, no indentation, no partial records.
+  The schema that freezes the prefixes, the field set and the spelling of every
+  enumerated value is `ev::TelemetryRecord`
+  (`lib/evcore/src/TelemetryRecord.h`), versioned by
+  `ev::kTelemetrySchemaVersion`: `EVS<version>` is one control tick, `EVE<version>`
+  a transition or an operator action.
+- **All or nothing.** A record that does not fit the line buffer is not emitted as
+  a shortened line - truncation would eat exactly the tail fields a post-mortem
+  needs (the fault, the authorization outcome, the failing check, the drop
+  counters). It is dropped and counted instead.
+- **Drops, never waits.** `ev::TelemetryQueue` (`lib/evcore/src/TelemetryQueue.h`)
+  holds two fixed lanes, samples and events, drops the newest record when a lane is
+  full, and stamps every drop count into the records that do go out, so a log says
+  whether it is complete. Losing a sample costs one row of a trace; losing an event
+  costs a transition, which is why the lanes are separate and why events drain
+  first.
+- **Nothing in the transport may block.** Serial output goes through
+  `src/SerialTransport.h`, which stages one line and writes only what the port
+  reports room for. On this target `Serial` is USB-CDC and its `write()` waits for
+  the host, so a bare `Serial.print()` of a record would hand the control loop's
+  schedule to whoever is - or is not - reading the port. No formatter, and no other
+  module, may write to it.
+- **Never inside an interrupt, and never in the tick's timing budget.** The encoder
+  ISR calls the pure decoder and nothing else; serial work happens in the loop,
+  after the watchdog checkpoint.
+- **Not flooded.** A sample is taken every control tick by default, and
+  `telemetry rate <hz>` throttles it by a whole number of ticks; a host that cannot
+  keep up is what the drop counters are for.
+- **Disabling it changes nothing else.** `telemetry off` stops the producer and
+  empties the lanes. The control path never reads the session, so no vehicle
+  behavior depends on it (section 16, and the `test_serial_independence` scenario
+  that pins it).
 
 ## 10. Deliberately undecided
 
 The following are **not** decided and must not be pre-built or guessed. They
 depend on facts tracked in `VERIFIED_STATE.md`:
 
-- fixed hardware configuration: pin assignments, wiring, logic levels;
-- the motor driver interface, its truth table, and how `MotorMode` maps onto it;
+- fixed hardware configuration: pin assignments, wiring, logic levels. The
+  centralized provisional map in `src/PinMap.h` is a placeholder set, not a
+  wiring record: it is chosen against the installed framework's own pin table for
+  the capability each role needs, it is UNVERIFIED (`VERIFIED_STATE.md` #1), and
+  section 15 fixes what it may and may not be used for;
+- the motor driver's *electrical* behavior and truth table. What is now decided
+  is narrower: a **planned** input mapping exists in one place,
+  `ev::drv8874InputsFor()` (`lib/evcore/src/MotorDriverPlan.h`), implemented by the
+  one adapter allowed to write the pins (`src/MotorDriver.h`), and recorded with
+  its bench tests in `docs/hardware/motor-driver-drv8874.md`. Every level
+  combination in it is UNVERIFIED (`VERIFIED_STATE.md` #1-#3), it is derived from
+  a planned PH/EN interface rather than from a measurement, and it may not be
+  cited as a driver fact; section 15 fixes the ownership rule;
 - encoder interpretation beyond the decoding scheme fixed in section 11:
   counts per revolution, gearing, and which count direction is physical forward
   travel;
@@ -164,7 +207,11 @@ depend on facts tracked in `VERIFIED_STATE.md`:
   a contact or a finished push is detected, and whether the mechanism can detect
   one at all, depends on the bottle-pushing mechanism that does not exist yet
   (`VERIFIED_STATE.md` #11);
-- telemetry schema;
+- any *future* addition to the telemetry schema, the command vocabulary or the
+  response vocabulary. Schema version 1 and the command set are frozen in sections
+  9 and 16; adding a field, a command or an event is a deliberate change that
+  records itself in `DEVELOPMENT_LOG.md`, and renaming a field or an event is a
+  schema change that bumps `ev::kTelemetrySchemaVersion`, not a refactor;
 - whether any additional sensing (ground/dead-wheel encoder, IMU) is justified.
 
 Adding any of these requires either verified evidence or an explicit statement
@@ -221,24 +268,60 @@ that the value is an unverified, configurable placeholder.
 - Tick differences are formed in 64 bits before conversion, so a full-range
   int32 reading pair cannot be undefined behaviour, and an unusable or
   overflowing conversion fails closed instead of reporting an infinity.
-- Where a position is needed, the run origin is an argument
-  (`originPositionM`, in metres), never a constant or a hidden global.
-- `positionFromOriginM()` adds a caller-supplied run-axis (physical) origin to
-  travel that inherits the encoder's tick-counting convention. The
-  reconciliation between the two conventions is the vehicle layer's and must be
-  applied once, through the measured polarity fact; no module in `lib/` applies
-  or invents a polarity. Until that fact is measured, a physical origin must not
-  be combined with tick-derived travel, and the forward and reverse legs of a
-  run must not mix the two conventions (`remainingDistanceM` in MotionProfile.h
-  carries the same warning from the other side).
+- Where a position is needed, the run origin is an argument, never a constant or
+  a hidden global. `positionFromOriginM()` takes a caller-supplied run-axis
+  (physical) origin in metres; the run axis below takes the *tick reading* the
+  run started at instead, because its axis zero is the Start Point by the
+  event's definition and a second, caller-supplied axis origin would be a second
+  convention for the same axis.
+- `positionFromOriginM()` adds a physical origin to travel that inherits the
+  encoder's tick-counting convention. That reconciliation is owned by
+  `RunAxis.h` below and applied in exactly one place; until the polarity fact is
+  measured, a physical origin must not be combined with tick-derived travel, and
+  the forward and reverse legs of a run must not mix the two conventions
+  (`remainingDistanceM` in MotionProfile.h carries the same warning from the
+  other side).
+- **The run axis has one owner.** `ev::RunAxisGeometry`, `ev::runAxisPositionM()`,
+  `ev::remainingToTargetM()` and `ev::legRemainingM()` in
+  `lib/evcore/src/RunAxis.h` are the production owner of the competition
+  geometry and of where the vehicle is on it:
+  - `RunAxisGeometry::fromRunConfig()` is the one mapping from the announced
+    `RunConfig` to the axis: the Target Point position (rule 8.h), the Bottle
+    Line Distance (rule 8.j) and the Bottle Start Point (rule 7.c.ii.(5)), with
+    the turn-around position as the Target Point plus the Bottle Line Distance.
+    The state machine deliberately stores no geometry, so the run layer has to
+    hold it, and holding it without an owner is how two places start disagreeing
+    about which end of the axis the turn-around is.
+  - `runAxisPositionM()` applies the measured tick-sign polarity **once**, to the
+    travel rather than to a position, so an origin that is not zero cannot invert
+    the sign. Its `RunAxisStatus` separates the two refusals - no tick travel at
+    all, and a tick-sign polarity that is not `Measured` - and the run layer
+    combines its own `usable` with `odometryReadiness()` into the one position
+    verdict it hands to the boundary and the run policy. A placeholder polarity
+    still reports a diagnostic number under the placeholder sign, exactly like a
+    `Provisional` scale, and may not reach control.
+  - `remainingToTargetM()` is signed and deliberately unclamped (an overshoot is
+    evidence, not something to hide from a log), while `legRemainingM()` is the
+    travel taper's distance and is never negative. Both take the leg as an
+    argument and are computed from the leg the run named in the previous cycle,
+    which is the leg whose distance the run consumes this cycle; neither decides
+    that a position was reached and neither stops anything.
 - Sample age is computed once, by `ev::sampleAge()` in `Snapshots.h`:
   `ageMs = nowMs - sampleMs` with unsigned subtraction, fresh up to a
   caller-supplied `maxAgeMs` inclusive, so a stamp from the future is never
   fresh. No staleness timeout lives in `lib/`: none has been measured.
 - `ev::odometryReadiness()` is the single place that combines sample existence,
-  estimate validity and freshness into one verdict. Motion and safety consume
-  that verdict - mapped onto `SafetySystemState::requiredDataFresh` - instead of
-  re-deriving it from the raw pieces.
+  estimate validity and freshness into one verdict; `RunAxis.h` above owns the
+  conversion's own usability verdict, and the run layer combines the two into the
+  position verdict it acts on. Motion and safety consume that combined verdict -
+  mapped onto `SafetySystemState::requiredDataFresh` - instead of re-deriving it
+  from the raw pieces. It is deliberately the *position* verdict
+  that gates that field: a stationary vehicle's speed evidence is the estimator's
+  explicit zero-speed claim, whose `valid` is false by design, so gating
+  `requiredDataFresh` on `velocityReadiness().usable` would make a restart from a
+  verified stop impossible. The speed verdict belongs to the regulator's
+  `measurementUsable` argument (section 13). Reason recorded in
+  `DEVELOPMENT_LOG.md` (D11).
 - `OdometrySnapshot::velocityMps` is deliberately unfilled: this layer owns no
   velocity arithmetic. Speed is owned by `VelocityEstimate` and
   `velocityReadiness()` (section 13); no consumer may copy a velocity into the
@@ -382,6 +465,16 @@ another's, and none is a run state machine.
   `ev::NearZeroVerifier`, which combines exactly those three facts, reports which
   of them held, and is earned only over a continuous dwell. `lib/` still does not
   write the safety field: the vehicle layer maps the verdict onto it.
+  Those three facts do not arrive in one estimator answer: a window-derived
+  number never carries the claim and the claim never carries a number. Their
+  pairing is itself production: `ev::composeStopEvidence()` composes the packet
+  from the current cycle's claim (accepted only within the control path's own
+  staleness limit) and the last window-derived estimate (aged against the
+  packet's own, longer limit), and `ev::stopEvidenceLimitSpansDwell()` is the
+  configuration-build check that refuses a limit shorter than the stop dwell
+  before the chain is armed. Without that check the run would arm into a stop it
+  could only time out waiting for. Reason recorded in `DEVELOPMENT_LOG.md`
+  (D11, D12); pinned by `test_near_zero_verifier` and `test/test_scenario/`.
 - **The two effort ceilings must be equal.**
   `VelocityControllerConfig::maxEffortPermille` is derived from
   `SafetyLimits::maxEffortPermille`, and `ev::effortCeilingsAgree()` is the
@@ -391,7 +484,7 @@ another's, and none is a run state machine.
   `outputSaturated == false` in one log and `AuthorizedClamped` in another, and
   would integrate headroom the regulator does not have. The authority still
   clamps independently as defence in depth.
-- **The two polarity encodings must agree.**
+- **The three polarity encodings must agree.**
   `MotionProfileLimits::positiveCommandDirection` and
   `VelocityControllerConfig::positiveEffortMode` are the same UNVERIFIED
   physical fact (`VERIFIED_STATE.md` #4) written in two vocabularies, and
@@ -404,6 +497,35 @@ another's, and none is a run state machine.
   than a runtime clamp - like `effortCeilingsAgree()`, and for the same reason:
   one recorded verdict the vehicle layer can refuse to arm on, instead of an
   assumption each module makes about the other.
+- **The measured tick sign is the third encoding of that same fact.** Which
+  direction the decoder's positive count corresponds to is a separate
+  measurement from the two command-sign encodings, and `ev::tickPolarityAgrees()`
+  ties it to `MotionProfileLimits::positiveCommandDirection`. It matters from
+  both sides: the regulator forms `target - measured`, so a positive command
+  sign that means the opposite physical direction from a positive measured speed
+  has the loop's error sign inverted - positive feedback, with no per-module
+  validation able to see it - and a run travelling its forward leg must see its
+  position grow (`RunAxis.h`), which holds exactly when positive ticks are
+  forward travel. All three encodings must name one physical direction before
+  the chain may be armed; the check is a configuration-build fact, not a runtime
+  clamp, and the run-axis conversion refuses separately to produce a usable
+  position under a placeholder tick sign.
+- **A travel request is presented as powered only while the shape points along
+  the commanded leg.** `MotionProfile` ramps a commanded reversal to zero before
+  it flips the sign (`MotionProfileStatus::DirectionChangeHold`), so the travel
+  command that opens the next leg can be shaped at a small target still on the
+  *previous* direction's side. Handing that target to the regulator makes it
+  compute a powered effort in the direction the run has just stopped travelling
+  in - and after a verified stop the authority has no latch left to refuse it
+  with, because the stop that earned the reversal is exactly what cleared that
+  latch. The verdict is production: `ev::targetVelocityPointsAlongLeg()`
+  (`lib/evcore/src/MotionProfile.h`) answers it from the shaped target, the leg
+  being travelled and the direction's own limits, treating a zero target as
+  along the leg and a non-finite one as not. The vehicle layer must present its
+  own unpowered output while it is false, and present the regulator's effort
+  only once it is true. An addition to the obligations recorded in D10; found by
+  the P6 scripted scenarios (`test/test_scenario/`), which pin it as a
+  whole-trace property. Reason recorded in `DEVELOPMENT_LOG.md` (D11, D12).
 - **One authority, two request sources, no arbiter yet.** A run will present
   two kinds of request to `SafetyAuthority::authorize()`: the regulator's
   `MotorEffort` and the run layer's own deliberate Brake/Coast stop. The run
@@ -479,16 +601,16 @@ dwell interval? It combines exactly the three facts the safety contract names -
 - **The run policy consumes evidence and emits intent, nothing else.**
   `RunInputs` carries the armed fact, the start trigger, bottle contact/capture/
   push evidence, the run-axis remaining distance with its own usability, the
-  near-zero evidence packet and any fault the vehicle layer observed. `RunStatus`
+  near-zero evidence packet and any fault the vehicle layer observed.  `RunStatus`
   carries the phase, one `RunMotionCommand`, the fault of record, the
   `stopVerified` verdict, the reversal phase and the time in phase. No phase
   transition derives geometry from the announced `RunConfig`: the announced
   parameters are validated at the announcement boundary (through the single
   entry point, `ev::validateRunConfig()`) and then not stored. Where the vehicle
-  is on the run axis, what the bottle line means for the mechanism and how far
-  the vehicle must travel before a push is complete are run-layer calculations on
-  measured, still-UNVERIFIED facts (#4, #6, #11); the state machine consumes
-  their results as evidence.
+  is on the run axis is owned by `RunAxis.h` (section 12); what the bottle line
+  means for the mechanism and how far the vehicle must travel before a push is
+  complete remain run-layer calculations on measured, still-UNVERIFIED facts
+  (#11); the state machine consumes their results as evidence.
 - **Every bound is an input.** `RunPhaseConfig` supplies each phase timeout, the
   optional delay, the final-approach distance and the final-stop verification as
   `Sourced` values, and an unusable one refuses the announcement instead of
@@ -524,12 +646,19 @@ dwell interval? It combines exactly the three facts the safety contract names -
 - **A stop command is a leg tag, not a direction.** `RunMotionCommand::
   BrakeForward`/`BrakeReverse` - and `RampDownForward`/`RampDownReverse` - name
   which leg the stop belongs to, never a powered direction: a deliberate
-  non-powered stop has none. The vehicle layer maps every stop command onto a
-  non-powered request (a zero-shaped target for the profile, a non-Driving mode
-  with zero effort for the authority) and must never derive a
-  `PoweredDirection` from the tag. The tag is invisible to `SafetyAuthority`,
-  which refuses a direct flip independently, and a stop is never "completed"
-  with a drive in the tagged direction.
+  non-powered stop has none. Both readings of that vocabulary are production and
+  live beside the commands, in `CompetitionStateMachine.h`:
+  `ev::runCommandNamesForwardLeg()` is the one leg-tag mapping (a travel command
+  names the leg it travels, a stop names the leg it belongs to, and `None` names
+  no leg at all, so a caller must keep the leg it had rather than apply the
+  answer), and `ev::runStopEffort()` maps `RampDown*` to a `Disabled` request and
+  `Brake*` to a `Brake` request - the deliberate non-powered hold - dropping the
+  tag exactly as it must. A command that is not a stop command maps to
+  `Disabled` with zero effort, so a caller bug cannot turn a travel command into
+  a second, competing request. The vehicle layer must never derive a
+  `PoweredDirection` from either reading. The tag is invisible to
+  `SafetyAuthority`, which refuses a direct flip independently, and a stop is
+  never "completed" with a drive in the tagged direction.
 - **The direction handoff presents a stop cycle before asking for reverse.** A
   non-powered stop taken while zero speed is reported is what clears the
   authority's remembered powered direction (section 13), so the run presents its
@@ -557,7 +686,9 @@ dwell interval? It combines exactly the three facts the safety contract names -
   request may be presented to `SafetyAuthority` unless the intention is current
   for that cycle's clock reading. This is recorded as a build-time acceptance
   criterion (`DEVELOPMENT_LOG.md` D10) rather than a check the chain can enforce
-  today.
+  today; the scenario harness exercises it by presenting a held intention of its
+  own (`test/test_scenario/`), which is the only way the gate can be observed at
+  all.
 - **The final stop is the event's Complete Stop.** `FinalBrake` holds a stop and
   waits for the near-zero verdict before `Done`, under `finalStopTimeoutS`; the
   dwell the vehicle layer configures for it is the run's Complete Stop interval
@@ -570,3 +701,204 @@ dwell interval? It combines exactly the three facts the safety contract names -
   inconsistency the policy must not act on. All of them are software conditions
   with no measured electrical answer, so `faultStopPolicyFor()` maps every one to
   `Disable`, exactly like the faults that came before them.
+
+## 15. Runtime, scheduling, and the hardware boundary contract
+
+The vehicle layer now exists in `src/`, and these are its frozen obligations. It
+is the implementation of the wiring obligations sections 12-14 recorded
+(`DEVELOPMENT_LOG.md` D10, D12) and the harness exercised in test form.
+
+- **One control tick, one frozen stage order.** The stage vocabulary and its
+  order are owned by `ev::ControlTickStage` and checked by
+  `ev::ControlTickOrderGuard` (`lib/evcore/src/ControlTickOrder.h`):
+  encoder snapshot, odometry and velocity, sensor snapshot, fault evaluation, run
+  state machine, run motion request, motion control, safety authorization, motor
+  command, telemetry capture. A tick that does not present every stage once, in
+  that order, is reported as violated and is not trusted. The guard is pure
+  bookkeeping; it has no clock and no hardware.
+- **One clock reading per tick.** The runtime reads no clock: the pass is handed
+  the caller's `millis()` reading, and the scheduler's measured `dtMs` is what
+  every module that needs elapsed time receives. No module in the tick may read a
+  clock or use a nominal period.
+- **Scheduling is a decision, never a wait.** `ev::ControlScheduler`
+  (`lib/evcore/src/ControlScheduler.h`) owns the deadline logic: a tick is due when
+  the reading reaches the next deadline (a signed difference of two `uint32`
+  readings, so it is correct across the ~49.7 day wrap), and the cadence re-arms
+  from the tick that actually ran. Missed deadlines are dropped, counted and
+  reported - never caught up with a burst of back-to-back ticks - and the measured
+  `dtMs`, lateness, dropped deadlines, remaining wait and a rewound reading are
+  all reported. A layer that never starts the schedule runs no control tick at
+  all. There is no RTOS, no hardware-timer scheduler, no `delay()`-driven
+  sequencing and no blocking wait anywhere in the pass.
+- **The vehicle layer is the only caller of `authorize()`, once per cycle.** One
+  request is presented per control tick - the regulator's effort, or the run's own
+  deliberate stop through `ev::runStopEffort()`, never both - and the single
+  authorized command is the only thing that reaches the motor driver. A
+  run-originated request must be current for that cycle's reading
+  (`ev::runIntentionIsCurrentFor()`), and a travel request is presented as
+  powered only while the shaped target points along the leg the run named
+  (`ev::targetVelocityPointsAlongLeg()`). Faults are reported to the run policy
+  and the boundary in the same cycle.
+- **The measured data that gates a drive is the position verdict.**
+  `SafetySystemState::requiredDataFresh` is the combined odometry/run-axis
+  position verdict; the speed verdict belongs to the regulator's
+  `measurementUsable` argument (section 13), and `atZeroSpeed` comes from the
+  run's own verified-stop latch (section 14). None of these may be re-derived
+  from a raw piece of evidence in the vehicle layer.
+- **The motor outputs have one writer.** Only `src/MotorDriver.h` may write the
+  planned PH/EN/nSLEEP pins, and the only mapping from a command to input levels
+  is `ev::drv8874InputsFor()` (section 10). No other file may write those pins and
+  no `lib/` code can (`lib/` has no Arduino headers). The driver's de-energized
+  state is reachable without a command - `beginDisabled()` at startup and
+  `failSafe()` for a cycle that is not trustworthy - and neither path can produce
+  powered output. Startup drives the driver de-energized before anything else can
+  ask for motion.
+- **The encoder has exactly one interrupt, and it does one thing.**
+  `src/EncoderInput.cpp` attaches one A-channel CHANGE interrupt whose handler
+  reads two digital pins and calls the pure decoder's `update()`. It performs no
+  serial I/O, no ADC, no state machine, no controller work, no floating point, no
+  allocation and no blocking wait, and it refreshes nothing else in the system.
+  The control cycle reads the count through a snapshot taken with interrupts
+  briefly disabled (PRIMASK saved and restored), so the fields it acts on are one
+  coherent instant; on this core an aligned `int32` read is itself atomic, so the
+  section is about coherence between fields, not about tearing.
+- **Raw inputs stay raw, and an unverified input is not invented into a fault.**
+  The battery, current, nFAULT and trigger inputs are sampled as ADC counts and
+  logic levels and are consumed as such (section 12). Until the wiring and the
+  driver's fault output are measured (`VERIFIED_STATE.md` #1, #2), a raw level
+  does not become a `FaultCode`: it is reported and counted, and the reason it is
+  not interpreted is recorded (`DEVELOPMENT_LOG.md` D13).
+- **The watchdog has one checkpoint and one centralized setting.** Only a
+  main-loop pass that finished - and whose control tick, if one ran, completed in
+  the frozen stage order - may refresh the watchdog. The refresh lives in exactly
+  one place, `src/WatchdogCheckpoint.h`, and is called from exactly one place, the
+  firmware's loop, after the pass returns. Nothing in the control tick, in a
+  module, in the safety boundary, in a telemetry hook or in an interrupt may
+  refresh it: a component that could refresh the watchdog by itself could hide
+  its own hang. A pass that is not refreshable counts as a withheld refresh, so
+  firmware whose control cycle ran wrongly stops feeding the watchdog and the
+  watchdog's reset then returns the vehicle to the de-energized state it boots
+  into. Production enablement is one obvious centralized constant and it is
+  **off**: no watchdog behavior has been observed on this target, and compiling
+  and linking the adapter is not validation of any of it.
+- **The configuration's provenance is the arming refusal.** The vehicle layer's
+  configuration (`src/VehicleConfig.h`) is where cadence policy, provisional
+  placeholders and rule-derived values are kept separate, and
+  `ConfigurationBuildChecks` reports each check the chain must pass before
+  anything may be armed (`effortCeilingsAgree()`, both polarity agreements, the
+  stop-evidence limit spanning both stop dwells, every per-module validation). No
+  single boolean may summarize them: a refused arm must be attributable to the
+  fact that failed. The run's final stop dwell is the rule-derived Complete Stop
+  (rule 8.p); every other value is `Provisional` and stays visible as such.
+- **The operator interface is a consumer of the same chain, and only a consumer.**
+  `serviceSerial()` runs in the loop's low-priority section, after the watchdog
+  checkpoint: it moves staged bytes out, reads received bytes, applies at most one
+  command, answers it, then drains the telemetry queue - in that order, so an
+  operator's answer outranks the log. It owns no control state: the decisions come
+  from `ev::SerialCommandParser` and `ev::OperatorPolicy`, the text from
+  `ev::OperatorResponse`, and the effects go through the chain's own entry points
+  (`announceRun()`, `SafetyAuthority::arm()`/`disarm()`,
+  `ev::resetMotionChainForNewRun()`). No command commands an effort, a mode or a
+  direction, and none starts a run: the start trigger is a physical input. Section
+  16 fixes the contract.
+- **The run boundary is the operator's deliberate decision, and the checks are what
+  refuse it.** `announce` consumes the held configuration through the single
+  rule-validation entry point, and `arm` reads the configuration-build report
+  through `ev::armVerdictFor()` before `SafetyAuthority::arm()` is asked. With the
+  provisional configuration in `src/VehicleConfig.h` every arming intent is refused
+  and is attributable to the first failing check - the intended state of this
+  firmware. Nothing may auto-arm, resume a command after a reset, or treat a
+  placeholder as measured.
+- **A telemetry record is built from the tick's own snapshot.** Stage 10 formats the
+  sample the session is due from the values the tick's stages produced, so a log
+  cannot disagree with the control path about what happened. The record is queued,
+  never written: no formatter and no queue operation touches the port, and a
+  transport may not run inside the tick.
+
+## 16. Operator interface contract
+
+The operator interface is a **consumer** of the chain, like telemetry (section
+9), and its three responsibilities are three separate pure modules with no
+overlap. None of them may hold run-control state, and no control code may read
+any of them.
+
+- **Parsing is one module, and it only decides what the line asked for.**
+  `ev::SerialCommandParser` (`lib/evcore/src/SerialCommandParser.h`) owns the
+  bounded line reader (`ev::CommandLineReader`), the command vocabulary
+  (`ev::OperatorCommandId`), the `config set` field set (`ev::RunConfigFields`)
+  and the one parse entry point, `ev::parseOperatorCommand(line, length)`. A
+  malformed line produces a named `ev::CommandError` and the id `None`; it never
+  reaches the policy, and it never produces a partial request a caller might act
+  on. The reader is bounded by construction - `kCommandLineCapacity` characters,
+  `kCommandTokenCapacity` tokens, `kCommandNumberMaxMagnitude` and
+  `kCommandFractionDigitsMax` - so no input can overflow a buffer, and there is
+  no dynamic allocation anywhere in it.
+- **Admissibility is one module, and it is the only place a command is allowed or
+  refused.** `ev::OperatorPolicy` (`lib/evcore/src/OperatorPolicy.h`) answers,
+  for the current `OperatorSystemState` (run phase, armed fact, latched fault and
+the configuration-build report), whether a command may be applied and, when it
+may not, why (`ev::CommandRefusal`, named by `commandRefusalName()`). It also owns
+the two run-boundary verdicts (`armVerdictFor()`, `announceVerdictFor()`), the
+held-configuration verdict (`heldRunConfigVerdict()`) and the telemetry rate to a
+whole-tick stride mapping (`telemetryStrideForRate()`). Nothing else may decide
+that a command is acceptable.
+- **The command vocabulary is frozen, and it is inspection plus intent.**
+  `help`, `version`, `status`, `checks`, `config show`, `config check`,
+  `config set`, `config clear`, `announce`, `arm`, `disarm`, `reset`,
+  `telemetry on`, `telemetry off`, `telemetry status`, `telemetry rate <hz>`.
+  **No command commands an effort, a mode or a direction, and none starts a run.**
+  The start trigger is a physical input; the closest any command comes to motion
+  is the arming intent, which is still a decision the chain's own checks refuse
+  or accept.
+- **The state restriction is deliberate, not an omission.** Once a run's phases
+  are underway, only the inspection commands, `disarm` and the telemetry commands
+  are admissible (`CommandRefusal::RunUnderway`); everything else is refused. This
+  is what makes "serial input cannot alter an in-progress run" a property of one
+  function rather than a distribution of guards, and it is the restriction the
+  `test_serial_independence` scenario pins from the outside.
+- **`reset` is admitted before the fault gate, and only there.** A latched fault
+  is of record and refuses everything else (`CommandRefusal::FaultLatched`);
+  clearing it is exactly what `reset` is for, so the reset is checked first. It is
+  still refused while a run's phases are underway, because discarding a fault is
+  not the same thing as abandoning a moving run: the arming/disarming decision is
+the operator's, and `disarm` is the command for that.
+- **One announcement per run, and arming reads the checks.** `announce` consumes
+  the held configuration through the single rule-validation entry point
+  (`ev::validateRunConfig()`); a second announcement is refused as
+  `RunAlreadyActive`, and arming with no announcement is refused as
+  `NoRunAnnounced`. `arm` reads the configuration-build report through
+  `armVerdictFor()` *before* `SafetyAuthority::arm()` is asked, so a refused arm
+  names the first failing check instead of producing an armed state with
+  unverified configuration behind it.
+- **Formatting is one module, and it emits one line per response.**
+  `ev::OperatorResponse` (`lib/evcore/src/OperatorResponse.h`) owns every response
+  spelling: the prefix vocabulary (`OK`, `ERR`, `STATUS`, `CONFIG`, `CHECK`,
+  `TELEMETRY`, `VERSION`), the `key=value` field order, the refusal and
+  arm-refusal text, the `config set` acknowledgement, and the help table. Like a
+  telemetry record (section 9), a response is **all or nothing**: it fits the line
+  buffer or it is dropped and counted, never emitted truncated. Its worst case is
+  bounded and statically checked against the line capacity
+  (`kOperatorResponseWorstCaseChars`).
+- **The transport is the board layer's, it is non-blocking, and the operator's
+  answer outranks the log.** `src/SerialTransport.h` stages one line and writes
+  only what the port reports room for (section 9), so nothing in the operator path
+  may block. `serviceSerial()` runs in the loop's low-priority section, after the
+  watchdog checkpoint, in a fixed order: move staged bytes out, read received
+  bytes, apply and answer at most **one** command, then drain the telemetry queue.
+  A staged operator response therefore displaces staged telemetry rather than
+  waiting behind it, and a pass that is out of room simply keeps the response
+  staged for the next one.
+- **The operator interface changes nothing the control path can see.** No stage of
+  the control tick reads the parser, the policy, the session or the transport, and
+  no phase transition or arming decision waits on a host. A host that is absent,
+  slow, or sending nonsense changes the log and the counters, and nothing else. A
+  run that is underway keeps its phase, its target and its arm state regardless of
+  what arrives on the port, which the `test_serial_independence` scenario proves
+  by running the identical scripted run twice - once with the consumer hierarchy
+  fully driven by a stalled host and rejected commands, once without it - and
+  comparing the control traces.
+- **Not decided here.** Adding a command, a field or an event is a deliberate
+  change that records itself in `DEVELOPMENT_LOG.md`, and renaming an existing one
+  is a schema change (section 10), not a refactor. No command for a diagnostic
+  motion mode exists and none is implied: `AGENTS.md` section 17 lists such modes
+  as examples, and the ones with any control authority would be a new contract.

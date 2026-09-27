@@ -1835,3 +1835,772 @@ once on the bench, and that single measurement must set **both**
 `ev::polarityAgrees()` is expected to read true. Until then both stay
 placeholders: `announceRun()` refuses the run, the reversal gate refuses the
 direction change, and the authority refuses the flip independently.
+
+---
+
+## D11 - 2026-09-26 - P6 - Full scripted scenario and fault harness
+
+**Entry gate**
+
+P5 and the P5I audit (D9, D10) were accepted, so the pure core's decision
+pipeline is mature enough to be exercised end to end with scripted evidence.
+This stage adds host tests only: no `lib/` and no `src/` file changed, no
+hardware fact and no measured value was added or modified, and nothing was
+committed. The stage stops before Arduino runtime/scheduler integration - there
+is still no scheduler, driver layer or pin code in the repository.
+
+**Why**
+
+Every module and every boundary had been tested on its own, and the handoffs had
+been pinned by `test_motion_chain` and `test_competition_state`, but nothing had
+driven the whole chain with stated evidence for a *whole run*. Whole-run
+scenarios are also where contract *composition* problems appear: each module can
+be individually correct and the composition still not reach the end of a run.
+
+**What was added**
+
+- `test/test_scenario/ScenarioHarness.h` - test support, never compiled into the
+  firmware. It feeds predetermined timestamps, an announced `RunConfig`, trigger
+  and bottle evidence, scripted encoder edge sequences, sensor dropouts and
+  observed faults into the real production modules (`QuadratureDecoder`,
+  `distanceTravelledM`, `VelocityEstimator`, the readiness verdicts,
+  `CompetitionStateMachine`, `MotionProfile`, `VelocityController`,
+  `SafetyAuthority`), and implements the vehicle-layer obligations D10 recorded
+  as build-time acceptance criteria: exactly one request per cycle, the
+  intention-freshness gate, stop commands mapped onto non-powered requests, the
+  run's verified-stop verdict mapped onto `atZeroSpeed`, one observed fault
+  reported to both consumers in the same cycle, and the configuration-build
+  checks (`effortCeilingsAgree`, `polarityAgrees`, per-module validation) before
+  arming.
+- The single authorized command reaches an `ActuatorBoundary`, which models the
+  boundary's *type* only: it accepts an `AuthorizedMotorCommand` and records it,
+  and performs no physical action.
+- `test/test_scenario/test_main.cpp` - 18 cases: nominal IDLE -> DONE; trace
+  replay determinism; only-authorized-commands; no powered reversal without a
+  verified stop; FAULT/DONE safety at the boundary; a fault injected from every
+  reachable phase; fault-latch persistence and clearance; a disarm during an
+  underway run; seven invalid configurations; `RunConfig` changes at illegal
+  times; a sensor dropout; stale odometry on the reverse leg; stale stop evidence
+  during the reversal; six phase-bound timeouts; a vehicle that never comes near
+  zero; a vehicle that never moves again after the reversal; a hostile
+  out-of-band reverse request; a fault in the same cycle as a travel request; and
+  a chain reset followed by a second full run.
+
+It is deliberately not a simulator. No effort is integrated into a velocity, and
+no torque, friction, braking distance, bottle dynamics, wheel slip or sensor
+noise is modelled. Encoder readings are prescribed by the scenario, never derived
+from a commanded effort, and the chain's response to that prescription is what is
+asserted.
+
+**Findings - composition problems the whole-run scenarios exposed**
+
+1. **The stop-verification packet cannot be derived from one estimator answer.**
+   `VelocityEstimator` reports either a window-derived number with
+   `zeroSpeedClaimed == false` or the explicit zero-speed claim with
+   `valid == false`, and never both (both behaviours are pinned by
+   `test_velocity_estimator`). `NearZeroVerifier` needs a fresh *valid* estimate,
+   an in-threshold speed and the claim at the same time. The harness therefore
+   composes the packet from two production answers - the current cycle's claim
+   and the last window-derived estimate - and that composition only satisfies the
+   verifier when the estimate is aged with a limit at least as long as the stop
+   dwell. Pinned by
+   `test_the_stop_evidence_packet_is_composed_from_two_production_answers`: with
+   the control path's own limit the package never verifies. The zero the packet
+   rests on is always produced *before* the claim interval it is paired with,
+   which is a policy statement the vehicle layer must make explicitly.
+2. **A travel request can arrive while the profile is still ramping the previous
+   direction down.** `MotionProfile` ramps a commanded reversal to zero before it
+   flips the sign (`MotionProfileStatus::DirectionChangeHold`), so the output that
+   opens the next leg can still be on the old side. The regulator then computes a
+   powered effort in the *old* direction for the new leg's request (feed-forward
+   plus an errored proportional term - an overspeed in the new direction), and
+   the authority has nothing to refuse it with: its direction latch was
+   legitimately cleared by the verified stop that earned the reversal. The first
+   version of this harness presented that effort and the scenarios caught it. The
+   harness now presents a travel request as a powered request only while the
+   shaped target points along the commanded leg, and presents its own unpowered
+   output otherwise. Pinned by `expectEveryDriveFollowsTheRunLeg`, asserted over
+   every scenario's whole trace.
+3. **`requiredDataFresh` is the position verdict, not the speed verdict.** A
+   stationary vehicle's estimate is the explicit zero-speed claim, whose `valid`
+   is false by design, so `velocityReadiness().usable` is false at every
+   standstill. Section 12 maps `odometryReadiness()` onto `requiredDataFresh` and
+   section 13 maps `velocityReadiness()` onto the regulator's `measurementUsable`;
+   had the speed verdict gated `requiredDataFresh` instead, no run could start
+   moving again from a verified stop. The harness wires it that way, and the
+   nominal scenario exercises exactly that restart.
+
+**Obligations recorded**
+
+`SOFTWARE_ARCHITECTURE.md` now records findings 1-3 where they belong: the
+stop-evidence pairing in section 13's zero-speed bullet, the travel-presentation
+gate as a new section 13 obligation, and the `requiredDataFresh` clarification in
+section 12. All three are vehicle-layer obligations, which the modules themselves
+cannot enforce, and the harness implements them.
+
+**Evidence (software verification; no physical test is applicable)**
+
+- `pio test -e native` - **310 test cases, 310 succeeded** (was 292).
+  `test_scenario` contributes 18; every other target is unchanged. No compiler
+  warnings were produced by the new target.
+- `pio run` - nano_r4 **SUCCESS**, RAM 7.8% (**2564 / 32768 bytes**), Flash 13.0%
+  (**34152 / 262144 bytes**). Unchanged from D10, as expected: no `lib/` or
+  `src/` file changed, so the firmware build is the same one.
+- `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only -Ilib/evcore/src`
+  over all **eighteen** `lib/evcore/src/*.h` headers: **0** unexpected
+  diagnostics (only the expected `#pragma once in main file` artifact, one per
+  header).
+- `git status`: `test/test_scenario/` is the only new path; this entry and the
+  section 12/13 notes are the only edits to tracked files, and no `lib/`, `src/`
+  or `platformio.ini` change is present.
+- The scenarios assert the architecture properties the stage asked for: one
+  request per cycle, every drive carrying the authorization preconditions of its
+  own cycle, every drive in the leg the run names, no powered direction change
+  without a stop presented at a reported verified zero, `Fault` cycles carrying
+  only the fault policy's `Disabled`, `Done` never asking for travel, no
+  announcement starting a run on an invalid configuration, and byte-identical
+  traces on replay of the same scripted evidence.
+
+**Not verified**
+
+Nothing about the vehicle. Every scenario is driven by prescribed encoder
+readings and stated evidence, so a passing scenario is software verification
+only: it is not evidence that the vehicle moves, counts, stops, tracks straight,
+reverses, pushes a bottle or reaches any phase physically. No hardware fact is
+claimed and no `VERIFIED_STATE.md` row was added or modified - in particular
+polarity (#4), signal quality (#5), rollout (#6), gains (#8), braking (#9),
+wheel slip (#10) and the bottle mechanism (#11) all stay UNVERIFIED.
+
+**Pending physical test**
+
+Unchanged from D10. The first physical test is still the low-power, unloaded
+bring-up with conservative effort, one behavior at a time, and the first
+measurement that unblocks any of this remains encoder direction sign (#4).
+
+**Next stage**
+
+The Arduino runtime/scheduler integration that will own these obligations for
+real: the pin/ISR sampling layer, the vehicle-layer wiring the harness now
+implements in test form, and telemetry. It is deliberately not started here.
+
+## D12 - 2026-09-26 - P6I audit fixes - Vehicle-layer rules promoted to production, and the evidence the scenarios were missing
+
+**Entry gate**
+
+P6 and the P6I audit were reviewed together. The audit accepted the harness's
+scope but found that it was the *only* owner of several vehicle-layer decisions,
+that the fault and clock paths were injected but not exercised in every reachable
+state, that two asserted properties were circular, and that a few gates could not
+be observed at all. This stage fixes those findings: it promotes the decisions to
+`lib/evcore`, adds the missing scenarios, and leaves no rule living only in test
+support. It changes `lib/`, `test/` and the two architecture documents and no
+`src/` file: the firmware's only entry point is still the sketch, neither a
+runtime, a scheduler, a pin/ISR layer nor telemetry exists yet, and nothing was
+committed.
+
+**Why**
+
+A rule that exists only in test support is not a firmware contract. When the
+vehicle layer is finally written, every such rule would have to be re-derived
+from prose, and the harness's copy would silently drift from whatever that layer
+implemented - the drift being exactly the failure the rule was written down to
+prevent. Whole-run scenarios also cannot see a gate they never take, so a gate
+that is correct but unreachable in the nominal trace must be driven by a stated
+hostile or held request, or it is untested code.
+
+**What was added - production ownership (`lib/evcore`)**
+
+- `lib/evcore/src/RunAxis.h` (new) - `ev::RunAxisGeometry` (the announced
+  geometry, built from a valid `RunConfig` through one mapping),
+  `ev::runAxisPositionM()` (the production tick-to-position conversion, with the
+  measured tick-sign polarity applied exactly once, to travel, and its own
+  `RunAxisStatus` refusal set), and `ev::remainingToTargetM()` /
+  `ev::legRemainingM()` (the signed and clamped remaining distances). The state
+  machine deliberately stores no geometry, so this is the run layer's single
+  owner of both the competition axis and the vehicle's place on it. A polarity
+  that is not `Measured` refuses control while still reporting a diagnostic
+  number, exactly like a `Provisional` scale in `Odometry.h`.
+- `lib/evcore/src/NearZeroVerifier.h` - `ev::composeStopEvidence()` composes the
+  stop-verification packet from the two production estimator answers (the current
+  cycle's claim under the control path's limit, the retained window-derived
+  estimate under the packet's own longer limit), and
+  `ev::stopEvidenceLimitSpansDwell()` is the configuration-build check for that
+  limit. D11 recorded the composition as an obligation; it is now a function.
+- `lib/evcore/src/MotionProfile.h` - `ev::targetVelocityPointsAlongLeg()` is the
+  along-leg verdict the D11 scenarios discovered: a travel request may be
+  presented as powered only once the shaped target points along the leg the run
+  asked for.
+- `lib/evcore/src/CompetitionStateMachine.h` - `ev::runCommandNamesForwardLeg()`
+  (the one leg-tag mapping, including the stop tags) and `ev::runStopEffort()`
+  (the one stop-vocabulary-to-request mapping, fail-closed for a command that is
+  not a stop).
+- `lib/evcore/src/SafetyLimits.h` - `ev::tickPolarityAgrees()` ties the measured
+  tick sign to the command sign, making the polarity fact one agreement across
+  all three of its encodings instead of two plus an assumption.
+
+**What was added - test coverage**
+
+- `test/test_run_axis/` (new target, 13 cases): the geometry mapping, the
+  polarity applied once under both signs, an origin that is not zero, the two
+  refusals (`TickTravelUnusable`, `PolarityIsNotMeasured`), the invariant
+  `usable == (status == Usable)`, the signed/unclamped and clamped remaining
+  distances, and the geometry's own arithmetic.
+- `test/test_scenario/test_main.cpp` (18 -> 27 cases). The nine additions are the
+  audit's missing evidence: (1) a *held* stale intention, presented cycle after
+  cycle by the caller while the run keeps asking, carrying no powered request;
+  (2) a hostile reverse request injected past the vehicle layer's gates, refused
+  by the authority as `DeniedUnsafeDirectionChange` with the forward latch and
+  the run untouched; (3) eight incomplete configurations (provisional
+  calibration, safety limit, regulator ceiling and profile limit; a
+  stop-evidence limit shorter than the dwell; disagreeing ceilings; a command
+  polarity opposite the effort polarity; a tick polarity opposite the command
+  polarity) that each announce a valid `RunConfig` and still cannot arm, with
+  every piece of run evidence for sixty cycles producing no drive and no phase
+  beyond `ParameterValid`; (4) a disarm in each of the four phases around the
+  direction change (`ForwardDecel`, `BrakeZeroSpeed`, `Reverse`, `FinalBrake`),
+  each latching `DisarmedDuringRun` and continuing to stop; (5) a stalled clock,
+  which yields no speed evidence (`TimeDidNotAdvance`), consumes no phase time
+  and never grows the phase's elapsed measurement, while the chain keeps
+  travelling on position evidence; (6) an uneven clock, which finishes the whole
+  run with strictly increasing stamps; (7) a rewound clock, which stops the run
+  and latches, followed by the chain boundary and a second run to `Done` (the
+  fault-reset-second-run path); (8) raw channel levels fed straight to the
+  production decoder - duplicate, B-only and simultaneous double-channel samples,
+  the two-count Gray cycle and an oscillating pair whose counted edges differ
+  from its signed sum; and (9) an independent oracle over the nominal trace that
+  recomputes every position from the raw tick count, the run origin and the
+  fixture scale instead of reading the harness's own field, checks both legs for
+  monotone travel and the reverse leg for a monotonically closing distance, and
+  repeats the position conversion under the opposite measured tick polarity.
+- Existing targets extended rather than duplicated: `test_near_zero_verifier`
+  (16 -> 22, the composition and its dwell-limit check), `test_motion_profile`
+  (26 -> 28, the along-leg gate), `test_motion_chain` (14 -> 15, the three-way
+  polarity agreement), `test_competition_state` (38 -> 39, the leg-tag mapping).
+
+**Findings and decisions worth recording**
+
+1. **The along-leg gate is unreachable in the nominal trace, and that is worth
+   stating.** The reversal path ramps the target to exactly zero before the leg
+   flips, and a zero target is along any leg, so a nominal run never needs the
+   gate to refuse. It is therefore pinned twice: as a whole-trace property of
+   every scenario (`expectEveryDriveFollowsTheRunLeg`) and as a unit contract on
+   the refusal case (`DirectionChangeHold` in `test_motion_profile`). A gate
+   whose only evidence was "the run finished" would be untested code.
+2. **The stale-intention gate can only be observed by a caller that holds an
+   intention.** The run stamps its intention with the cycle that produced it and
+   never re-presents one, so no scenario built from the run's own requests can
+   reach the gate. The harness therefore exposes a held-intention hook, which
+   presents a *previous* cycle's intention through the same production gate; the
+   run's own record stays truthful throughout, so the trace still shows what the
+   run asked for and what the caller presented side by side.
+3. **A rewound clock reads as an overrun.** The phase timer is an unsigned
+   elapsed measurement, so a stamp that moves backwards makes the measured
+   elapsed time larger than any bound and the run latches `PhaseTimeout`. That is
+   deliberate: a reading the run's own elapsed measurement cannot support is not
+   evidence it may spend, and stopping is the safe answer. It is recorded here
+   because the fault identity is a consequence of the timer arithmetic rather
+   than a dedicated clock fault, so a later reader does not mistake it for an
+   accident. A stalled clock is the opposite case and is handled without a
+   fault: elapsed time does not grow, so no bound can expire.
+4. **The distance a cycle consumes belongs to the previous cycle's leg.** The
+   run's command for a cycle does not exist yet at the moment the vehicle layer
+   must state the remaining distance, so the leg used is the one the run named in
+   the *previous* cycle. At a leg change the cycle that changes legs therefore
+   still carries the previous leg's distance - it is the cycle the run consumed
+   while still in its previous phase - and the reverse-leg monotonicity oracle
+   starts from the next cycle. This is a wiring order the vehicle layer must
+   keep, not a harness artifact: a distance computed from a leg the run has not
+   named yet would be the wrong number.
+5. **A valid announcement is not a usable chain.** The arm-refusal matrix pins
+   that separately: all eight variants announce a valid `RunConfig` and are still
+   refused before arming, because the configuration-build checks are about the
+   chain's own measured facts (calibration, limits, ceilings, polarity, the three
+   polarity encodings and the stop-evidence limit), not about the event's
+   parameters.
+6. **Fault identity and fault response stay separate, now across the whole
+   matrix.** The expanded fault case injects all eight observable identities in
+   all thirteen phases (104 combinations) and asserts the same response for every
+   one: the identity of record is latched and reported unchanged, the boundary
+   carries `Disabled`, zero effort and no direction, the authority's own latched
+   fault carries the same identity, and five further cycles of every run evidence
+   move nothing.
+
+**Evidence (software verification only; no physical test is applicable)**
+
+- `pio test -e native` - **342 test cases, 342 succeeded** (was 310). The new
+  `test_run_axis` target contributes 13; `test_scenario` 27 (was 18);
+  `test_near_zero_verifier` 22 (was 16); `test_motion_profile` 28 (was 26);
+  `test_motion_chain` 15 (was 14); `test_competition_state` 39 (was 38).
+- A clean native rebuild (`-Wall -Wextra`) produced **no** compiler warnings or
+  errors.
+- `pio run` - nano_r4 **SUCCESS**, RAM 7.8% (**2564 / 32768 bytes**), Flash 13.0%
+  (**34152 / 262144 bytes**). Unchanged from D11: the promoted functions are
+  inline in `lib/evcore` headers, and nothing in the firmware's current entry
+  point calls them, so the linked image is the same one.
+- `git status`: `lib/evcore/src/RunAxis.h` and `test/test_run_axis/` are new
+  paths; `test/test_scenario/` is still uncommitted from D11; the four existing
+  `lib/evcore` headers and five existing test targets carry the additions. No
+  `src/` or `platformio.ini` change is present.
+- The scenarios now assert, in addition to the D11 properties: no powered request
+  from a held intention, no powered request from a stale one, an independent
+  authority refusal of a direct flip, a refusal to arm on each incomplete
+  configuration, a latched stop in every reversal phase, no speed evidence from a
+  stalled or rewound clock, a completed run on an uneven one, the production
+  decoder's own verdict on duplicate, B-only, diagonal and oscillating samples,
+  and a position oracle that does not read the field it checks.
+
+**Not verified**
+
+Nothing about the vehicle. Every scenario is still driven by prescribed encoder
+readings and stated evidence, and the rewound-clock and hostile-request cases are
+statements about the chain's logic, not about any physical timing or electrical
+behavior. No hardware fact is claimed and no `VERIFIED_STATE.md` row was added or
+modified - polarity (#4), signal quality (#5), rollout (#6), gains (#8), braking
+(#9), wheel slip (#10) and the bottle mechanism (#11) all stay UNVERIFIED.
+
+**Pending physical test**
+
+Unchanged from D10 and D11. The first physical test is still the low-power,
+unloaded bring-up with conservative effort, one behavior at a time, and the first
+measurement that unblocks any of this remains encoder direction sign (#4).
+
+**Next stage**
+
+The Arduino runtime/scheduler integration, and in particular the vehicle-layer
+wiring these rules now belong to: the harness's ordering (sample, readiness,
+position, run update, effort, boundary) is the order that layer must implement,
+and the promoted functions are the ones it should call rather than re-derive.
+
+## D13 - 2026-09-26 - P7A - Cooperative runtime shell and the Nano R4 hardware boundary
+
+**Entry gate**
+
+P6 and the P6I audit (D11, D12) were accepted, so the pure core's decision
+pipeline was complete enough to be orchestrated on the real target. This stage
+adds the production runtime shell and the thinnest hardware boundary for the Nano
+R4, so the complete firmware builds and is ready for physical bring-up. No
+hardware is available: no upload was attempted, no electrical behavior was
+observed, and nothing in this entry is a measurement. `src/` is compiled for the
+first time in this project's history. Nothing was committed.
+
+**Why**
+
+Everything before this stage was pure logic the firmware's own entry point did
+not call: `main.cpp` blinked an LED and printed a banner, and the chain was
+exercised only by host tests. The obligations D10 recorded as build-time
+acceptance criteria - exactly one `authorize()` per cycle, the intention
+freshness gate, the leg-tag and stop mapping, the position verdict gating
+`requiredDataFresh`, the configuration-build checks before arming - had no
+production owner. Until a vehicle layer owned them, "the firmware" and "the
+tested logic" were two different things.
+
+**What was added - pure logic (`lib/evcore`)**
+
+- `lib/evcore/src/ControlScheduler.h` (new) - the deadline decision for one pass:
+  due when the reading reaches the next deadline (signed difference of two
+  `uint32` readings, so the ~49.7 day wrap is handled), with the measured `dtMs`,
+  lateness, dropped deadlines, remaining wait and a rewound reading reported. No
+  clock, no hardware, no waiting.
+- `lib/evcore/src/ControlTickOrder.h` (new) - the frozen stage vocabulary
+  (`EncoderSnapshot` ... `TelemetryCapture`) and the guard that reports a tick
+  which skipped, repeated, abandoned or failed to complete a stage.
+- `lib/evcore/src/MotorDriverPlan.h` (new) - the planned DRV8874 PH/EN input
+  levels per `MotorMode`, the permille-to-PWM-count arithmetic and the
+  de-energized predicate. Pure, host-tested, and the only command-to-levels
+  mapping in the project.
+
+**What was added - vehicle layer (`src/`)**
+
+- `src/PinMap.h` - the centralized provisional pin set, with why each pin was
+  chosen (framework pin-table capability) kept apart from the wiring fact that
+  remains UNVERIFIED.
+- `src/MotorDriver.h` - the only code that writes PH/EN/nSLEEP. It applies one
+  authorized command through the pure plan, and it has its own de-energized path
+  (`beginDisabled()`, `failSafe()`) that does not need a command.
+- `src/EncoderInput.h/.cpp` - the one interrupt: two digital reads and one pure
+  decoder update, plus a coherent tick snapshot taken with PRIMASK saved and
+  restored.
+- `src/SensorInputs.h` - raw battery/current/nFAULT/trigger acquisition; no
+  conversion and no interpretation.
+- `src/WatchdogCheckpoint.h` - the single refresh path, gated on a completed pass,
+  behind one centralized enablement constant that is **false**.
+- `src/VehicleConfig.h` - cadence and staleness policy, `Provisional` placeholders
+  and the rule-derived Complete Stop dwell, kept apart, plus the
+  `ConfigurationBuildChecks` report every arming decision will read.
+- `src/VehicleRuntime.h/.cpp` - the control tick in the frozen stage order, the
+  one `authorize()` per cycle, the leg-tag and intention gates, the stop mapping,
+  the driver fail-safe on an untrustworthy tick, and the telemetry snapshot and
+  hook.
+- `src/main.cpp` - the cooperative shell: pass, watchdog checkpoint, then
+  low-priority work (status LED), with the boot banner describing the safe state.
+
+**Decisions**
+
+1. **A planned driver mapping is written down, and it supersedes nothing about
+   the hardware.** `SOFTWARE_ARCHITECTURE.md` section 10 listed the driver
+   interface as deliberately undecided. Writing a *plan* is what made the boundary
+   implementable; the electrical behavior, the truth table, the polarity and the
+   wiring all stay UNVERIFIED, and the plan says so in the code, in
+   `docs/hardware/motor-driver-drv8874.md`, and in `VERIFIED_STATE.md`. The PH
+   level -> direction sense is recorded there as the fourth encoding of the one
+   polarity fact, measurable once.
+2. **A missed deadline is dropped, counted and reported - never caught up.**
+   Running a burst of back-to-back ticks after an overrun would sample several
+   times with almost no interval between samples and push the following work
+   later still. The schedule re-arms from the tick that actually ran, so the
+   average cadence is the period plus the loop's real cost, and that cost is
+   visible as lateness instead of hidden inside a burst.
+3. **The watchdog gate is a completed pass with an in-order tick.** Withheld
+   refreshes are counted, so the mechanism is observable before it is enabled.
+   Refresh lives in exactly one function in one file and is called from exactly
+   one place (the loop, after the pass returns). Production enablement is a
+   centralized constant and it is off: no watchdog behavior has been observed on
+   this target, and linking the adapter is not validation.
+4. **A raw nFAULT level is not invented into a fault.** The pin, its polarity and
+   the driver's fault behavior are all UNVERIFIED, so the level is sampled,
+   counted and reported, and no `FaultCode` is produced. The reason this is safe
+   today is that no drive can be authorized at all: calibration, limits and gains
+   are provisional. Mapping that input onto a fault identity and a stop policy is
+   recorded as pending bench work, and it is the one place in this stage where a
+   deliberate omission is the answer rather than an implementation.
+5. **The run's final stop dwell is the rule-derived Complete Stop** (rule 8.p,
+   `RuleDerived`), while the reversal gate's own dwell is a separate, much shorter
+   provisional policy value - the two are different asks, and the stop-evidence
+   limit must span the longer one, which `ConfigurationBuildChecks` reports.
+6. **Arming, announcement and the run boundary are deliberately not built.** They
+   are deliberate transitions owned by the command layer, and building them now
+   would mean inventing where the announced parameters come from. Until then the
+   runtime computes the readiness verdicts, runs the tick, and stays in `Idle`
+   with every drive refused.
+7. **The encoder snapshot is a coherence measure, not a tearing fix.** An aligned
+   `int32` load is already atomic on this core; the saved-PRIMASK section exists
+   so the count and the decoder's own counters are read as one instant, and it is
+   short enough that nothing else is delayed. The ISR itself does two digital
+   reads and one pure decode.
+8. **The telemetry snapshot is not a schema.** It is one RAM record plus one
+   optional non-blocking hook, with no transport, and the boot banner is not a
+   telemetry stream. The schema stays undecided (section 10) and P7B owns it.
+
+**Evidence (software verification only; no physical test is applicable)**
+
+- `pio run` (clean rebuild, `nano_r4`) - SUCCESS, RAM **12.4%** (4064 / 32768
+  bytes), Flash **19.0%** (49772 / 262144 bytes). No compiler warnings. The
+  watchdog library is found and linked: `arm-none-eabi-nm` lists `WDTimer` /
+  `R_WDT_Open` / `R_WDT_Refresh` in `firmware.elf`. Linking is not watchdog
+  validation.
+- `pio test -e native` - **372 test cases, 372 succeeded** (was 342).
+  `test_control_scheduler` contributes 11 (deadline and due logic, measured
+  variable dt, the drop-instead-of-catch-up rule, the stalled and rewound clocks,
+  wraparound on both sides, re-arming); `test_control_tick_order` 12 (the pinned
+  stage order and every way a tick can fail it); `test_motor_driver_plan` 7 (the
+  planned levels per command, the duty following the authorized magnitude, every
+  refusal leaving the driver de-energized, the PWM mapping). No compiler
+  warnings.
+- `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only -Ilib/evcore/src`
+  over all **22** `lib/evcore/src/*.h` headers: **0 unexpected diagnostics** (only
+  the expected `#pragma once in main file` artifact, one per header).
+- Static searches over `src/`: the three planned motor pin names appear only in
+  `src/PinMap.h` (definitions) and `src/MotorDriver.h` (the writes); `WDT` appears
+  only in `src/WatchdogCheckpoint.h`; there is no `delay()`, no unbounded loop and
+  no per-cycle serial output; `Serial` appears only in the boot banner in
+  `src/main.cpp`. The interrupt handler body is two `digitalRead`s and one
+  `decoder.update()`. No test target includes a `src/` header, so the `native`
+  environment still never compiles the Arduino tree.
+- `git status`: `docs/hardware/`, the three new `lib/evcore` headers, all new
+  `src/` files and the three new test targets are new paths; `src/main.cpp` and
+  the four authority documents are modified. No `platformio.ini` change.
+
+**Not verified**
+
+Everything about the vehicle. The firmware's startup state, the de-energized
+driver levels, the encoder interrupt, the raw input readings, the watchdog and
+every timing number are code paths that have not been run on hardware. Rows #1
+(wiring), #2 (driver truth table), #3 (motor polarity), #4 (encoder sign), #5
+(signal quality), #6 (rollout), #7 (sensor scaling), #9 (braking), #11 (bottle
+mechanism) stay UNVERIFIED, and a build, a passing host test, a static search and
+a linked library are none of them evidence about the vehicle.
+
+**Pending physical tests**
+
+In order, each following the safety rules in `AGENTS.md` section 5 (drivetrain
+unloaded, conservative effort, one behavior at a time):
+
+1. **Wiring continuity (#1)** against `src/PinMap.h`, recorded before anything is
+   powered.
+2. **Driver idle levels and truth table (#2)** with the motor supply current
+   limited: the de-energized levels at rest, whether EN low with the driver awake
+   brakes or coasts, both PH levels, the duty at 10/50/100%, and what nFAULT does
+   when tripped. Procedure and rows to record:
+   `docs/hardware/motor-driver-drv8874.md`.
+3. **Direction and encoder sign (#3, #4)**: which PH level turns the shaft in the
+   vehicle's forward direction, and which tick sign that produces. One measurement
+   sets `kPlannedPositiveCommandDirection`, `kPlannedPositiveEffortMode` and
+   `kPlannedPositiveTicksDirection` together, after which the polarity agreements
+   are expected to read true.
+4. **Encoder counting (#5)**: hand-rotate the wheel; confirm the interrupt counts
+   at all (a pin with no interrupt channel attaches nothing, which is why the pin
+   choice matters), then check duplicate and noise behavior over repeated
+   revolutions.
+5. **Rollout (#6)** and **ADC scaling (#7)**: measured travel per tick, and raw
+   counts against a reference meter. Both replace placeholders and nothing else.
+6. **Trigger active level** and its debounce, before the trigger is allowed to
+   start anything.
+7. **H0W, the watchdog check**: with the enablement constant flipped in a bench
+   build only, confirm that the adapter starts the watchdog, that a stalled pass
+   leads to a reset, and that a reset returns the pins to the de-energized state.
+   Record it before production enablement is flipped.
+8. **Loop cadence**: the measured control-tick interval, lateness and dropped
+   deadlines, which is also the evidence needed to choose the watchdog timeout.
+
+**Next stage**
+
+P7B: the command and telemetry transport (serial), the run announcement with the
+announced `RunConfig`, and the deliberate arming path that reads
+`ConfigurationBuildChecks` - plus the fault identity for a measured nFAULT input
+once test 2 exists.
+
+## D14 - 2026-09-27 - P7B - Operator interface, versioned telemetry, and the non-blocking transport
+
+**Entry gate**
+
+P7A and its build-time obligations were accepted (D13), so the control chain had
+one production owner. This stage adds the two things an operator and a
+post-mortem can use: a bounded serial command line and a machine-readable
+telemetry stream. Still no hardware: no upload, no port connected, and nothing in
+this entry is a measurement. Nothing was committed.
+
+**Why**
+
+D13 left arming, the run announcement and telemetry unbuilt on purpose, because
+each needs a decision about where its inputs come from. Without them the firmware
+could run its tick and refuse every drive, but a team member standing next to the
+vehicle had no way to ask what it believed, no way to hand it the event's
+parameters, and no way to read a run afterwards. The three questions this stage
+answers are: what did the chain believe, what parameters was it given, and what
+can an operator ask it to do without ever being able to make it move.
+
+**What was added - pure logic (`lib/evcore`)**
+
+- `lib/evcore/src/BoundedText.h` (new) - the shared bounded text writer every
+  formatter is built on: capacity-checked `appendChar`/`appendText`/`appendUnsigned`/
+  `appendBool`/`appendFixed`, a `field(key)` helper for `key=value`,
+  fixed-point double formatting with no `printf` and no allocation, explicit
+  `nan`/`inf`/`ovf` sentinels, and a truncation flag. It also owns the line
+  vocabulary: `kBoundedLineDidNotFit`, `finishBoundedLine()`, and
+  `kSerialLineCapacity`/`kSerialLineBufferBytes`.
+- `lib/evcore/src/ConfigurationChecks.h` (new) - the configuration-build check
+  vocabulary (`ConfigurationCheckId`, 14 checks + `Count`, `configurationCheckName()`)
+  and the report type `ConfigurationBuildChecks`. It moved out of
+  `src/VehicleConfig.h` so the operator policy can be host-tested against it.
+- `lib/evcore/src/SerialCommandParser.h` (new) - the bounded line reader
+  (`CommandLineReader`), the command vocabulary (17 `OperatorCommandId` values),
+  the `config set` field set (`RunConfigFields`), the named `CommandError` set, the
+tournament-level spelling, and the single entry point `parseOperatorCommand()`.
+- `lib/evcore/src/OperatorPolicy.h` (new) - the only place a command is admitted or
+  refused: `admissibilityOf()` over `OperatorSystemState`, the named
+  `CommandRefusal`s, the announcement and arming verdicts
+  (`announceVerdictFor()`, `armVerdictFor()`, `heldRunConfigVerdict()`), and the
+  telemetry-rate to stride mapping
+  (`telemetryStrideForRate()`).
+- `lib/evcore/src/TelemetryRecord.h` (new) - the schema owner: `kTelemetrySchemaVersion`,
+  the `EVS`/`EVE` prefixes, the field set and enumerator spellings of one sample
+  `TelemetrySample` and one `TelemetryEvent`, the missing-field marker, the drop
+  counters, the event batch, the baseline-primed `TelemetryEventDetector`, and the
+  `TelemetryRecord`/`TelemetryRecordKind` union the queue carries.
+- `lib/evcore/src/TelemetryQueue.h` (new) - two fixed lanes (8 samples, 16 events),
+  drop-newest with the count stamped into the records that do go out, events
+  drained first, and `TelemetrySession` holding enable/disable and the due-stride.
+- `lib/evcore/src/TelemetryFormat.h` (new) - the one place a record becomes text
+  (`EVS<v>,...`, `EVE<v>,...`), with the worst-case sizes statically checked
+  against the line capacity (418 / 180 characters).
+- `lib/evcore/src/OperatorResponse.h` (new) - every response spelling: the prefix
+  vocabulary (`OK`, `ERR`, `STATUS`, `CONFIG`, `CHECK`, `TELEMETRY`, `VERSION`),
+  the ack/refusal/arm-refusal/announce-refusal text, the configuration echo, the
+  checks line, the status line, the telemetry state and rate acknowledgements, the
+  version line, and the help table (15 lines). Its worst case is 384 characters,
+  statically checked against the line capacity like the telemetry records.
+
+**What was added - vehicle layer (`src/`)**
+
+- `src/SerialTransport.h` (new) - the non-blocking line transport: one staging
+  buffer, `stage()` for a line (an operator response displaces a staged telemetry
+  line and counts it as abandoned), `pump()` writing only what
+  `availableForWrite()` reports room for, and counters for lines sent, staged,
+  abandoned and refused.
+- `src/VehicleRuntime.h/.cpp` - `serviceSerial(nowMs)` in the loop's low-priority
+  section: move staged bytes out, read at most `kReadBytesPerPass`, apply and
+  answer at most one command, then drain at most four telemetry records; the held
+  configuration, the operator effects routed through the chain's own entry points,
+  the boot line, the tick's telemetry capture, and the operator/telemetry
+  counters.
+- `src/VehicleConfig.h` - `kFirmwareId` and `using ConfigurationBuildChecks =
+  ev::ConfigurationBuildChecks` (one owner of the check report, no second
+  definition).
+- `src/main.cpp` - the boot banner is gone; startup is LED, runtime, watchdog,
+  transport with a bounded 2000 ms host wait, and the loop is pass, watchdog
+  checkpoint, `serviceSerial`, status LED.
+- `test/test_serial_independence/test_main.cpp` (new) - the acceptance-gate
+  scenario: the same scripted run twice, once with the consumer hierarchy fully
+  driven by a stalled host and a stream of rejected and refused commands, with the
+  control traces compared tick by tick.
+
+**Decisions**
+
+1. **The operator interface is three modules, not one.** Parsing, admissibility
+   and formatting have three separate owners, and none of them holds run-control
+   state. A single "CLI module" would have put the arming refusal next to a string
+   formatter, and the format of a reply would have been the place a safety rule
+   lived. Splitting them also made every one of them host-testable, which is what
+   lets the refusal paths be enumerated in tests before any operator ever types
+   them.
+2. **The transport had to be built around a blocking `write()`.** Reading the
+   installed Renesas core (`usb/SerialUSB.cpp`) shows `_SerialUSB::write(buf,size)`
+   looping until the host drains the buffer, with the USB interrupt disabled while
+   it waits. A bare `Serial.print()` of one record would therefore hand the control
+   loop's schedule to whoever is - or is not - reading the port, which is exactly
+   the failure mode `AGENTS.md` section 13 forbids. Every write is gated on
+   `availableForWrite()`, the endpoint window is 256 bytes
+   (`variants/NANOR4/tusb_config.h`), and a line that does not fit is kept for the
+   next pass rather than split. Both facts are recorded in `VERIFIED_STATE.md`.
+3. **Telemetry is SI, one line per record, and all-or-nothing.** Values are metres
+   and metres per second (section 6), a record that does not fit is dropped and
+   counted rather than truncated, and the drop counters ride in the records that do
+   go out. Truncation would eat exactly the tail fields a post-mortem needs - the
+   fault, the authorization outcome, the failing check - which is the opposite of
+   what a log is for. Schema version 1, the `EVS`/`EVE` prefixes and every
+   enumerator spelling are frozen in `TelemetryRecord.h`; adding or renaming one is
+   a schema change, not a refactor (section 10).
+4. **A run that is underway is closed to the operator, except for three things.**
+   Inspection commands, `disarm` and the telemetry commands stay admissible; every
+   other command is refused as `RunUnderway`. Putting the restriction in one
+   function is what makes "serial input cannot alter an in-progress run" checkable
+   at a single place, and `test_serial_independence` checks it from outside by
+   driving the whole consumer chain during a run and comparing the resulting
+   control trace with the run that had no operator at all.
+5. **`reset` is admitted before the fault gate, and the gate is what refuses
+   everything else.** Implementing the refusal paths made the ordering visible: a
+   latched fault must be clearable, and `reset` is the only command that clears it,
+   so checking the fault first left no way out of a fault. It stays refused while a
+   run's phases are underway, because discarding a fault is not abandoning a moving
+   run - that is `disarm`'s job, and it is the operator's decision.
+6. **Arming reads the configuration-build report before it asks the authority.**
+   `armVerdictFor()` runs first and names the first failing check, which is how the
+   placeholder configuration in `VehicleConfig.h` produces an *attributable*
+   refusal instead of an armed state with unverified values behind it. The check
+   report itself moved into `lib/` so the policy that reads it is host-testable;
+   `src/VehicleConfig.h` still owns which values fill it.
+7. **The Start Point is the arming decision.** A successful `arm` takes the
+   encoder tick reading as the run origin, because the event's Start Point is
+   defined by a deliberate decision and not by whenever the vehicle happened to
+   stop moving. Nothing before arming writes an origin, and a reset re-establishes
+   the decoder reference instead of remembering one.
+8. **The operator's answer outranks the log.** A staged response displaces a
+   staged telemetry line, and `serviceSerial()` answers before it drains samples.
+   A person waiting for an answer must not queue behind a log stream they cannot
+   see, and the displaced line is counted rather than silently lost.
+9. **The boot line is staged text, and the boot event is a record.** Startup does
+   not need a host and does not print a banner: one `BOOT,...` line is staged for
+   whenever a host appears, and the `Boot` event goes through the same queue and
+   schema as every other transition. The 2000 ms host wait in `setup()` is a
+   bounded initialization wait (section 4), not a control-loop wait, and nothing
+   downstream depends on whether it expired.
+10. **A refusal with nothing to refuse is its own outcome.** `CommandRefusal::NothingToApply`
+    was added so a caller bug - presenting a request that was never parsed - cannot
+    be read as a policy refusal of a real command. The refusal set is diagnostic
+    vocabulary, and collapsing two different causes into one name would hide the
+    bug it is meant to expose.
+11. **A `Provisional` configuration is not a reason to invent a diagnostic motion
+    mode.** `AGENTS.md` section 17 lists `motor <value>` and `test run <profile>` as
+    examples. Neither is built: with every gain, scale and limit provisional, a
+    command that could drive the motor would be a second, unaudited path around
+    `SafetyAuthority`, and the chain would refuse it anyway. A diagnostic motion
+    mode with control authority is a new contract, not a convenience.
+
+**Evidence (software verification only; no physical test is applicable)**
+
+- `pio run` (clean rebuild, `nano_r4`) - SUCCESS, RAM **17.8%** (5848 / 32768
+  bytes), Flash **24.8%** (65028 / 262144 bytes). No compiler warnings.
+- Host suites, each run individually (`pio test -e native -f <suite>`) - **24
+  suites, 456 test cases, 456 succeeded**. New this stage: `test_serial_command_parser`
+  20 (bounds, token limits, every error name, the field set, number spelling),
+  `test_operator_policy` 19 (every refusal, the reset-before-fault ordering, the
+  arming and announcement verdicts, the stride mapping), `test_operator_response`
+  16 (every response shape, the worst-case bound, the help table),
+  `test_telemetry_format` 11 (both record shapes, the SI field order, the
+  all-or-nothing behaviour, the worst-case bound), `test_telemetry_queue` 14 (both
+  lanes, drop-newest with the counters stamped, events draining first, disable
+  emptying the queue), and `test_serial_independence` 4 (the acceptance gate above).
+  Existing 18 suites unchanged and passing: `test_competition_state` 39,
+  `test_control_scheduler` 11, `test_control_tick_order` 12, `test_core_types` 15,
+  `test_interval_timer` 6, `test_motion_chain` 15, `test_motion_profile` 28,
+  `test_motor_driver_plan` 7, `test_near_zero_verifier` 22, `test_odometry` 31,
+  `test_quadrature_decoder` 15, `test_reversal_sequencer` 16, `test_run_axis` 13,
+  `test_run_config` 15, `test_safety_authority` 29, `test_scenario` 27,
+  `test_velocity_controller` 35, `test_velocity_estimator` 36.
+- `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only -Ilib/evcore/src`
+  over all **30** `lib/evcore/src/*.h` headers: **0 unexpected diagnostics** (only
+  the expected `#pragma once in main file` artifact, one per header).
+- Static searches over `src/`: there is no `delay(` in any code path (the only
+  match is a comment); `Serial` appears only in `src/main.cpp` (the bounded boot
+  wait) and `src/SerialTransport.h` (the gated writes); each planned pin name
+  appears only in `src/PinMap.h` and its one adapter (`kEncoderA`/`kEncoderB` in
+  `EncoderInput.cpp`, the three motor pins in `MotorDriver.h`, `kMotorFaultBar`,
+  `kStartTrigger`, `kBatterySense`, `kCurrentSense` in `SensorInputs.h`). No
+  `printf`/`sprintf`/allocation in `lib/`.
+- `git status`: `SOFTWARE_ARCHITECTURE.md`, `DEVELOPMENT_LOG.md`, `README.md` and
+  `VERIFIED_STATE.md` are modified; all of `lib/evcore/src`, `src/` and the new
+  test targets remain untracked from D13 and D14. No `platformio.ini` change.
+
+**Not verified**
+
+Everything about the vehicle, and one thing about the host link. The firmware's
+startup state, the driver levels, the encoder interrupt, the raw inputs, the
+watchdog and every timing number are still code paths that have not run on
+hardware (rows #1-#12 stay UNVERIFIED). Added this stage: no serial link has ever
+been opened to this firmware. The blocking behaviour of `Serial.write()` is a
+source-level fact about the installed core, not an observation; the endpoint
+buffer size is a configuration fact, not a measurement; and the claim that a host
+which stops reading cannot disturb the control cadence is proved by the logic test
+and has not been demonstrated on the board.
+
+**Pending physical tests**
+
+After the D13 list, and each following the safety rules in `AGENTS.md` section 5.
+This stage's additions need no motion at all, so they can be done first and with
+the drivetrain unloaded:
+
+1. **The port comes up at all.** Upload, open `pio device monitor`, confirm the
+   staged `BOOT,...` line arrives once. If it does not, the boot wait and the
+   transport's write gating are the first things to suspect.
+2. **Inspection and refusal paths, remembered verbatim.** Send `version`, `status`,
+   `checks`, `config show`, then `announce` and `arm`. Record the exact lines. With
+   the placeholder configuration, `arm` must be refused and the refusal must name
+   the first failing check; a refusal that names the wrong check is a configuration
+   bug, not a labelling bug.
+3. **`config set` and the rule validation.** Set a level, distance, time and bottle
+   line, echo them, and confirm a malformed or out-of-range field is refused with a
+   named error rather than silently clamped.
+4. **Malformed input never reaches the chain.** Send junk, an over-long line, too
+   many tokens, a huge number and a half-finished command. Confirm each produces a
+   named error, that no `OK` is produced for a command that was not applied, and
+   that nothing about the run state changed.
+5. **Telemetry shape and rate.** Confirm `EVS1` sample lines and `EVE1` event
+   lines appear, that `telemetry off` stops the samples and empties the queue, that
+   `telemetry rate <hz>` changes the observed spacing to a whole number of ticks,
+   and that the drop counters stay at zero when the host keeps up.
+6. **The host stops reading.** Disconnect the monitor (or unplug the data line)
+   mid-stream with telemetry on. The cadence must not change and the run must not
+   alter: `status` should show the drop counters rising, which is the intended
+   behaviour, and reconnecting must not produce a burst of stale lines.
+7. **Cadence with the transport busy.** The measured control-tick interval,
+   lateness and dropped deadlines with telemetry at its default rate, which feeds
+   the same cadence evidence D13's test 8 asks for.
+
+**Next stage**
+
+Physical bring-up. Nothing in the current design is blocked on new software: the
+next useful result is a measurement, starting with wiring continuity (#1), the
+driver's idle levels and truth table (#2), and then the polarity measurement that
+unblocks every gain, scale and limit in `src/VehicleConfig.h`. The nFAULT fault
+identity and every motion command stay deliberately absent until those exist.
+

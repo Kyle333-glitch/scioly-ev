@@ -27,12 +27,21 @@ measurements override assumptions.
 
 ## Project layout
 
-- `src/` - vehicle firmware. The only place allowed to use Arduino headers.
+- `src/` - vehicle firmware. The only place allowed to use Arduino headers. It
+  holds the cooperative runtime shell (`VehicleRuntime.*`), the provisional pin
+  map (`PinMap.h`), the motor driver adapter (`MotorDriver.h`), the encoder
+  interrupt (`EncoderInput.*`), the raw input adapters (`SensorInputs.h`), the
+  watchdog checkpoint (`WatchdogCheckpoint.h`), the non-blocking serial line
+  transport (`SerialTransport.h`) and the vehicle configuration
+  (`VehicleConfig.h`).
 - `lib/` - pure logic modules with no Arduino dependency, covered by host tests.
 - `test/` - host-side unit tests (not shipped in the firmware).
 - `scripts/` - build-tooling helpers.
 - `docs/` - reference material, including the event rules the firmware is built
-  against.
+  against and the planned hardware interfaces.
+- `docs/hardware/` - the planned hardware interface and the bench tests that
+  would replace it with measured facts. Nothing in it is evidence about the
+  vehicle yet.
 
 ## Building
 
@@ -65,21 +74,51 @@ real vehicle.
 ## Staged workflow
 
 Work proceeds in small stages, each leaving a known-good version behind. The
-full progression is listed in `AGENTS.md` (section 3).
+full progression is listed in `AGENTS.md` (section 3), and the accepted ones are
+recorded in `DEVELOPMENT_LOG.md`.
 
 - **P0** - development environment, project truth/provenance, and the host-test
-  path. Complete; no vehicle behavior.
-- **P1 (current)** - pure-core data contracts and rule-valid run configuration
-  in `lib/evcore/`. Still no vehicle behavior.
-- **P2 (next)** - arming authority and motor-driver bring-up with the drivetrain
-  unloaded.
+  path.
+- **P1-P5** - the pure core in `lib/evcore/`: data contracts and rule-valid run
+  configuration, the final permission boundary, quadrature decoding,
+  tick-to-distance arithmetic, velocity estimation and control, target shaping,
+  controlled reversal, and the competition run state machine.
+- **P6** - the scripted whole-run scenario and fault harness in
+  `test/test_scenario/`.
+- **P7A** - the cooperative runtime shell and the Nano R4 hardware boundary: the
+  control tick and its scheduler, the encoder interrupt, the raw input adapters,
+  the motor driver adapter, and the single central watchdog health checkpoint. No
+  physical behavior is claimed by any of it.
+- **P7B (current)** - the operator interface and machine-readable telemetry: the
+  bounded serial command parser, the operator policy that admits or refuses each
+  command, the response formatter, the versioned telemetry schema with its drop
+  counters, and the non-blocking line transport. Both are consumers of the control
+  chain; neither can change a run.
+- **Next** - physical bring-up: the pending tests recorded in
+  `DEVELOPMENT_LOG.md` (D13, D14) and in `VERIFIED_STATE.md`, starting with wiring
+  continuity and the motor driver's idle levels and truth table.
 
 Do not build later-stage vehicle behavior before the earlier stage has been
 validated.
 
 ## Current state
 
-The development environment, the project authority files, and the host-test path
-exist. `lib/evcore/` holds the shared data vocabulary and the rule-validated run
-configuration. There is no motor, encoder, controller, state machine, telemetry
-or serial-command code, and no vehicle hardware behavior has been validated.
+The pure core, the runtime shell and the operator interface exist, and the
+firmware builds for the Nano R4. On startup the vehicle layer drives the motor
+driver to its de-energized state before anything else runs, then runs a 50 Hz
+control tick in a frozen stage order. After each pass it services the serial
+port: a staged reply goes out first, then at most one received command is applied
+and answered, then the telemetry queue drains.
+
+It cannot move: every calibration value, safety limit and gain in
+`src/VehicleConfig.h` is a `Provisional` placeholder, the regulator refuses to
+enable, no run has been announced, and the run policy stays in `Idle`. The serial
+interface can report `status`, `checks`, `version` and the held configuration,
+and can ask to `announce` or `arm` - but with the placeholder configuration every
+arming intent is refused, and the refusal names the check that failed. No command
+commands an effort or a direction, and none starts a run. The watchdog is
+deliberately disabled pending its own on-target check.
+
+The vehicle still has no measured behavior: no motor, encoder, sensor, trigger,
+watchdog, serial timing or bottle mechanism behavior has been observed on
+hardware. See `VERIFIED_STATE.md`.

@@ -7,6 +7,7 @@
 
 #include <NearZeroVerifier.h>
 #include <Units.h>
+#include <VelocityEstimator.h>
 
 // Host tests for the near-zero verification policy: threshold + continuous dwell
 // over three independently supplied facts (a fresh valid estimate, the speed
@@ -71,6 +72,15 @@ void expectVerdictInvariant(const ev::NearZeroVerdict& verdict) {
     }
 }
 
+// One estimator answer, built by hand so the packet composition can be tested
+// against stated facts instead of against a live estimator. The fields are the
+// production type's; only the values are fixtures.
+ev::VelocityEstimate syntheticEstimate(double velocityMps, bool valid, bool claimed,
+                                       ev::VelocityEstimateStatus status, uint32_t elapsedMs) {
+    return ev::VelocityEstimate(velocityMps, valid, claimed, status, elapsedMs, 20U,
+                                static_cast<int64_t>(velocityMps * 200.0));
+}
+
 }  // namespace
 
 // --- Configuration ----------------------------------------------------------
@@ -99,6 +109,152 @@ void test_config_refuses_unmeasured_and_degenerate_values(void) {
     const ev::NearZeroConfig zeroDwell(measured(0.05), measured(0.0));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonPositiveDwell),
                           static_cast<int>(ev::validateNearZeroConfig(zeroDwell).error));
+}
+
+// --- The composed evidence packet -------------------------------------------
+
+void test_the_packet_pairs_the_current_claim_with_the_retained_window_estimate(void) {
+    // The two answers the estimator actually produces: the current cycle's
+    // explicit claim (no number), and the last window-derived estimate (a number,
+    // no claim). Neither is the verifier's evidence on its own.
+    const ev::VelocityEstimate claim = syntheticEstimate(
+        0.0, false, true, ev::VelocityEstimateStatus::NoEdgeTimeout, 1000U);
+    const ev::VelocityEstimate window = syntheticEstimate(
+        0.02, true, false, ev::VelocityEstimateStatus::Valid, 980U);
+
+    const ev::NearZeroEvidence packet =
+        ev::composeStopEvidence(claim, true, window, true, 1000U, 60U, 200U);
+    TEST_ASSERT_TRUE(packet.velocityUsable);
+    TEST_ASSERT_TRUE(packet.velocityMps == 0.02);
+    TEST_ASSERT_TRUE(packet.zeroSpeedClaimed);
+
+    // Its three facts are exactly the verifier's, so the composed packet is what
+    // earns the stop - and a stop is not earned on the first observation.
+    ev::NearZeroVerifier verifier(fixtureConfig());
+    TEST_ASSERT_FALSE(verifier.update(1000U, packet).verified);
+    TEST_ASSERT_FALSE(verifier.update(1199U, packet).verified);
+    TEST_ASSERT_TRUE(verifier.update(1200U, packet).verified);
+}
+
+void test_each_packet_fact_expires_on_its_own_limit(void) {
+    const ev::VelocityEstimate claim = syntheticEstimate(
+        0.0, false, true, ev::VelocityEstimateStatus::NoEdgeTimeout, 1000U);
+    const ev::VelocityEstimate window = syntheticEstimate(
+        0.02, true, false, ev::VelocityEstimateStatus::Valid, 980U);
+
+    // The speed fact is the packet's own, longer limit: usable at 200 ms old,
+    // not at 201.
+    TEST_ASSERT_TRUE(ev::composeStopEvidence(claim, true, window, true, 1180U, 60U, 200U)
+                         .velocityUsable);
+    TEST_ASSERT_FALSE(ev::composeStopEvidence(claim, true, window, true, 1181U, 60U, 200U)
+                          .velocityUsable);
+
+    // The claim is the control path's limit: the claim interval must be current,
+    // and the packet's longer speed limit must not stretch it.
+    TEST_ASSERT_TRUE(ev::composeStopEvidence(claim, true, window, true, 1060U, 60U, 2000U)
+                         .zeroSpeedClaimed);
+    TEST_ASSERT_FALSE(ev::composeStopEvidence(claim, true, window, true, 1061U, 60U, 2000U)
+                          .zeroSpeedClaimed);
+}
+
+void test_an_absent_answer_contributes_nothing_to_the_packet(void) {
+    const ev::VelocityEstimate claim = syntheticEstimate(
+        0.0, false, true, ev::VelocityEstimateStatus::NoEdgeTimeout, 1000U);
+    const ev::VelocityEstimate window = syntheticEstimate(
+        0.02, true, false, ev::VelocityEstimateStatus::Valid, 980U);
+
+    // No current answer this cycle: nothing claims a zero, however good the
+    // retained speed fact is.
+    const ev::NearZeroEvidence noClaim =
+        ev::composeStopEvidence(claim, false, window, true, 1000U, 60U, 200U);
+    TEST_ASSERT_FALSE(noClaim.zeroSpeedClaimed);
+    TEST_ASSERT_TRUE(noClaim.velocityUsable);
+
+    // No retained window answer: no usable speed, so the packet can never earn a
+    // stop however good the claim is.
+    const ev::NearZeroEvidence noSpeed =
+        ev::composeStopEvidence(claim, true, window, false, 1000U, 60U, 200U);
+    TEST_ASSERT_FALSE(noSpeed.velocityUsable);
+    TEST_ASSERT_TRUE(noSpeed.zeroSpeedClaimed);
+}
+
+void test_a_window_derived_zero_is_only_a_speed_fact_not_a_stop(void) {
+    // A covered window with no change is a valid zero and never a claim, so a
+    // packet built from it carries no zero-speed claim: the verifier must not
+    // earn a stop from a window alone.
+    const ev::VelocityEstimate windowZero = syntheticEstimate(
+        0.0, true, false, ev::VelocityEstimateStatus::Valid, 1000U);
+    const ev::NearZeroEvidence packet =
+        ev::composeStopEvidence(windowZero, true, windowZero, true, 1000U, 60U, 200U);
+    TEST_ASSERT_TRUE(packet.velocityUsable);
+    TEST_ASSERT_FALSE(packet.zeroSpeedClaimed);
+
+    ev::NearZeroVerifier verifier(fixtureConfig());
+    for (uint32_t ms = 1000U; ms <= 1600U; ms += 20U) {
+        TEST_ASSERT_FALSE_MESSAGE(verifier.update(ms, packet).verified,
+                                  "a window zero alone earned a stop");
+    }
+}
+
+void test_the_packet_limit_must_span_the_stop_dwell(void) {
+    const ev::NearZeroConfig dwell200(measured(0.05), measured(0.2));
+    TEST_ASSERT_TRUE(ev::stopEvidenceLimitSpansDwell(200U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(199U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(0U, dwell200));
+
+    // An unusable configuration has no dwell to span, so no limit spans it - a
+    // check that answered true here would look like approval of a placeholder.
+    TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(
+        1000U, ev::NearZeroConfig(measured(0.05), provisional(0.2))));
+
+    // The fixture policy the scenarios use: a 0.1 s dwell with a 200 ms limit.
+    TEST_ASSERT_TRUE(ev::stopEvidenceLimitSpansDwell(
+        200U, ev::NearZeroConfig(measured(0.05), measured(0.1))));
+}
+
+void test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop(void) {
+    // The estimator never reports the claim and a number together, so the packet
+    // is the only way the verifier's three facts hold at once. This drives the
+    // real estimator through a stop and asserts the composed packet verifies
+    // under the harness's policy: a 0.1 s dwell and a 200 ms speed-fact limit.
+    const ev::Sourced<double> scale = measured(0.0001);
+    ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{20U, 100U});
+    ev::NearZeroVerifier verifier(ev::NearZeroConfig(measured(0.05), measured(0.1)));
+
+    ev::VelocityEstimate current = estimator.update(0U, 0, scale);
+    ev::VelocityEstimate lastValid = current;
+    bool hasLastValid = false;
+    bool bothInOneAnswer = false;
+    bool verified = false;
+    uint32_t verifiedAtMs = 0U;
+
+    for (uint32_t ms = 20U; ms <= 800U; ms += 20U) {
+        // Moving at 1.0 m/s until 100 ms, then the count holds.
+        const int32_t ticks = ms < 100U ? static_cast<int32_t>(ms * 10U) : 1000;
+        current = estimator.update(ms, ticks, scale);
+        bothInOneAnswer = bothInOneAnswer || (current.valid && current.zeroSpeedClaimed);
+        if (current.valid) {
+            lastValid = current;
+            hasLastValid = true;
+        }
+        if (verifier
+                .update(ms, ev::composeStopEvidence(current, true, lastValid, hasLastValid, ms,
+                                                    60U, 200U))
+                .verified) {
+            verified = true;
+            verifiedAtMs = ms;
+            break;
+        }
+    }
+
+    TEST_ASSERT_FALSE_MESSAGE(bothInOneAnswer,
+                              "one estimator answer carried a window number and the claim");
+    TEST_ASSERT_TRUE_MESSAGE(verified, "the composed packet never earned a stop");
+    // The dwell is a real observed interval, so the stop cannot be verified
+    // before the claim has existed for it: the count stops at 100 ms, the
+    // estimator's no-edge interval is 100 ms, and the dwell is another 100 ms.
+    TEST_ASSERT_TRUE_MESSAGE(verifiedAtMs >= 300U,
+                             "a stop was verified before its dwell could have elapsed");
 }
 
 // --- Refusals ---------------------------------------------------------------
@@ -386,5 +542,11 @@ int main(int, char**) {
     RUN_TEST(test_reset_clears_the_observed_interval);
     RUN_TEST(test_an_update_gap_is_credited_as_continued_evidence);
     RUN_TEST(test_verdict_invariants_hold_over_a_varied_sequence);
+    RUN_TEST(test_the_packet_pairs_the_current_claim_with_the_retained_window_estimate);
+    RUN_TEST(test_each_packet_fact_expires_on_its_own_limit);
+    RUN_TEST(test_an_absent_answer_contributes_nothing_to_the_packet);
+    RUN_TEST(test_a_window_derived_zero_is_only_a_speed_fact_not_a_stop);
+    RUN_TEST(test_the_packet_limit_must_span_the_stop_dwell);
+    RUN_TEST(test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop);
     return UNITY_END();
 }

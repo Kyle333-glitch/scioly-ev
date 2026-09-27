@@ -1,6 +1,8 @@
 #pragma once
 
+#include "Snapshots.h"
 #include "Units.h"
+#include "VelocityEstimator.h"
 
 #include <cmath>
 #include <cstdint>
@@ -129,6 +131,87 @@ struct NearZeroEvidence {
     // zeroSpeedClaimed): no encoder change observed for its no-edge interval.
     bool zeroSpeedClaimed = false;
 };
+
+// ---------------------------------------------------------------------------
+// Composing the packet - the pairing decision, in one production owner
+// ---------------------------------------------------------------------------
+//
+// The three facts above never arrive in one estimator answer. `VelocityEstimator`
+// reports either a window-derived number with `zeroSpeedClaimed == false` or the
+// explicit zero-speed claim with `valid == false` - never both, and both
+// behaviours are pinned by `test_velocity_estimator`. A caller that needs the
+// verifier's three facts at once, which is every sequence that has to earn a
+// verified stop (the reversal gate and the final stop), must therefore pair the
+// current cycle's claim with the last window-derived estimate, under a staleness
+// limit of its own.
+//
+// That pairing is a production decision, not each caller's private arrangement:
+// two callers who pair different answers would be verifying two different stops.
+// It lives here, next to the verdict it serves, and is pinned by its own tests.
+
+// True when a packet's speed-fact staleness limit can span the stop dwell.
+//
+// The zero the packet rests on is always produced *before* the claim interval it
+// is paired with: the window-derived estimate is the last one that observed
+// movement, and the claim only appears after the estimator's own no-edge
+// interval. The verdict is earned by the pair holding for the whole dwell, so a
+// limit shorter than the dwell cannot span the interval the verdict is earned
+// over, and such a packet can never verify a stop. Refusing that configuration is
+// the difference between a sequence that fails loudly and one that can only time
+// out.
+//
+// This is a configuration-build check, not a runtime clamp: it does not make a
+// stop verifiable, it only refuses a configuration that cannot be. An unusable
+// near-zero configuration is refused too, because there is no dwell to span.
+//
+// The comparison absorbs decimal floating-point representation error only, never
+// a real shortfall: 0.2 s is 200.00000000000003 ms in binary, and a 200 ms limit
+// is the whole dwell. The tolerance is far below one millisecond, which is the
+// resolution of the clock both the dwell and the age are measured in.
+inline bool stopEvidenceLimitSpansDwell(uint32_t speedMaxAgeMs, const NearZeroConfig& config) {
+    if (!validateNearZeroConfig(config).ok) {
+        return false;
+    }
+    constexpr double kToleranceMs = 1e-6;
+    return static_cast<double>(speedMaxAgeMs) + kToleranceMs >= config.dwellS.value * 1000.0;
+}
+
+// Composes the verifier's evidence packet from the two production answers a
+// caller has, so no sequence rebuilds the composition by hand.
+//
+// `currentEstimate` is this cycle's estimator answer: its explicit zero-speed
+// claim is the claim fact, accepted only within the control path's own freshness
+// limit (`claimMaxAgeMs`). A claim older than the control path's staleness limit
+// is not describing this cycle, and pairing it anyway would verify a stop from a
+// fact the control path has already stopped acting on. An absent current answer
+// claims nothing.
+//
+// `lastValidEstimate` is the most recent window-derived estimate (the caller
+// keeps it whenever `VelocityEstimate::valid` is true), and its measured speed is
+// the speed fact. It is aged against `speedMaxAgeMs`, the packet's own, longer
+// limit: the speed fact was produced before the claim interval it is paired with,
+// so it needs a limit that spans the dwell (`stopEvidenceLimitSpansDwell()`).
+// Without a retained estimate the packet carries no usable speed at all.
+//
+// Nothing is invented here: both facts are production outputs, both limits are
+// caller policy, and a fact that does not hold is reported false rather than
+// replaced by a plausible value.
+inline NearZeroEvidence composeStopEvidence(const VelocityEstimate& currentEstimate,
+                                            bool hasCurrentEstimate,
+                                            const VelocityEstimate& lastValidEstimate,
+                                            bool hasLastValidEstimate, uint32_t nowMs,
+                                            uint32_t claimMaxAgeMs, uint32_t speedMaxAgeMs) {
+    NearZeroEvidence evidence;
+    evidence.velocityUsable =
+        velocityReadiness(hasLastValidEstimate, lastValidEstimate,
+                          sampleAge(nowMs, lastValidEstimate.elapsedMs, speedMaxAgeMs))
+            .usable;
+    evidence.velocityMps = lastValidEstimate.velocityMps;
+    const SampleAge claimAge = sampleAge(nowMs, currentEstimate.elapsedMs, claimMaxAgeMs);
+    evidence.zeroSpeedClaimed =
+        hasCurrentEstimate && claimAge.fresh && currentEstimate.zeroSpeedClaimed;
+    return evidence;
+}
 
 // Why the verdict is what it is.
 enum class NearZeroStatus : uint8_t {
