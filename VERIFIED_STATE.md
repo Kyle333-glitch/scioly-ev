@@ -101,7 +101,10 @@ appear in the hardware table above.
 ## How to promote a fact
 
 1. Perform the test on real hardware, following the safety rules in `AGENTS.md`
-   (unloaded drivetrain, conservative PWM, one behavior at a time).
+   (unloaded drivetrain, conservative PWM, one behavior at a time). The exact
+   procedures - prerequisites, variables, measurements, repetitions, safe-stop
+   conditions and the acceptance rule - are in `docs/bringup/`. They are written
+   ahead of the hardware, are not evidence, and change no row until they pass.
 2. Record the raw measurement or observation, not just a conclusion.
 3. Update the row: status **VERIFIED**, evidence pointer, and date.
 4. Add an entry to `DEVELOPMENT_LOG.md` describing what was tested and observed.

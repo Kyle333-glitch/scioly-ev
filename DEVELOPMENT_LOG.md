@@ -2604,3 +2604,387 @@ driver's idle levels and truth table (#2), and then the polarity measurement tha
 unblocks every gain, scale and limit in `src/VehicleConfig.h`. The nFAULT fault
 identity and every motion command stay deliberately absent until those exist.
 
+---
+
+## D15 - 2026-09-27 - P8A - Telemetry analysis tooling: a schema mirror, a strict parser, and reproducible reports
+
+**Entry gate**
+
+The entry gate was that the P7B telemetry schema is stable enough to build
+tooling on. It is: `lib/evcore/src/TelemetryRecord.h` freezes the prefixes, the
+field set and every vocabulary spelling, `TelemetryFormat.h` freezes the field
+order and the numeric rendering, and the host tests pin both against the tables.
+Nothing in this entry changes any of that, and no firmware source was touched.
+
+**Why**
+
+There is no vehicle hardware yet, so there is no real log - and a parser and a
+chart writer that have never read a record prove nothing. The gap this stage
+closes is *interpretation latency*: when hardware arrives, the first capture has
+to be readable immediately, in the same minute it is taken, without installing a
+toolchain or writing a notebook. The tooling therefore had to exist, be validated
+against something, and be unable to confuse what the firmware believed with what
+the vehicle did.
+
+**What was added (`tools/`)** - host-side Python only, no firmware change
+
+- `tools/telemetry/analyze.py` (new) - the single entry point.
+- `tools/telemetry/evtelemetry/schema.py` (new) - the mirror of the frozen
+  schema: the version, both prefixes, the missing-field marker and the four
+  fixed-point sentinels, the field set and order of both record kinds, and every
+  enumerator's wire spelling.
+- `tools/telemetry/evtelemetry/parse.py` (new) - one-line and whole-stream
+  parsing, with the named failures `SchemaVersionError`, `FieldShapeError` and
+  `FieldValueError`; per-lane `millis()` unwrapping using the firmware's own
+  unsigned-difference rule; and an optional continue-on-error mode that records
+  bad lines instead of hiding them.
+- `tools/telemetry/evtelemetry/metrics.py` (new) - descriptive metrics: the
+  transition timeline from both the event lane and the sample train with their
+  disagreements, position, measured vs commanded velocity and the tracking error,
+  effort overall and per motor mode, raw battery/current counts, the reported
+  control `dt`, drops and their monotonicity, phase durations, braking/reversal
+  *state* timings, the armed window, and believed endpoints.
+- `tools/telemetry/evtelemetry/endpoints.py` (new) - the measured-vs-believed
+  comparison from a small hand-measurement CSV, with a strict header.
+- `tools/telemetry/evtelemetry/svgplot.py` (new) - a dependency-free,
+  deterministic SVG line-chart writer with phase bands, reference lines and event
+  markers.
+- `tools/telemetry/evtelemetry/report.py` (new) - the report writer, the plot
+  composition and the guard that refuses to write any path naming a project
+  authority file.
+- `tools/telemetry/evtelemetry/synthetic.py` (new) - the deterministic fixture
+  generator, including a variant with a dropped burst across a phase boundary and
+  a variant that faults mid-run.
+- `tools/telemetry/evtelemetry/cli.py` (new) - `synth` and `analyze`.
+- `tools/telemetry/samples/*.csv` (new, committed) - the three synthetic
+  fixtures, each headed by `# SYNTHETIC` lines and a "never cite in
+  VERIFIED_STATE.md" warning.
+- `tools/telemetry/tests/` (new) - 91 host tests (see Evidence).
+- `tools/telemetry/README.md` (new) and `README.md` (project layout, the `tools/`
+  entry, and the P8A stage line). `.gitignore` gains `data/reports/`.
+
+**Decisions**
+
+1. **The schema is mirrored, and the mirror is tested against the firmware.**
+   `schema.py` is a copy, and a hand-maintained copy is exactly the kind of thing
+   that goes stale silently. `test_schema_mirror.py` re-reads
+   `TelemetryRecord.h`, `TelemetryFormat.h`, `ConfigurationChecks.h` and
+   `BoundedText.h`, extracts the field order from the formatter calls, extracts
+   each vocabulary from its `switch`, and fails if the mirror disagrees. It skips
+   - never silently passes - when the headers are absent, and an extraction that
+   finds nothing is a failure, because "could not verify" must not read like
+   "verified".
+2. **A line that claims to be telemetry must parse, or the parse fails.**
+   Anything beginning with the `EV` root is telemetry; a wrong version, a renamed
+   field, a reordered field set, a value outside its firmware type, a
+   non-schema number spelling or an unknown vocabulary entry is refused with the
+   file, the line number, the offending line and the expected shape. Accepting a
+   renamed column is how an analysis ends up describing a record that was never
+   logged. Non-telemetry lines (operator responses, `BOOT,...`, comments) are
+   counted as ignored, not rejected, because a capture is not required to be pure
+   telemetry.
+3. **Time is unwrapped per lane, with the firmware's own arithmetic.** `millis()`
+   wraps, and `SOFTWARE_ARCHITECTURE.md` section 4 fixes unsigned subtraction as
+   the rule for elapsed time, so a duration computed here cannot disagree with
+   the firmware. The two lanes are unwrapped independently because the event lane
+   drains first: an event for a later tick legitimately precedes a sample for an
+   earlier one, and one shared counter would read that as a jump of nearly 2^32 ms.
+4. **`ovf` is "no value", not infinity.** The formatter writes `ovf` for a finite
+   value beyond its range, which is a bug or uninitialised data. Representing it
+   as infinity would let it enter a mean as a huge measurement; it parses to
+   `None` and stays out of every statistic.
+5. **Descriptive metrics only, and the names say so.** `batt_counts` and
+   `curr_counts` are reported as raw ADC counts with the words "no conversion
+   documented" attached (`SOFTWARE_ARCHITECTURE.md` section 12 records that no
+   raw-to-engineering-unit relationship exists in project sources, so inventing
+   one here would turn a guess into something that looks like a measurement).
+   Braking and reversal are reported as phase-boundary timings, each labelled "not
+   stopping distances". "Believed" prefixes every firmware-derived endpoint. A
+   log says what the chain believed; it is not evidence about the vehicle.
+6. **Reproducible bytes, so a chart can be cited.** No timestamps, no host names,
+   no random ids, sorted JSON keys, rounded numbers before printing, fixed
+   element order, and a fixed `sha256` of each input in the manifest. Two runs
+   over the same log produce identical files - which is what the acceptance gate
+   asked for and what a diff between two sessions needs.
+7. **Standard library only.** `AGENTS.md` section 25 requires a reason before a
+   library is added, and here there was none: a plot writer of about 300 lines
+   removed the only real dependency (matplotlib) and removed the question of
+   whether a Windows machine without it could run the tool at all. SVG is text, so
+   a reviewer can diff two charts.
+8. **The synthetic fixtures are generated, committed, and labelled.** The parser
+   and the plots are validated against `EVS1`/`EVE1` lines written by a mirror of
+   the firmware formatter - not a convenient paraphrase - and a fixture-drift test
+   asserts the committed files are byte-identical to what the generator produces.
+   Each file opens with `# SYNTHETIC` and an explicit "never cite it in
+   `VERIFIED_STATE.md`". The generator also produces the two conditions that are
+   hard to get on purpose from real hardware: a dropped burst straddling a phase
+   boundary (which is what makes the sample lane and the event lane disagree) and
+   a fault latched mid-run.
+9. **The tool refuses to write an authority file.** `report.py` checks every
+   component of an output path against `VERIFIED_STATE.md`,
+   `DEVELOPMENT_LOG.md`, `SOFTWARE_ARCHITECTURE.md` and `AGENTS.md`, and raises
+   `ReportError` if one matches. A directory inside a report tree named after the
+   evidence record is refused too - it is a trap for whoever reads the tree next.
+   A test additionally asserts the repository's `VERIFIED_STATE.md` is unchanged
+   after a full `synth` + `analyze` run.
+10. **Defaults are anchored to the repository root, not the current directory.**
+    A relative default would have quietly written a second
+    `tools/telemetry/samples` wherever the tool was started from; this was found
+    by running the command from the wrong directory, which is recorded here
+    because it is exactly the kind of defect a test would not have caught.
+
+**Evidence (software verification only; no physical test is applicable)**
+
+- `pio run` (nano_r4) - **SUCCESS**, RAM **17.8%** (5848 / 32768 bytes), Flash
+  **24.8%** (65028 / 262144 bytes). Unchanged from D14, which is the point: this
+  stage added no firmware code, so the image must be identical, and it is.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -
+  **91 test cases, 91 succeeded**: `test_schema_mirror` 9, `test_parse` 34,
+  `test_metrics` 23, `test_cli` 25. The analyzer runs end to end on the three
+  committed synthetic fixtures, from a plain `python` with nothing installed.
+- Acceptance gate, item by item:
+  1. *runs locally on synthetic samples* - `analyze` on
+     `tools/telemetry/samples/*.csv` exits 0 and writes a per-run report
+     (`metrics.json`, `summary.txt`, six SVGs) plus `comparison.json/.txt` and
+     `manifest.json`. All 18 SVGs parse as XML; all JSON files load.
+  2. *parsing fails clearly on incompatible or corrupt input* - a bumped schema
+     version, a truncated field set, a renamed column, a non-numeric
+     measurement and a missing file each exit 2 with a message naming the file,
+     the line number, the offending line and what was expected, and no manifest
+     is written. `--continue-on-error` instead records the bad line in
+     `parse_errors.txt` and states in that file that the metrics describe a
+     partial log.
+  3. *metrics and plots are reproducible* - analysing the same log twice into two
+     directories produces a byte-identical file tree, asserted by comparing every
+     file. The synthetic generator is likewise byte-stable.
+  4. *synthetic data is never written into `VERIFIED_STATE.md`* - the write guard
+     is unit-tested for all four authority files, and `VERIFIED_STATE.md`'s
+     `sha256` is asserted unchanged across a full `synth` + `analyze` run.
+- Cross-checks worth recording: the parser is exercised against the literal
+  `EVS1`/`EVE1` lines that the firmware's own `test_telemetry_format` pins, so it
+  reads a record a board actually emits; and the synthetic fixtures are asserted
+  byte-identical to the generator's output, so a fixture cannot drift from the
+  code that claims to produce it.
+- `git status`: `.gitignore` and `README.md` modified; `tools/` untracked. No
+  `src/`, `lib/`, `include/`, `platformio.ini` or test-target change. No commit
+  was made. `data/reports/` was added to `.gitignore` so a generated report never
+  lands in the repository - the raw capture is the record, not the report.
+
+**Not verified**
+
+Everything about the vehicle, and one thing about the tool: it has never read a
+byte that came off a board. Every hardware row in `VERIFIED_STATE.md` stays
+UNVERIFIED, and **no row was added or modified** - in particular no row claims
+that the tooling works, because a passing host test is not evidence about the
+vehicle and this stage produced no measurement of any kind. The tooling's own
+limits are part of the contract: it cannot detect a wheel that slips, a brake
+that grabs, a driver that ignores an input or an encoder that counts wrongly. It
+can only say what the firmware believed and commanded.
+
+**Hard stop honored**
+
+No physical conclusion is drawn anywhere in this stage, and none is available to
+draw: the fixtures are generated, their positions are arithmetic over a velocity
+model, and their phase timings are a fiction written by the generator. The
+numbers in a synthetic report describe the generator, not a vehicle. The tool
+exists so that a *real* capture can be read the day hardware arrives; it does not
+substitute for that capture.
+
+**Pending physical work**
+
+Unchanged from D14 and D13, and now the first thing a real capture feeds: wiring
+continuity (#1), the driver's idle levels and truth table (#2), then the polarity
+measurement (#3, #4). Once a session has been captured, the immediate use of this
+tooling is to read `control_dt`, the drop counters and the phase timeline from
+that capture, and to record the measured endpoints by hand alongside it - while
+remembering that the comparison it prints is arithmetic, not a conclusion.
+
+---
+
+## D16 - 2026-09-27 - P8B - Exact physical bring-up and experiment protocols
+
+**Entry gate**
+
+The P7 runtime and hardware boundary (D13), the operator interface and telemetry
+(D14) and the P8A analysis tooling (D15) are available. No vehicle hardware is
+available, and none was used. Nothing was committed.
+
+**Why**
+
+The pending physical tests recorded in D13, D14 and `VERIFIED_STATE.md` were a
+list of *topics*: "wiring continuity (#1), the driver's truth table (#2), the
+polarity measurement (#3, #4)". A list of topics is not a procedure, and the gap
+between the two is exactly the delay that appears the day the board arrives:
+someone has to decide what to hold constant, what to vary, what to record, how
+many times, when to stop, and what result would count. This stage writes those
+procedures ahead of the hardware so the first hour with the vehicle is
+measurement, not test design. It also makes visible, before the bench, the
+bench-only software several of the procedures need - which is the other half of
+the same delay.
+
+**What was added - documentation only, no firmware change**
+
+- `docs/bringup/README.md` (new) - the index: the three check classes, the
+  protocol order and the blocking graph, the common safety preconditions, the
+  record every session leaves, how a result reaches `VERIFIED_STATE.md`, the
+  protocol format, and the coverage matrix that maps every planned
+  hardware-verification field to the protocol that would verify it.
+- `docs/bringup/P-H0-nano-upload-serial.md` (new) - upload/boot reliability, the
+  operator interface on a real host, malformed input, the boot line, and the
+  observed control cadence with the transport idle, busy and unread.
+- `docs/bringup/P-H0W-watchdog-qualification.md` (new) - baseline reliability
+  with the watchdog disabled, enabling the prepared path in a bench build,
+  healthy soaks at three load conditions, a deliberate main-loop hang, the
+  reset and the re-initialization, recovery and re-flash cycles, and the timeout
+  chosen from the observed margin. It states its own scope limit: it establishes
+  that the MCU resets, **not** that a reset de-energizes the motor output.
+- `docs/bringup/P-H1A-driver-electrical.md` (new) - wiring continuity with power
+  off, the driver's idle levels, the level-to-output truth table with the motor
+  disconnected (including the awake-`EN`-low state the plan deliberately does
+  not name), and the PWM behaviour. It explicitly cannot establish motor
+  polarity, because no motor is connected.
+- `docs/bringup/P-H1B-sense-inputs.md` (new) - battery raw counts against a metered
+  supply with an explicit established/not-established verdict, the quiescent
+  current count with the scaling marked unestablished, the `nFAULT` input and
+  idle level with the trip behaviour deferred, and the trigger's active level
+  and bounce.
+- `docs/bringup/P-H2-encoder-manual.md` (new) - hand-driven tick sign (#4),
+  ticks per revolution and counting quality (#5), with an explicit statement
+  that the acceptance is repeatability, not agreement with a predicted count.
+- `docs/bringup/P-H3-first-low-duty-drive.md` (new) - the first powered step: one
+  PH level and one duty increment at a time, drivetrain unloaded, the minimum
+  duty that moves from rest, the de-energized behaviour, and the polarity fact
+  (#3) once the forward convention is defined mechanically.
+- `docs/bringup/P-H4-rollout.md` (new) - the kinematic scale hand-rolled
+  (unpowered) and the powered scale separately, so the difference between them is
+  the first #10 slip evidence instead of being averaged away; sets #6.
+- `docs/bringup/P-H5-velocity-trace.md` (new) - the unloaded effort-to-velocity
+  trace and the estimator's own `vel_ok` windows, recorded as H6's input.
+- `docs/bringup/P-H6-ff-pi-tuning.md` (new) - feed-forward from the measured
+  trace, then one gain at a time against a fixed profile at two supply voltages;
+  no gain value is prescribed.
+- `docs/bringup/P-H7-distance-braking-reversal.md` (new) - the bootstrap order
+  (measure the brake offsets off the run path, then arm), distance accuracy at
+  three targets so a scale error and a zero error are distinguishable, braking
+  distance against speed with the relationship recorded rather than averaged,
+  and the stop-before-reverse verification.
+- `docs/bringup/P-H8-bottle-integration.md` (new) - one mechanism variable at a
+  time, the bottle's measured final position over repeats, and the failure modes;
+  rule-derived line and placement distances stay rule-derived.
+- `docs/bringup/P-H9-fault-injection.md` (new) - one injected fault at a time,
+  mapped to the `FaultCode` vocabulary, plus the electrical `nFAULT` trip and a
+  low battery, which the firmware does not yet enforce and which are recorded as
+  "enforcement pending" rather than as passing.
+- `docs/bringup/P-H10-full-run-repeatability.md` (new) - ten or more identical
+  complete runs, hand measurements in the tooling's own CSV alongside the
+  captures, the residual classified as systematic or random, and the #12
+  verdict recorded from the measured slip.
+- `README.md` - the `docs/bringup/` layout entry, the P8B stage line, and P8A
+  moved out of "(current)".
+- `VERIFIED_STATE.md` - the promotion step now points at `docs/bringup/` for the
+  exact procedure, while stating that the procedures change no row until one
+  passes. No row, and no status, was changed.
+
+**Decisions**
+
+1. **Three check classes, kept apart.** Every protocol is labelled electrical
+   gate (**E**), on-target software check (**S**) or physical behaviour check
+   (**P**), with the classes it also contains listed. An electrical fact, a
+   software fact and a physical fact have different evidence, and the point of
+   the label is that nobody promotes one as another.
+2. **One unknown per protocol.** The list was split rather than compressed: the
+   driver's truth table is measured with the motor disconnected (H1A), so a
+   wrong-direction result in H3 cannot be blamed on an unmapped driver; the
+   rollout is measured hand-rolled and powered separately (H4), so slip is a
+   measurement instead of an error term. Where a protocol could not isolate a
+   variable it says so and defers it (the current scaling, the `nFAULT` trip).
+3. **No target values are prescribed.** Where the point is to measure a number -
+   rollout, minimum drive duty, braking distance, gains, the watchdog timeout -
+   the protocol states a repeatability or decision criterion to be
+   *pre-registered* and records whatever the hardware produces. The existing
+   `Provisional` constants are named as placeholders to replace, never as
+   starting values to keep.
+4. **The watchdog protocol does not claim motor-output safety.** Its scope limit
+   is written into it: H0W establishes that the MCU resets and re-initializes and
+   observes the pin levels afterwards; what those levels do at the driver outputs
+   is H1A's measurement. This is the one place where it would have been easy to
+   write one sentence too many.
+5. **The timeout is chosen from the realized timer, not the requested number.**
+   The library quantizes the timeout up to a prescaler x reload period and
+   returns 0 when the request is unachievable; the protocol requires recording
+   the realized period and refusing an unachievable request, and forbids
+   inheriting the current `250 ms` placeholder without evidence.
+6. **Outstanding bench instrumentation is named, not stubbed.** Four bench-only
+   instruments are listed in the index and referenced by the protocols that need
+   them (loop/watchdog counters, a bounded diagnostic drive, a raw tick readout,
+   a raw trigger level), together with the requirement that none can exist in a
+   production image and none can become a control input. They are   not built; the point of the list is that they are software work identified
+   before the bench, and that the diagnostic drive must not become a second
+   unaudited path around `SafetyAuthority`. The isolation mechanism was decided
+   rather than left open: a separate PlatformIO `bench` environment beside
+   `nano_r4` and `native`, so the production environment never compiles the bench
+   sources at all. A build flag inside the production translation units was
+   rejected because a flag can be flipped in the image that ships. The `bench`
+   environment itself is **not** added yet; it is the first piece of that
+   software work and part of the same deferral.
+7. **The coverage matrix is the acceptance gate.** Every hardware fact
+   `VERIFIED_STATE.md` lists, and the three on-target facts that have no row yet
+   (the watchdog and its timeout, the host-drain behaviour of the link, the
+   observed cadence), is mapped to the protocol that would produce it. A fact
+   with no protocol is a gap; a protocol with no fact is scope creep, and the
+   index says which is which.
+8. **Armed-run bootstrapping is written down.** `arm` is refused while any
+   calibration value is provisional, and the brake offsets *are* calibration, so
+   the braking measurement cannot itself use the armed run path. H7 records the
+   order: characterize off the run path, write the measured values, then arm and
+   run the real path - and marks any number that crossed that boundary.
+
+**Evidence (documentation and tooling verification only; no physical test is applicable)**
+
+- No firmware source changed: `src/`, `lib/`, `include/`, `test/`,
+  `platformio.ini` and `tools/` are untouched by this stage. The image is
+  therefore expected to be identical, and it is: `pio run` (nano_r4) - SUCCESS,
+  RAM **17.8%** (5848 / 32768 bytes), Flash **24.8%** (65028 / 262144 bytes),
+  the same figures D15 recorded.
+- `pio test -e native` - **456 test cases, 456 succeeded** (unchanged from D14),
+  confirming nothing outside `docs/` was disturbed.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -
+  **91 test cases, OK.** The tooling the protocols cite still works.
+- The one command this stage cites from the tooling was executed to confirm the
+  documentation is exact: `analyze --print-measurement-template` prints the
+  header and exits, but the `analyze` subcommand still requires a log positional,
+  so the working invocation is
+  `python tools/telemetry/analyze.py analyze --print-measurement-template <any-log>`.
+  P-H10 records that invocation, because a procedure that cannot be run as
+  written is not a procedure.
+- `docs/bringup/` contains **14 files**: the index and the thirteen protocols
+  (H0, H0W, H1A, H1B, H2, H3, H4, H5, H6, H7, H8, H9, H10). Every link in the
+  index resolves to a file on disk.
+- `git status`: `docs/bringup/` is new and untracked; `README.md`,
+  `VERIFIED_STATE.md` and `DEVELOPMENT_LOG.md` are modified. No commit was made.
+
+**Not verified**
+
+Everything about the vehicle, and the procedures themselves. No protocol has
+been run, no hardware was powered, no measurement exists, and no row in
+`VERIFIED_STATE.md` was added or modified - the hardware table still reads
+UNVERIFIED #1-#12. The protocols are a plan, and a plan is not evidence. The
+bench instrumentation several of them require does not exist, so those protocols
+cannot be executed as written until it is built. In particular, this stage makes
+**no** claim that the watchdog starts, refreshes or resets, that the driver
+levels are correct, that the encoder counts, or that any distance conversion is
+right.
+
+**Hard stop honored**
+
+The stage stops where it must: before any hardware is powered. Writing a
+procedure is not running a test, and nothing here is an observation.
+
+**Pending physical work**
+
+Execute the protocols in order, starting with P-H0 (upload, boot and serial
+link), then its watchdog qualification P-H0W, then the driver electrical checks
+P-H1A and P-H1B. The first four protocols need no motion and can run as soon as
+a board exists; H3 is the first powered step and every direction, speed and
+distance result depends on it.
+

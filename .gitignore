@@ -12,9 +12,13 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Generated test/calibration output
+# Generated test/calibration output. Scratch only: promote the captures that back a
+# result into data/evidence/ and the pre-registration into data/prereg/ (both committed).
 data/raw/
 logs/
+
+# Generated telemetry analysis reports (the raw capture is the record, not the report)
+data/reports/
 
 # OS/editor junk
 .DS_Store

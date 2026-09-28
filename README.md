@@ -37,11 +37,21 @@ measurements override assumptions.
 - `lib/` - pure logic modules with no Arduino dependency, covered by host tests.
 - `test/` - host-side unit tests (not shipped in the firmware).
 - `scripts/` - build-tooling helpers.
+- `tools/` - PC-side analysis tooling. `tools/telemetry/` parses the firmware's
+  telemetry schema, computes descriptive metrics, writes reproducible SVG charts
+  and compares a run's believed endpoints against hand measurements. Standard
+  library only; see `tools/telemetry/README.md`. It describes what the firmware
+  reported and reaches no conclusion about the vehicle.
 - `docs/` - reference material, including the event rules the firmware is built
   against and the planned hardware interfaces.
 - `docs/hardware/` - the planned hardware interface and the bench tests that
   would replace it with measured facts. Nothing in it is evidence about the
   vehicle yet.
+- `docs/bringup/` - the exact physical bring-up and experiment protocols, one per
+  pending hardware fact, each with prerequisites, held and varied variables, the
+  measurements and repetitions, safe-stop conditions, the acceptance rule, and
+  which `VERIFIED_STATE.md` entry it may update. Pre-written procedures, not
+  evidence, and not run.
 
 ## Building
 
@@ -89,14 +99,28 @@ recorded in `DEVELOPMENT_LOG.md`.
   control tick and its scheduler, the encoder interrupt, the raw input adapters,
   the motor driver adapter, and the single central watchdog health checkpoint. No
   physical behavior is claimed by any of it.
-- **P7B (current)** - the operator interface and machine-readable telemetry: the
-  bounded serial command parser, the operator policy that admits or refuses each
-  command, the response formatter, the versioned telemetry schema with its drop
-  counters, and the non-blocking line transport. Both are consumers of the control
-  chain; neither can change a run.
-- **Next** - physical bring-up: the pending tests recorded in
-  `DEVELOPMENT_LOG.md` (D13, D14) and in `VERIFIED_STATE.md`, starting with wiring
-  continuity and the motor driver's idle levels and truth table.
+- **P7B** - the operator interface and machine-readable telemetry: the bounded
+  serial command parser, the operator policy that admits or refuses each command,
+  the response formatter, the versioned telemetry schema with its drop counters,
+  and the non-blocking line transport. Both are consumers of the control chain;
+  neither can change a run.
+- **P8A (current)** - PC-side analysis tooling in `tools/telemetry/`, so a capture
+  can be interpreted as soon as hardware arrives: the schema mirror, the strict
+  parser, descriptive metrics, reproducible SVG charts and the endpoint
+  comparison. It is validated against clearly-labelled synthetic fixtures and
+  makes no claim about any vehicle.
+- **P8B (current)** - exact physical bring-up and experiment protocols in
+  `docs/bringup/`: upload/boot/serial link, the watchdog qualification and its
+  timeout choice, the driver electrical checks, the sense inputs, hand-driven
+  encoder counting, the first powered drive, rollout and slip, the velocity
+  trace, tuning, distance/braking/reversal, the bottle, fault injection, and
+  full-run repeatability. Each protocol isolates one unknown and names what it
+  may record. The bench instrumentation several of them need is listed there and
+  is **not built**; there is no motion command in the firmware. None of it is
+  evidence and none of it has been run.
+- **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
+  boot and serial link), then its watchdog qualification P-H0W, then the driver
+  electrical checks P-H1A and P-H1B.
 
 Do not build later-stage vehicle behavior before the earlier stage has been
 validated.
