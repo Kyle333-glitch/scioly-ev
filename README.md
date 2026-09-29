@@ -83,7 +83,8 @@ not as telemetry.
 
 The verbs are `bench help`, `bench arm`, `bench drive <fwd|rev> <permille> <ms>`,
 `bench stop`, `bench reset`, `bench health`, `bench drive-status`, `bench ticks`,
-`bench inputs` and `bench pins`. Nothing is applied before a deliberate `bench arm`;
+`bench inputs`, `bench pins`, `bench resetsrc [clear]` and `bench wdt`. Nothing is
+applied before a deliberate `bench arm`;
 every command expires on its own; an abort or an encoder that stops changing while
 driving latches until `bench reset`; and the physical kill switch is still the
 primary stop in every powered step. No protocol may use the bench drive until its

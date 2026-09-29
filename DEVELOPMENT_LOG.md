@@ -4804,3 +4804,180 @@ on, the D21-D28 span is committed. The one claim that had gone stale - the
 - **H1A** is the next stage, and it was not started.
 - The board was not touched in this entry: no upload, no serial session, no motor
   supply, and no hardware connected.
+
+---
+
+## D30 - 2026-09-29 - H0W Steps 3 and 7 closed - the reset is attributed by the silicon, the realized period is measured, and Step 8's criteria are written down
+
+**Objective**
+
+Two H0W clauses were being met by inference rather than measurement, and one of them
+is the clause the protocol exists for:
+
+- Step 3 asks for the restart to be attributed to the watchdog, and adds "if a
+  reset-cause register is readable on this core, record it; do not assume one
+  exists". D27/D28 attributed resets by the latency scaling with the request and by
+  there being a single refresh path. That is inference.
+- Step 7 asks for the **realized** period to be recorded, and Step 1 warns that the
+  requested timeout is not it. D28 recorded the period as "bounded, not clocked".
+
+The board was available for one last session, so both were measured instead of
+carried forward.
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `48598ea` (the D29 commit); working tree clean.
+- Board on `COM3` (`USB VID:PID=2341:0074`); motor supply off and disconnected. No
+  driver, encoder, motor or battery was connected at any point in this entry.
+- `src/WatchdogCheckpoint.h`: `kWatchdogTimeoutMs = 114`, enablement false in the
+  vehicle image; `src/bench/BenchMain.cpp` hook at `0U`.
+
+**What was added**
+
+Four things, all **bench-only** - they live in `src/bench/`, which `env:nano_r4` does
+not compile, and the vehicle image contains none of their symbols:
+
+- `src/bench/ResetCause.h` and `bench resetsrc [clear]`: reads
+  `R_SYSTEM->RSTSR0`/`RSTSR1` and decodes the masks the RA4M1 device header defines,
+  reporting the raw values alongside the flags. `clear` writes zero to both,
+  which is how this family's reset flags are cleared, and the write is
+  self-verifying - the readout after it shows whether it took effect.
+- `src/bench/WatchdogRegisters.h` and `bench wdt`: reads `WDTCR` (TOPS/CKS/RPES/RPSS,
+  with the vendor's masks), `WDTSR` (the live `CNTVAL` down-counter and its two
+  flags), and `pclkbHz()` from the FSP's own clock accessor. It deliberately does
+  **not** decode a period from those fields: that mapping is hardware-manual
+  knowledge, not a header this build can see, so the record decodes against the
+  vendor's own `wdt_timeout_t`/`wdt_clock_division_t` enumerations instead.
+- `wdt_realized_ms`, a field on B1's health line: the WDT library's own computed
+  period (`WDTimer::getTimeout()`), which returns 0 when the timer was never opened.
+- Two verbs in `lib/evcore/src/BenchCommand.h` (`ResetCause`, `Wdt`), with a host
+  test pinning that they are matched by their whole names, so `bench reset` (the
+  drive latch) and `bench resetsrc` cannot alias.
+
+**The property that had to be found before any reading meant anything: the flags latch**
+
+The first capture read, on a boot that followed nothing but an upload:
+
+```
+BENCH,resetsrc=1,...,rstsr0=1,rstsr1=6,porf=1,wdtrf=1,swrf=1,...
+```
+
+`wdtrf=1` on an ordinary boot, and not because that upload set it: it was a leftover
+from the D27/D28 hang campaign that had survived every later upload, including the
+D30 upload of a different instrument. Two consecutive plain reads returned identical
+values (the read is passive), and `bench resetsrc clear` returned `rstsr0=0,
+rstsr1=0`, confirmed by the next read - so the clear works, and without it **no
+reading can attribute a *new* reset**. That is why the instrument has one.
+
+The control that completed the decode was a genuine power cycle (the operator
+unplugged and replugged the board): `rstsr0=1, rstsr1=0` - `porf=1` and nothing else.
+**A power-on reset clears RSTSR1**; software resets clear nothing.
+
+| reset source | `rstsr0` | `rstsr1` | decoded |
+|---|---|---|---|
+| power-on (USB unplugged and replugged) | 1 | 0 | `porf=1`, nothing else |
+| upload / DFU (a software reset) | 0 | 4 | `swrf=1`, nothing else |
+| deliberate hang (the watchdog) | 0 | 2 | `wdtrf=1`, nothing else |
+
+**The attribution, measured**
+
+Cleared to zero, then 70 s of deliberate hangs (hook `460000`): **5 hangs, 5 resets,
+and every post-reset read was `rstsr1=2`** - `wdtrf=1` with `porf=0`, `swrf=0`,
+`iwdtrf=0` and no bus, parity or security flag - with the device vanishing and
+re-enumerating each time. The reset that follows a hung loop is the watchdog's as the
+silicon reports it, not merely as the latency suggested.
+
+**The realized period, measured**
+
+```
+BENCH,wdt=1,...,wdtcr=13139,tops=3,cks=5,rpes=3,rpss=3,wdtsr=16371,cntval=16371,
+     underflow=0,refresh_error=0,pclkb_hz=24000000,wdt_realized_ms=174
+```
+
+- `tops=3` -> 16384 cycles and `cks=5` -> /256, per the vendor's `wdt_timeout_t` and
+  `wdt_clock_division_t`. Those enumerations were checked **entry by entry** against
+  the WDT library's own lookup tables, because a mismatch there would have made the
+  library's computed period wrong; they agree (index 5 is /256 and index 15 is /128
+  in both).
+- `pclkb_hz=24000000` -> **16384 x 256 / 24 MHz = 174.76 ms**, and `wdt_realized_ms`
+  reports the same 174 from the library. The live counter reads 16370-16371 against
+  that 16384 reload, across two boots and a power cycle.
+- **The request is 114 ms.** The margin the rule applied (100 ms over the worst
+  measured refresh gap of 14 ms) was therefore applied to the **request**, and the
+  realized margin is **160 ms**. The timeout value is unchanged: the rule chooses it,
+  and this rounding only lengthens the period.
+
+A correction to the host-side number, recorded because it changes how the earlier
+campaigns should be read: the capture helper reads 4096 bytes or times out, so its
+reset latency is quantized by ~0.2 s - the same order as the period itself. A 62 ms
+hang-to-device-gone gap was observed in the same run that reported a 174 ms realized
+period, because a hang marker read late makes the gap look short. The D27/D28
+latencies (171-344 ms and 0-141 ms) still show what they were used for - the latency
+*scales with the request* - but they never clocked a period, and any record that read
+them as a duration is corrected here.
+
+**Two findings the audit turned up while writing this down**
+
+- **The `BOOT,...` line is not evidence of a restart in a bench image.** The same
+  line is re-sent as the silence beacon every `kSilenceMs`: a 20 s capture showed
+  three `BOOT` lines against one connect, and the 70 s hang capture showed 12 `BOOT`
+  lines but only 7 `EVE1,...,event=Boot` events for 5 hangs. Step 3's clause listed
+  the `BOOT` line first; the protocol now says the primary evidence is the device
+  vanishing and re-enumerating, the `EVE1` boot event, `t_ms` restarting near zero
+  and the counters restarting - and that the beacon does not re-send `EVE1`, which is
+  what makes that line the usable one.
+- **`src/WatchdogCheckpoint.h` contradicted both itself and the record.** Its header
+  still said the watchdog "has never been observed on this target: H0W ... has not
+  been run", and that `kWatchdogTimeoutMs` "is UNVERIFIED, and the two gaps ... are
+  placeholders too (no measurement of either exists yet)" - while the constants
+  directly below it were D27's measurements. Corrected to what is true: H0W has been
+  run and recorded for the **bench** load, the timeout is provisional for a loaded
+  run, and the numbers are measurements. The header also said the realized period
+  comes from the reset latency; it now says it comes from the registers and the
+  library, with the reason.
+
+**Step 8, written down**
+
+Step 8 requires its criteria to be written down *now*, while the trial is owed.
+`data/prereg/P-H0W-step8-2026-09-29.md` now holds the loaded conditions, the 60 s
+soaks, the unchanged 100 ms margin, 5 hang cycles and 5 recovery uploads, the bench
+numbers the trial is compared against (including the realized 174 ms), and what
+would make the timeout change. The protocol's Step 8 points at it.
+
+**Files changed**
+
+Source: `src/bench/ResetCause.h` (new), `src/bench/WatchdogRegisters.h` (new),
+`src/bench/BenchConsole.h` (two readout lines, a verb dispatch, the
+realized-period field on B1, the help list), `src/bench/BenchMain.cpp` (the hook,
+used and restored), `src/WatchdogCheckpoint.h` (comments only),
+`lib/evcore/src/BenchCommand.h` (two verbs). Tests:
+`test/test_bench_command/test_main.cpp` (the new verbs and the `reset`/`resetsrc`
+aliasing case). Records: this file, the H0W evidence README and its upload ledger,
+both pre-registrations, `VERIFIED_STATE.md`, `docs/limitations.md`, and
+`docs/bringup/P-H0W-watchdog-qualification.md`.
+
+**Verification**
+
+- `pio run`, `pio run -e bench`, `pio run -e bench-watchdog`: SUCCESS, no warnings.
+  Images: vehicle `eb440b31...` (unchanged from D28 through every D30 build), bench
+  `d627ab9f...`, bench-watchdog `9e1281b5...` (hook `0U`).
+- **The `WatchdogCheckpoint.h` edit changed no code**: all three images hash
+  identically before and after it, which is how a comments-only change to a header
+  compiled into the vehicle image is shown to have altered nothing.
+- `pio test -e native`: **519/519**, including the new verb case.
+- `arm-none-eabi-nm`: the vehicle image still matches nothing for `bench|hang` and
+  nothing for the new `resetCause|resetsrc` symbols; the bench image matches both.
+- On target: read/clear/read agrees with itself; 5/5 hang resets attributed to
+  `wdtrf` alone; `bench wdt` reproduced across two boots and a power cycle.
+
+**Not verified / next stage**
+
+- **H0W Step 8** is still owed, and is now pre-registered rather than only named. It
+  cannot run until H7/H10 produce a loaded run path.
+- **The driver outputs** remain H1A's electrical measurement. The reset-cause
+  register says which reset happened; it says nothing about whether the vehicle was
+  safe when it did.
+- **A reset while an effort is commanded** was not observed here either - every hang
+  was drive-free, as the protocol requires.
+- **The board was left running the vehicle image** (`eb440b31`, watchdog disabled)
+  with the hook's source value back at `0U`.

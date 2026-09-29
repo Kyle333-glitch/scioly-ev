@@ -191,14 +191,24 @@ or what remains provisional about the numbers it justified.
   produce, and the timer **rounds the requested period up**, so the requested
   `kWatchdogTimeoutMs` is not the realized period. The open itself has been seen -
   `opened=1, open_refused=0` at both 250 ms and 114 ms - and no refusal has ever
-  been observed; the **realized period is still bounded rather than clocked**, for
-  the reason given below.
-- **No reset-cause register is assumed.** If this core can report why it reset,
-  that has not been established, and none was read at any of the resets D27 and
-  D28 observed: they were attributed by the latency scaling with the requested
-  timeout (171-344 ms at 250 ms against 0-141 ms at 114 ms) and by there being a
-  single refresh path (`grep -rn "WDT" src/` matches only `WatchdogCheckpoint.h`),
-  not by a cause register. H0W must not assume one exists.
+  been observed. **The realized period is now measured rather than bounded** (D30):
+  174 ms for the 114 ms request, read from the hardware's own `WDTCR` fields with
+  PCLKB from the vendor clock API, and agreeing with the library's computation.
+  What stays open is not the number but its consequence - whether 174 ms is a
+  credible stop - and that belongs to Step 8.
+- **The reset cause is read from the MCU's own registers, measured on this board
+  only.** D30 added `bench resetsrc` - `R_SYSTEM->RSTSR0`/`RSTSR1` with the vendor
+  header's masks - plus a `clear` (write 0), because the flags **latch** across
+  software resets: a `wdtrf=1` left by the D27/D28 campaign survived every later
+  upload, including one of a different image, until it was cleared. With the clear,
+  the three sources separated cleanly - a power-on reset reads `porf=1` with
+  `rstsr1=0`, an upload `swrf=1` alone, a deliberate hang `wdtrf=1` alone, 5/5. Two
+  limits remain: the decode was measured on **this one board**, so it is not a
+  datasheet claim about the part family, and the register is status only - it says
+  which reset happened, never whether the vehicle was safe when it did, which is
+  H1A's question. Before D30 the attribution rested on the latency scaling with the
+  request and on there being a single refresh path (`grep -rn "WDT" src/` matches
+  only `WatchdogCheckpoint.h`); those still hold, and now the silicon agrees.
 - **The post-reset pin levels are read at the MCU, not at the header.** D28's
   `bench pins` reports the de-energized combination 6/6 times after a reset (9/9
   including the final hang campaign), which is the "MCU pin levels ... (levels
@@ -209,15 +219,22 @@ or what remains provisional about the numbers it justified.
   **driver outputs** is H1A's question. Related: every observed reset followed a
   **drive-free** hang (the motor supply is off in this protocol by design), so a
   reset taken while an effort is commanded is not covered by this observation.
-- **The timeout's realized period is bounded, not clocked.** `WDT.begin(114)` was
-  accepted and the library rounds a request **up** to the next achievable period;
-  the latency measured (hang to the host noticing the device is gone) includes host
-  detection and the capture's own ~0.2 s read window, so it tracks the period
-  rather than measuring it.
-- **The chosen 114 ms is a bench number.** The soak has no run path and no motor;
-  a loaded run adds estimator and control work to the same loop, so the margin is
-  provisional until H0W **Step 8** is repeated under a loaded run - which does not
-  exist yet, and which freezing a competition build depends on.
+- **The host cannot clock the period, which is why the registers are the evidence.**
+  `WDT.begin(114)` was accepted and the library rounds a request **up** to the next
+  achievable period; the capture's reset latency is quantized by its own ~0.2 s read
+  window - the same order as the 174 ms period - so a hang marker read late makes the
+  gap look short (D30 saw 62 ms against 174 ms). The realized period is therefore
+  taken from `WDTCR` and the library, and the latency is kept only as evidence that
+  it *scales with the request*.
+- **The chosen 114 ms is a bench number, and its margin was applied to the
+  request.** The soak has no run path and no motor; a loaded run adds estimator and
+  control work to the same loop, so the margin is provisional until H0W **Step 8** is
+  repeated under a loaded run - which does not exist yet, and which freezing a
+  competition build depends on. Those criteria are now written down rather than only
+  owed (`data/prereg/P-H0W-step8-2026-09-29.md`). The 100 ms margin was applied to
+  the **request** (114 ms) while the timer programs 174 ms, so the realized margin
+  over the worst measured gap is 160 ms: the rule held with more room than it
+  claimed, and Step 8 must re-state it in realized terms.
 - **Two of the instruments have no host test.** B1 could not report the worst
   refresh interval H0W Step 2 asks for, so `worst_refresh_gap_ms` was added (D27) -
   a comparison per pass, from the clock the refresh already receives, changing
@@ -229,7 +246,8 @@ or what remains provisional about the numbers it justified.
   path and no motor, so the timeout it justifies is *provisional for the loaded
   run path* until H0W Step 8 is repeated under a loaded run; freezing a
   competition build depends on that
-  (`docs/bringup/P-H0W-watchdog-qualification.md`, Step 8).
+  (`docs/bringup/P-H0W-watchdog-qualification.md`, Step 8, criteria in
+  `data/prereg/P-H0W-step8-2026-09-29.md`).
 - **A reset is not a motor-off.** H0W can observe the MCU resetting and the
   firmware re-initializing; whether the driver outputs de-energize is an
   electrical fact owned by H1A. No statement about motor-output safety may be

@@ -66,17 +66,19 @@ the same pattern.
 | H9 | [Fault injection](P-H9-fault-injection.md) | P (+E, +S) | H3, H7 |
 | H10 | [Full-run repeatability](P-H10-full-run-repeatability.md) | P | H7, H8, H9 |
 
-## Bench instrumentation (built; B1, the pin readout and the hang hook exercised)
+## Bench instrumentation (built; B1, the pin, reset-cause and watchdog readouts and the hang hook exercised)
 
 Several protocols need the firmware to report something the production image
 deliberately cannot, one needs a bounded way to command effort outside a run, and
 H0W needs a deliberate way to stall the loop. These instruments exist **in code**,
 and an instrument is a prerequisite for a measurement, never a measurement itself.
 
-**Status: BUILT.** B1, the driver-pin readout and the deliberate-hang hook have
-been run on the board in the H0 and H0W sessions (D25-D28): the counters, the
-cadence extremes, the worst refresh interval and the worst control-loop stall were
-read, and the hook produced real watchdog resets. Their evidence is in
+**Status: BUILT.** B1, the driver-pin readout, the reset-cause readout, the
+watchdog-register readout and the deliberate-hang hook have all been run on the
+board in the H0 and H0W sessions (D25-D30): the counters, the cadence extremes, the
+worst refresh interval and the worst control-loop stall were read, the hook produced
+real watchdog resets, and the reset that follows one was attributed from the MCU's
+own reset-status registers. Their evidence is in
 `data/evidence/P-H0W-2026-09-28/` and the rows in `VERIFIED_STATE.md`. **B2, B3 and
 B4 have not been run on hardware**, so nothing about the bench drive, the raw tick
 readout or the raw input readout is observed yet, and no protocol that uses B2 runs
@@ -178,6 +180,23 @@ receives the define, and `src/main.cpp` refuses to compile if it ever does.
   reading as safe. It is the MCU's own view of the pins it drives: whether those
   levels de-energize the driver outputs is H1A's electrical measurement, and a pin
   driven low but held high at the header would still read as the MCU sees it.
+- **The reset-cause readout (H0W Step 3).** `bench resetsrc [clear]`. Reports
+  `R_SYSTEM->RSTSR0`/`RSTSR1` as the MCU reads them - the raw values plus the flags
+  the vendor device header's masks name - with `source=register_read` saying so.
+  `clear` writes zero to both (this family's clear-a-flag idiom) and the same line
+  shows the result, so the write cannot fail silently. **The flags latch** across
+  software resets, so reading without clearing cannot attribute a *new* reset; that
+  is why the argument exists and why the protocol reads, clears, then reads. It says
+  which reset happened, never whether the vehicle was safe when it did (H1A), and
+  the decode was measured on this one board rather than read out of a datasheet.
+- **The watchdog-register readout (H0W Steps 6 and 7).** `bench wdt`. Reports
+  `WDTCR`'s TOPS/CKS/RPES/RPSS fields (vendor masks), `WDTSR`'s live `CNTVAL`
+  down-counter with its two flags, and `pclkb_hz` from the FSP's own clock
+  accessor. Together with B1's `wdt_realized_ms` - the library's computed period -
+  this is how the **requested** timeout and the **realized** period are told apart:
+  114 ms requested against **174 ms** realized (D30). It deliberately does not
+  decode a period from those fields, because that mapping is hardware-manual
+  knowledge rather than something a header in this build states.
 - **The deliberate-hang hook (H0W Step 3).** `kDeliberateHangAfterPasses` in
   `src/bench/BenchMain.cpp`: a compile-time pass count after which the loop hangs
   inside a pass, and it stages one `BENCH,hang=1,...` line first. It is a constant

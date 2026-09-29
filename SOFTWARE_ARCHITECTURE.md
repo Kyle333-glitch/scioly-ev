@@ -958,10 +958,13 @@ the operator's, and `disarm` is the command for that.
 
 Some bring-up measurements need the firmware to report or do something the
 vehicle image deliberately cannot: a raw tick count, a raw input level, the loop
-and watchdog counters, a bounded way to command effort outside a run, and a way to
-stall the loop on purpose (H0W Step 3). Those are bench instruments **B1-B4** plus
-the deliberate-hang hook (`docs/bringup/README.md`), and they are a separate build,
-not a mode of the vehicle image.
+and watchdog counters, the driver pins' levels, the MCU's reset-status registers,
+the watchdog's own configuration registers, a bounded way to command effort outside
+a run, and a way to stall the loop on purpose (H0W Step 3). Those are bench
+instruments **B1-B4** plus the readouts the later H0W steps added (`bench pins`,
+`bench resetsrc`, `bench wdt`) and the deliberate-hang hook
+(`docs/bringup/README.md`), and they are a separate build, not a mode of the vehicle
+image.
 
 - **Exclusion is a property of the build graph, not of a macro.** The bench tree
   lives in `src/bench/`, and the two environments partition it: `env:nano_r4`

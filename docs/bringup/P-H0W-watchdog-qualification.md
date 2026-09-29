@@ -14,8 +14,10 @@ bounds how much near-zero dwell could be credited without observation.
 **Bench instrumentation required:** B1 (loop and watchdog counters), a driver-pin
 readout (`bench pins`, which reports the three driver inputs as the MCU itself
 holds them and pairs them with the duty the adapter last wrote - a PWM duty cannot
-be read back from a pin), and a bench-only hang hook the production image cannot
-contain - all supplied by the separate PlatformIO `bench` environment (see the
+be read back from a pin), a reset-cause readout (`bench resetsrc [clear]`, added in
+D30 for Step 3's attribution clause), a watchdog-register readout (`bench wdt`,
+added in D30 for Step 7's realized period), and a bench-only hang hook the
+production image cannot contain - all supplied by the separate PlatformIO `bench` environment (see the
 index), not by a flag inside the production build. The hook is `kDeliberateHangAfterPasses` in
 `src/bench/BenchMain.cpp`; it is a compile-time constant, not a console verb, so
 no serial input can hang the board by accident. This protocol uses **two** bench
@@ -136,6 +138,14 @@ Worth recording too: on this library the timeout is configured as a reset, and
 the refresh window is fully open (a refresh is accepted at any time in the
 period), so this test is about the timeout alone, not a window.
 
+**Measured (D30):** for the 114 ms request the realized period is **174 ms** -
+`WDTCR.TOPS=3` (16384 cycles), `CKS=5` (/256), PCLKB 24 MHz, i.e.
+16384 x 256 / 24 MHz = 174.76 ms. `bench wdt` reports the register fields and the
+clock, `wdt_realized_ms` reports the library's own computation, and the two agree.
+That is 60 ms above the request, **not** "slightly longer", so the margin a record
+states must be the realized one (174 - 14 = 160 ms over the worst measured gap),
+not the requested one (114 - 14 = 100 ms).
+
 ## Step 2 - Healthy operation, no false resets
 
 Soak the enabled build for the pre-registered duration. Record: reset count (must
@@ -200,18 +210,36 @@ hang happened at rather than only the last earlier readout. Record:
 
 - the time of the last refresh and the pass/refresh counters at the hang;
 - the wall-clock latency from the hang to the board restarting;
-- that the board *does* restart (the `BOOT,...` line reappears, the `EVE1` boot
-  event recurs, the telemetry `t_ms` restarts near zero, and the counters restart
-  from zero);
+- that the board *does* restart. The primary evidence is the **device vanishing
+  and re-enumerating** (the capture's connect/disconnect rows), together with the
+  `EVE1,...,event=Boot` line, the telemetry `t_ms` restarting near zero, and the
+  counters restarting from zero. The `BOOT,...` line on its own is **not** evidence
+  of a restart: the same line is re-sent as the silence beacon every `kSilenceMs`,
+  so a capture can show several `BOOT` lines with no reset at all (measured, D30 -
+  three `BOOT` lines against one connect in a 20 s capture, and a 70 s hang capture
+  with 12 `BOOT` lines but only 7 `EVE1` boot events for 5 hangs). The beacon does
+  not re-send the `EVE1` boot event, which is what makes that line the usable one;
+- the **reset cause from the MCU's own reset-status registers**, which is direct
+  evidence rather than inference. Read `bench resetsrc`, clear with
+  `bench resetsrc clear`, then read again after the reset: a watchdog reset reports
+  `wdtrf=1` with `porf=0` and `swrf=0`, and no other reset source measured on this
+  board produces that combination (D30: 5/5 hang cycles, against `swrf`-only for an
+  upload and `porf`-only for a power-on). The clear is not optional - the flags
+  latch across software resets, so a bare read cannot attribute a *new* reset;
 - the MCU pin levels `nSLEEP`/`PH`/`EN` after the restart, which must be the
   de-energized combination the firmware initializes to (`bench pins` reads them:
   levels only, the MCU's own view of the pins it drives, and it will not see a pin
   driven low but held high at the header; H1A turns this into a statement about the
   driver outputs);
 - whether the restart is attributable to the watchdog rather than to something
-  else: the hang hook is the only difference from Step 2, the loop cannot refresh
-  while hung, and the latency should match the realized timeout. If a reset-cause
-  register is readable on this core, record it; do not assume one exists.
+  else: the hang hook is the only difference from Step 2 and the loop cannot refresh
+  while hung. Do **not** expect the host-side latency to settle this - it is
+  quantized by the capture's read window (~0.2 s), the same order as the period, so
+  a hang marker read late makes the gap look short (D30 measured a 62 ms gap against
+  a 174 ms period). A reset-cause register **is** readable on this core, and it was
+  recorded in D30 with `bench resetsrc` / `bench resetsrc clear`, which is the
+  evidence this clause asks for; the latency is kept only as corroboration that it
+  scales with the request.
 
 Repeat Step 3 at least the pre-registered number of times per candidate timeout.
 
@@ -247,7 +275,8 @@ rule:
   case) *and* the boot-to-first-refresh gap - by the pre-registered margin;
 - it must be achievable by the timer's quantization - check that
   `WDT.begin()` actually opens with the chosen value, and record the realized
-  period, which may be longer than requested;
+  period, which may be longer than requested (done in D30: 114 requested, 174
+  realized, with `bench wdt` showing the registers behind it);
 - the reset latency observed in Steps 3 and 5 must be acceptable for the
   vehicle's stop behaviour; if the reset is too slow to be a credible stop, that
   is a finding, and the answer is physical (a brake path), not a shorter timeout
@@ -258,8 +287,11 @@ rule:
 ## Step 7 - Finalize
 
 Set `kWatchdogTimeoutMs` to the chosen value, re-run Steps 2, 3 and 5 at that
-value, and record the realized period. Only after that may production enablement
-be considered - and that is a separate, deliberate change, not part of this
+value, and record the realized period. Read it from the hardware and the library
+(`bench wdt`, `wdt_realized_ms`) rather than from the reset latency: the host's
+latency measurement is quantized by its serial read window (up to ~200 ms in the
+H0W captures), which is the same order as the period being measured (D30). Only
+after that may production enablement be considered - and that is a separate, deliberate change, not part of this
 protocol.
 
 ## Step 8 - re-validation with the real run path (owed, not done here)
@@ -277,7 +309,9 @@ case), the soak duration, the margin, and the number of hang/reset cycles to
 repeat. Re-run Steps 2, 3 and 5 under that load once H7/H10 can produce it, and
 confirm the timeout still exceeds the worst healthy refresh interval by the
 margin. If it does not, the timeout is changed from the loaded data and the change
-is recorded.
+is recorded. **It has been written down:** `data/prereg/P-H0W-step8-2026-09-29.md`
+holds the criteria, the bench numbers the trial is compared against (including the
+realized 174 ms), and what would make the timeout change.
 
 Freezing a competition build requires this re-validation to exist; until then the
 chosen timeout is a bench number and is recorded as such.
