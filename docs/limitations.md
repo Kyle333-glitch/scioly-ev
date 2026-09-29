@@ -29,6 +29,16 @@ control gains, braking behavior, wheel slip, and the bottle interaction. H0 and
 D22/D23 used USB only - **no motor supply was ever connected**, so the board has
 never moved anything under firmware control.
 
+**As of D31 the board itself is gone.** The Nano R4 was taken away at the end of
+the D31 session, which was also the session that produced the last capture; the
+unit now holds the **bench** image (`b6b1c455...`) and cannot be reflashed by this
+project (`data/evidence/D31-2026-09-29/README.md`). Every entry in this file that
+is removed "by evidence" now has **no path to that evidence**: the stages that
+need the board - H0W Step 8, H1A's driver-output measurement, and every loaded-run
+protocol from H5 on - are not deferred, they are unperformable with the equipment
+the project has. Source can still be changed, reviewed, host-tested and
+committed; none of it can promote a `VERIFIED_STATE.md` row.
+
 - Evidence of the limit: `VERIFIED_STATE.md` hardware table; `data/evidence/P-H0-2026-09-28/README.md` ("What this session does NOT establish").
 - Removed by: H1A onward, row by row, each with recorded raw observations.
 
@@ -89,19 +99,6 @@ entries that follow are the ones the repeat could **not** reach.
    Evidence: D21 F-3, D22 item 2, D25,
    `data/evidence/P-H0-2026-09-28/README.md`,
    `data/evidence/P-H0-repeat-2026-09-28/h0repeat-uploads.log`.
-
-## C. Known defects and unexplained behavior
-
-1. **F-3 - the upload failure with no root cause.** One of eight H0 uploads left
-   the board present on the USB bus but not enumerating
-   (`Unknown USB Device (Device Descriptor Request Failed)`,
-   `USB\VID_0000&PID_0002\5&28FFA4CE&0&3`), reachable by no software path and
-   recovered only by a **physical power cycle**. The cause is **not determined**.
-   D22 added a classification (no `VID_2341` device at all versus a
-   `VID_2341&PID_0374` device `dfu-util` cannot use) and removed one race, which
-   is not a fix; D22's three uploads all succeeded, which is a second data point,
-   not a reproduction. Ownership: the H0 repeat and H0W Step 4.
-   Evidence: D21 F-3, D22 item 2, `data/evidence/P-H0-2026-09-28/README.md`.
 
 2. **The greeting can be postponed by the reader it is meant for.** Because a
    byte restarts the silence interval, a reader that appears with **no
@@ -261,6 +258,13 @@ or what remains provisional about the numbers it justified.
   near-zero configuration (threshold, dwell) is still provisional, and nothing has
   run on a wheel (`src/VehicleConfig.h`, `lib/evcore/src/NearZeroVerifier.h`).
 
+- **H0W Step 8 cannot be run.** It needs a loaded run path to soak under - which
+  H7/H10 have not produced - and it now also needs a board. Its criteria are
+  pre-registered (`data/prereg/P-H0W-step8-2026-09-29.md`) and its status is
+  **owed and unperformable**, not merely owed. The timeout therefore stays
+  **bench-qualified and provisional** for the loaded run path indefinitely, at the
+  unchanged `kWatchdogTimeoutMs = 114` (realized 174 ms, D30).
+
 ## F. Placeholders and unbuilt enforcement points
 
 - **Every calibration, limit, run-policy and control value is `Provisional`**
@@ -300,6 +304,30 @@ or what remains provisional about the numbers it justified.
   runway, stopping distance or reversal behavior is known; the braking offsets
   that would compensate for it are placeholders (`VERIFIED_STATE.md` #9).
 
+- **The bench console's readouts had no compile-time bound, and its widest one does
+  not fit.** Derived field by field from `healthLine()` in D31, the worst case is
+  **534 characters** against `ev::kSerialLineCapacity = 448` - 86 over - because
+  the free-running counters reach ten digits (`passes` after roughly 26 h at the
+  measured ~46,000 passes/s). The widest line any capture has contained is 389, so
+  the overflow is unreachable in a bench session but reachable in the limit. Every
+  other consumer of the shared buffer states a derived worst case against it
+  (`ev::kOperatorResponseWorstCaseChars`, and `BoundedText.h`'s own 418/443); this
+  one stated none until D31, when the number was derived and recorded in
+  `src/bench/BenchConsole.h`. What D31 fixed is the **silence**: a readout that
+  does not fit is dropped whole and was counted only in `responses_lost`, a field
+  of the health line - so the loss hid on the line that was lost. A dropped readout
+  now leaves a constant `BENCH,lost=1,reason=ReadoutDidNotFit` in its place. What
+  stays open is the schema: **the owed fix is to split `health`** into its
+  watchdog/loop half and its console/interface half, after which the bound can be
+  asserted at compile time the way the operator path's is. Owner: unowned. With the
+  board gone this is maintenance, not bring-up, and nothing can be measured
+  against it.
+- **`stageLostReadoutNotice()` is reviewed, not verified.** It lives in the
+  ARM-only bench tree, so no host test reaches it (`test_build_src = no`), and the
+  86 characters of headroom mean no bench session could have produced a line long
+  enough to trigger it. Its claim - that a dropped readout is visible on the wire -
+  has never been exercised on hardware.
+
 ## G. Evidence and process limits
 
 - **H0 passed only in its second session.** The first session (D21) recorded what
@@ -323,7 +351,19 @@ or what remains provisional about the numbers it justified.
   `460000U`), so no commit reproduces the D22-D27 images. Where a record names
   `8e42d13` as its build identity, that is the last commit *below* the tree that
   was actually flashed; the uncommitted delta is the D22-D28 work, now committed
-  above it.
+  above it. **D31 fixed one half of this and not the other.** Fixed:
+  `platform = renesas-ra@1.9.0` (`platformio.ini`), so the toolchain can no longer
+  drift under an unchanged file. That matters more than usual here because the
+  Renesas FSP ships as a **prebuilt** `libfsp.a` inside the core's variant with no
+  C sources in the tree, so the version pin is the only record of what the firmware
+  was built against (`src/bench/ResetCause.h`; D30). Not fixed: the images. The
+  earlier records describe images built from intermediate working trees
+  (placeholder watchdog budgets, the deliberate-hang hook at `460000U`) that were
+  never committed, so no commit reproduces them - and D31 added the reverse case, a
+  commit whose images were built and hashed but **never observed on target**
+  (`91f74a04...` vehicle, `b6b1c455...` bench, `271e8eba...` bench-watchdog; the
+  bench image was flashed and its readouts were lost with the port). Both
+  directions are in `data/evidence/D31-2026-09-29/README.md`.
 - **The captures are stored line-ending normalized.** `core.autocrlf=true` and
   there is no `.gitattributes`, so every text blob is stored with LF however it
   arrived - including the serial captures, which arrive CRLF (`git ls-files --eol`
@@ -347,8 +387,14 @@ or what remains provisional about the numbers it justified.
   board is left running whichever image was last flashed; a record's statements
   belong to the image whose hash that record names, not to the current source
   (D22's greeting observations belong to the D22 image; D23's source was never
-  flashed; the H0 repeat's are the current `cfd288d4...` vehicle image and the
-  `71f42e40...` bench image).
+  flashed; the H0 repeat's are the `cfd288d4...` vehicle image and the
+  `71f42e40...` bench image). **Every handoff before D31 left the vehicle image
+  running; D31 left the bench image** (`b6b1c455...`) - the image whose own
+  documentation says it must never be mistaken for the vehicle image, and which
+  contains `bench drive`, a command that applies effort outside a run. The board is
+  no longer reachable and cannot be reflashed by this project, so a unit that is
+  ever powered again should be treated as a bench rig until `bench health` reports
+  `image=bench`, which settles it.
 - **Anything measured with the board alone has no motor supply, no driver, no
   encoder and no drivetrain connected**, so the highest load ever applied to the
   firmware is its own serial path.

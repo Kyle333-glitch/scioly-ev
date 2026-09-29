@@ -4981,3 +4981,173 @@ both pre-registrations, `VERIFIED_STATE.md`, `docs/limitations.md`, and
   was drive-free, as the protocol requires.
 - **The board was left running the vehicle image** (`eb440b31`, watchdog disabled)
   with the hook's source value back at `0U`.
+
+## D31 - 2026-09-29 - Review - the widest line in the firmware had no bound, and the build was not pinned
+
+A review of the whole tree, asked for with the instruction to look outside the
+usual places. Six findings, four of which are changes here; the session then tried
+to verify them on target and **the board was taken away mid-session**, which is
+recorded below rather than glossed.
+
+**Finding 1 - the bench readouts had no worst-case bound, and losing one was silent.**
+
+Every consumer of the one serial line buffer states its worst case against that
+buffer except the bench console: `ev::kOperatorResponseWorstCaseChars`,
+`kTelemetryLineCapacity`, and `BoundedText.h`'s own note naming 418 characters for
+a telemetry sample and 443 for the configuration-check report.
+`benchConfig::kReadoutLineCapacity` was simply `ev::kSerialLineCapacity` with no
+derivation behind it. Derived now, field by field from `healthLine()` itself, the
+widest readout's worst case is **534 characters** - every `uint32` field at ten
+digits, which the free-running counters really can reach (`passes` reaches ten
+digits after roughly 26 h at the measured ~46,000 passes/s, `last_refresh_ms` at
+the `millis()` wrap) - against a capacity of **448**. That is **86 characters
+over**, and the widest line any capture has actually contained is 389, so the
+gap is not reachable in a bench session but is reachable in the limit.
+
+The failure it would have produced is the one this console must not have:
+`respond()` drops a readout that does not fit **whole** (deliberately - a truncated
+line hides its tail, and the tail is where a diagnosis lives) and counts it in
+`detail::lostResponses()`, and `responses_lost` is a **field of the health line**.
+So a health line too long to fit would have taken its own evidence of the loss
+off the wire, and the interface would have looked healthy while going silent.
+
+Fixed: `stageLostReadoutNotice()` composes a constant, 36-character
+`BENCH,lost=1,reason=ReadoutDidNotFit` into the same buffer a dropped readout
+vacated, so a loss is visible on the wire. It is not routed through `respond()` -
+the drop is already counted there, and a notice that could itself be dropped would
+be no notice. The owed fix is still to **split `health`** into its watchdog/loop
+half and its console/interface half; that is a schema change, it is recorded with
+its number in `BenchConsole.h` and in `docs/limitations.md`, and it was not made
+here. Also removed: a stray comment on `kReadoutLineCapacity` that described the
+bench trigger readout's *hold time*, which is a different fact living with the
+trigger readout.
+
+**Finding 2 - dead code in `src/WatchdogCheckpoint.h`.** `hasTimeToFirstRefresh()`
+had no callers in `src/`, `lib/` or `test/`, and `bootMs_` was written in
+`begin()` and never read by anything. Both removed, and `begin()`'s comment -
+which claimed it "records the boot instant" - corrected to describe what it does:
+clear the counters, the refresh history, and the refresh interval's start. The two
+instants the class is actually asked about are the open (`openedAtMs_`) and the
+first refresh (`timeToFirstRefreshMs_`); a third that nothing reads is a place for
+a stale value to look like a measurement.
+
+**Finding 3 - the platform was not pinned.** `platform = renesas-ra` resolved to
+whatever the registry offered on the day of the build, so the tree was not
+reproducible and a future build could compile a different Arduino core under the
+same `platformio.ini`. Now `platform = renesas-ra@1.9.0`, which is what this
+target was built and tested with; a platform release declares the package versions
+it needs, so pinning it pins the framework (1.6.0 here) with it. The reason it
+matters more than usual on this target is recorded in the comment: the Renesas FSP
+ships as a **prebuilt** `libfsp.a` inside the core's variant, with no C sources in
+the tree, so its reset and clock setup cannot be read from source at all - the
+version pin is the only record of what the firmware was built against, and
+`src/bench/ResetCause.h` depends on that. `env:native` stays unpinned on purpose,
+and says why.
+
+**Finding 4 - checked and refuted, not a defect.** The two entry points' loop
+orders differ on inspection, so the equivalence was verified rather than assumed.
+`src/main.cpp` runs `runPass -> endOfPass -> serviceSerial -> updateStatusLed`;
+`serviceSerial` is `serviceStagedText` + the byte read + `handleCommandLine` +
+`drainTelemetry`. `src/bench/BenchMain.cpp` runs `beginPass -> runPass ->
+endOfPass -> serviceStagedText -> console read -> applyOutput -> drainTelemetry ->
+updateStatusLed -> serviceDeliberateHang`, which is the same relative order with
+the bench instruments around it. The one substantive difference is real and
+already recorded: the bench console's own reader never calls
+`greeter_.observeHostByte()`, so the byte-restarts-the-silence-interval rule is
+inert on the bench image (`VERIFIED_STATE.md`, D25). No change.
+
+**Finding 5 - one claim checked against the library, and it holds.**
+`healthLine()` reports `wdt_realized_ms` from `WDT.getTimeout()` and claims the
+read "is a pure member read and touches no timer register". Read:
+`libraries/WDT/src/WDT.cpp` returns the `_timeout` member and 0 when the timer was
+never opened, and `_timeout` is set in `getReload()` to the selected
+reload/prescaler pair's ceiling - so it is the realized period, it is not a
+register read, and "0 when not opened" is true. It agrees with D30's independent
+register reading (174 ms). No change.
+
+**Finding 6 - `docs/limitations.md` had two `## C.` sections and two F-3 entries.**
+`## C. Known defects and unexplained behavior` appeared **twice**, and the
+second one carried a **stale duplicate of F-3** that disagreed with the first:
+it said "D22's three uploads all succeeded, which is a second data point" and
+assigned ownership to "the H0 repeat and H0W Step 4", where the current copy has
+the 17-successful-upload tally and names H0W Step 4's recovery cycles. Two copies
+of one known defect, one of them out of date, is the register failing at the one
+thing it exists for. The duplicate heading and the stale entry are removed; the
+remaining items (the postponed greeting, `Serial.dtr()`, Unity's doubles) were
+numbered 2-4 in the second section and keep those numbers, so the merged section
+reads 1-4 with one F-3. No content was lost - the removed copy's every fact is in
+the kept one.
+
+**The sweep for overstated claims is not exhaustive and is not claimed to be.**
+The codebase uses "never"/"must not" pervasively as design-contract language,
+which is not the defect class being hunted; the class that matters is a comment
+asserting an observation the project does not have, and D30 corrected the last
+known instance of that in `WatchdogCheckpoint.h`. A full pass over every
+`never`-claim in `src/`, `lib/` and `docs/` was **not** performed and remains owed.
+
+**Files changed**
+
+Source: `src/bench/BenchConsole.h` (the lost-readout notice, the derived bound and
+its comment, the stray comment removed), `src/WatchdogCheckpoint.h` (both dead
+members removed, one comment corrected), `platformio.ini` (the pin, with the
+rationale). Records: this file, `VERIFIED_STATE.md` (one row),
+`docs/limitations.md` (the readout bound, the pin, the handoff, and the duplicated
+section C merged), `data/evidence/D31-2026-09-29/` (new: the README and the one
+capture). No file under `lib/` was touched, which is why the host-test count is
+unchanged at 519.
+
+**Verification**
+
+- `pio run`, `pio run -e bench`, `pio run -e bench-watchdog`: SUCCESS, no warnings,
+  with the pinned platform.
+- **The vehicle image hash changed**: `eb440b31...` -> `91f74a04...` (67020 B,
+  the same size). This is *not* a comment-only change - the
+  `WatchdogCheckpoint.h` edit removes a member and a store and is compiled into
+  the vehicle image - so the D28-D30 "identical hash proves the edit changed no
+  code" argument does not apply here and is not made. The behavior is unchanged
+  for the same reason the member was dead: nothing read it.
+- Bench `b6b1c455...` (72924 B), bench-watchdog `271e8eba...` (73252 B).
+- `pio test -e native`: **519/519**, unchanged. No test was added, and none can be: the notice and the bounded readouts live in the ARM-only bench tree (`test_build_src = no`).
+- `arm-none-eabi-nm`: the rebuilt vehicle image still matches nothing for
+  `bench|hang` and nothing for `resetCause|resetsrc`; the bench image matches 31
+  and 1. The source-split guarantee is unchanged.
+- **Not verified: anything about the notice path.** No test exercises
+  `stageLostReadoutNotice()` (it is in the ARM-only bench tree, so a host test
+  cannot reach it) and no on-target readout ever contained it - the line that
+  would trigger it is 86 characters from being reachable. It is reviewed code,
+  not verified code, and is recorded as such.
+
+**On target - the session that was cut short**
+
+- Before changing anything, 13.0 s of the **pre-change vehicle image** was
+  captured: `t_ms` continuous `1521430 -> 1534430`, `dt_ms=20`, `phase=Idle`,
+  `armed=0`, `motor=Disabled`, `effort_permille=0` on all 651 `EVS1` samples, board
+  up 25.4 min. It also corroborates D30's `BOOT`-line caveat independently: one
+  `BOOT,...` line arrived mid-stream at 9.699 s between samples whose `t_ms` are
+  20 ms apart, with **zero `EVE1` lines** and no reset. Committed as
+  `data/evidence/D31-2026-09-29/d31-prechange-vehicle.log`.
+- `pio run -e bench -t upload` SUCCESS (`nano_touch` -> `Download done.` ->
+  `Done!`), and then **the board disappeared**: the capture of that image's
+  readouts raised `ClearCommError ... PermissionError(13, 'The device does not
+  recognize the command.')` on its first read and the operator reported the device
+  gone. So **the D31 bench image's readouts were never observed**, and no statement
+  rests on them.
+- **The board was left holding the bench image** (`b6b1c455...`), not the vehicle
+  image, and can no longer be reflashed by this project. That is a change from
+  every previous handoff and it is safety-relevant - the bench image contains
+  `bench drive`, a command that applies effort outside a run - so it is recorded
+  in `data/evidence/D31-2026-09-29/README.md` and in `docs/limitations.md`.
+
+**Not verified / next stage**
+
+- **Any D31 source on target.** The changed vehicle image was never flashed; the
+  changed bench image was flashed and its readouts were lost with the port.
+- **`stageLostReadoutNotice()` on hardware**, and therefore the claim that a
+  dropped readout is visible. Unowned until there is hardware again.
+- **Splitting `health`** is owed and unowned. With the board gone this is a
+  maintenance fix, not a bring-up fix: nothing can be measured against it.
+- **The full overstated-claim sweep** (the paragraph above Finding 5) is owed.
+- **H0W Step 8, H1A's driver-output measurement, and every loaded-run protocol
+  are now permanently blocked on hardware.** They are not deferred; they are
+  unperformable with the equipment this project has, and no amount of further
+  source work changes that.
