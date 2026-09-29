@@ -113,9 +113,39 @@ constexpr uint32_t kStallWindowMs = 1000U;
 // console can keep asking for effort without a fresh, deliberate arm.
 constexpr uint32_t kMaxCommandsPerArm = 8U;
 
-// How long the bench trigger readout holds a level change, so a momentary contact
-// is visible on the next read rather than only in a log at the exact instant.
-// (Recorded here as policy; the level itself is always the live pin.)
+// The capacity every readout in this console is composed against.
+//
+// One capacity rather than one per readout, because they all share the
+// transport's single line buffer and one buffer has one length.
+//
+// **The derived worst case of the widest readout, `healthLine()`, is 534
+// characters** - every `uint32` field at its full ten digits, which the
+// free-running counters really can reach (`passes` needs roughly 26 h at the
+// measured ~46,000 passes/s; `last_refresh_ms` reaches ten digits at the
+// `millis()` wrap). That is **86 characters over** the 448 in
+// `ev::kSerialLineCapacity`. The widest line any capture has actually contained
+// is 389, so the overflow is not reachable in a bench session - but it is
+// reachable in the limit, and the failure it produces is the one failure this
+// console must not have: a readout that does not fit is dropped whole and
+// counted (`respond()`), and the counter that would say so, `responses_lost`, is
+// a field of the health line itself.
+//
+// Two things answer that here:
+//
+//   * `stageLostReadoutNotice()` - a dropped readout leaves a short, constant
+//     notice in its place, so the loss is visible on the wire rather than only
+//     in a counter that travelled on the line that was lost;
+//   * this number, recorded so the next field added has to look at it. The owed
+//     fix is to split `health` (the watchdog/loop half and the console/interface
+//     half), not to trim the schema. Until that happens this comment is the
+//     record of how much room is left, and there is none.
+//
+// Note also the shape of the headroom: the non-obvious part is that it is
+// *unbounded* growth, not a fixed gap. Every other consumer of the shared buffer
+// states its worst case against it
+// (`ev::kOperatorResponseWorstCaseChars`, `lib/evcore/src/OperatorResponse.h`);
+// this console used to state none, which is why the widest line in the firmware
+// was the one with no bound behind it.
 constexpr uint32_t kReadoutLineCapacity = ev::kSerialLineCapacity;
 
 inline ev::BenchDriveLimits driveLimits() {
@@ -198,12 +228,47 @@ inline void appendSignedTicks(ev::BoundedText& text, int32_t value) {
     text.appendUnsigned(static_cast<uint32_t>(value));
 }
 
+// The tombstone a dropped readout leaves behind.
+//
+// `respond()` drops a readout that does not fit, whole, and counts it - and the
+// counter it counts, `responses_lost`, is a field of the `health` readout, so a
+// health line that did not fit would take its own evidence of the drop with it and
+// the interface would look healthy while going silent (`kReadoutLineCapacity`
+// above records how close that is). This notice is constant and short, so it fits
+// whatever the schema does, and it is composed into the same working buffer the
+// dropped readout was: that readout is gone by definition, and the buffer is the
+// only line buffer there is.
+//
+// It is a **notice, not an answer**: the readout it replaces was not sent, and the
+// fix is to shorten the schema, not to retry. It is deliberately not routed
+// through `respond()` - the drop is already counted there, and a notice that
+// could be dropped would be no notice at all.
+inline void stageLostReadoutNotice() {
+    ev::BoundedText notice(serialTransport::port().workingBuffer(),
+                           benchConfig::kReadoutLineCapacity);
+    notice.appendText("BENCH,lost=1");
+    notice.field("reason").appendText("ReadoutDidNotFit");
+    if (notice.truncated()) {
+        return;  // constant and 36 characters: not reachable, and not silent
+    }
+    if (!serialTransport::port().stage(notice.length(), true)) {
+        return;  // the transport is busy; the counter still records the drop
+    }
+    serialTransport::port().pump();
+}
+
 // Stages one composed line. The transport is the production line transport, so
 // bench answers share the port, the buffer and the drop discipline with the rest
 // of the firmware: nothing here can block waiting for a host.
+//
+// A readout that does not fit its line is dropped **whole** rather than sent
+// short - a truncated line would hide the fields at its tail, and the tail is
+// where a diagnosis lives - and `stageLostReadoutNotice()` leaves a visible trace
+// of that in its place.
 inline void respond(ev::BoundedText& text) {
     if (text.truncated()) {
         ++detail::lostResponses();
+        stageLostReadoutNotice();
         return;
     }
     if (!serialTransport::port().stage(text.length(), true)) {
