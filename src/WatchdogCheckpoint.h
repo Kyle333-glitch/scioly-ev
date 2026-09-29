@@ -192,11 +192,16 @@ static_assert(kWatchdogTimeoutMs == ev::requiredWatchdogTimeoutMs(kWatchdogQuali
 // The checkpoint. One instance, owned by the firmware entry point.
 class WatchdogCheckpoint {
 public:
-    // Records the boot instant and clears the counters. Opens nothing, and
-    // touches no timer: opening is `openIfRequested()`, called once at the end of
-    // `setup()`.
+    // Clears the counters and the refresh history, and starts the refresh
+    // interval at `nowMs`. Opens nothing, and touches no timer: opening is
+    // `openIfRequested()`, called once at the end of `setup()`.
+    //
+    // The boot instant itself is not kept: nothing reads it. The two instants
+    // this class is asked about are the open and the first refresh
+    // (`openedAtMs_`, `timeToFirstRefreshMs_`), and holding a third that no
+    // caller wants would be a place for a stale value to look like a
+    // measurement.
     void begin(uint32_t nowMs) {
-        bootMs_ = nowMs;
         lastRefreshMs_ = nowMs;
         opened_ = false;
         openAttempted_ = false;
@@ -299,7 +304,6 @@ public:
     // until the first refresh has happened. The number H0W enters as
     // `bootToFirstRefreshMs` in `ev::WatchdogQualification`.
     uint32_t timeToFirstRefreshMs() const { return timeToFirstRefreshMs_; }
-    bool hasTimeToFirstRefresh() const { return hasFirstRefresh_; }
 
     // The longest interval observed between two consecutive refreshes,
     // milliseconds, excluding the first refresh (see `endOfPass()`). This is the
@@ -315,7 +319,6 @@ private:
     bool openAttempted_ = false;
     bool openRefused_ = false;
     bool hasFirstRefresh_ = false;
-    uint32_t bootMs_ = 0U;
     uint32_t openedAtMs_ = 0U;
     uint32_t timeToFirstRefreshMs_ = 0U;
     uint32_t worstRefreshGapMs_ = 0U;
