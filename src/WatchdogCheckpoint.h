@@ -65,11 +65,16 @@
 // Enablement is one centralized setting, it is OFF, and it is per-environment
 //
 //   `kWatchdogEnablementRequested` is the single place enablement is decided, and
-//   it is **false** in the vehicle image. The watchdog has never been observed on
-//   this target: H0W (the on-target watchdog check) has not been run, so nothing
-//   here may claim that the watchdog starts, counts, refreshes or resets.
-//   Compiling and linking the adapter - which this stage does, so the mechanism is
-//   proven to build - is not validation of any behavior.
+//   it is **false** in the vehicle image. H0W (the on-target watchdog check) has
+//   been run and recorded (D26-D30), but on the **bench** image and under a bench
+//   load: the path opens at the chosen timeout, counts, refreshes only from this
+//   checkpoint, resets a deliberately hung loop, and the board re-uploads after
+//   that reset. It has **not** been observed under a loaded run, which is why
+//   `kWatchdogTimeoutMs` is recorded as bench-qualified and provisional (H0W
+//   Step 8, `data/prereg/P-H0W-step8-2026-09-29.md`), and why enablement in the
+//   vehicle image stays a separate, deliberate change. Compiling and linking the
+//   adapter - which every stage does, so the mechanism is proven to build - is
+//   still not validation of any behavior.
 //
 //   The value comes from a build define, `EV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED`,
 //   which only the bench environment that runs H0W sets
@@ -88,16 +93,19 @@
 //   many passes the loop finished and how many would have been withheld before
 //   the timeout is chosen.
 //
-// The requested timeout is a placeholder, and it is checked at compile time
+// The requested timeout is measured, and it is checked at compile time
 //
-//   `kWatchdogTimeoutMs` is UNVERIFIED, and the two gaps it must cover are
-//   placeholders too (no measurement of either exists yet). What is *not* a
-//   placeholder is the rule: the static assertions below refuse to compile a
-//   build that requests enablement with a timeout that does not cover the boot
-//   gap and the worst refresh interval with a margin. Flipping enablement is
-//   therefore not enough to get a too-short timeout onto the board - the numbers
-//   have to be brought up to the measured rule first, which is exactly the
-//   deliberate act H0W describes.
+//   `kWatchdogTimeoutMs` and the two gaps it must cover are measurements now, not
+//   placeholders (D26/D27, re-taken in D30; the numbers and their evidence are on
+//   the constants below). What the static assertions add on top of them is the
+//   *rule*: a build that requests enablement with a timeout that does not cover
+//   the boot gap and the worst refresh interval by the margin does not compile.
+//   Flipping enablement is therefore not enough to get a too-short timeout onto
+//   the board - the numbers have to satisfy the rule, which is exactly the
+//   deliberate act H0W describes. Note that the rule is applied to the **requested**
+//   value while the timer programs a longer realized period (174 ms for the 114 ms
+//   request, measured in D30), so the realized margin is larger than the asserted
+//   one.
 //
 // Static check (from the repository root):
 //
@@ -148,9 +156,15 @@ constexpr bool kWatchdogEnablementRequested = EV_BENCH_WATCHDOG_ENABLEMENT_REQUE
 //     from the rule that chose it.
 //
 // The requested value is **not** the realized one: the timer rounds the request up
-// to the next achievable prescaler/reload pair. H0W Step 7 records the realized
-// period from the reset latency, and the margin this value leaves over the worst
-// measured gap is what makes that rounding harmless.
+// to the next achievable prescaler/reload pair. **Measured (D30): the realized
+// period for this 114 ms request is 174 ms** - `WDTCR.TOPS=3` (16384 cycles),
+// `CKS=5` (/256), PCLKB 24 MHz, i.e. 16384 x 256 / 24 MHz = 174.76 ms - reported by
+// `bench wdt` from the registers and by `wdt_realized_ms` from the library. It is
+// deliberately read from those rather than from the reset latency, because the
+// host's latency measurement is quantized by its serial read window, which is the
+// same order as the period itself (D30). The margin this value leaves over the
+// worst measured gap is what makes the rounding harmless, and in realized terms
+// that margin is 174 - 14 = 160 ms, not the 100 ms the rule was applied to.
 constexpr uint32_t kWatchdogTimeoutMs = 114U;
 constexpr uint32_t kBootToFirstRefreshBudgetMs = 0U;
 constexpr uint32_t kWorstRefreshIntervalBudgetMs = 14U;

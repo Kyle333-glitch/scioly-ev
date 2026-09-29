@@ -10,6 +10,9 @@
 #include <SerialCommandParser.h>
 #include <TelemetryRecord.h>
 
+#include "ResetCause.h"
+#include "WatchdogRegisters.h"
+
 #include "../EncoderInput.h"
 #include "../MotorDriver.h"
 #include "../PinMap.h"
@@ -259,6 +262,14 @@ inline void healthLine(const VehicleRuntime& runtime, const WatchdogCheckpoint& 
     text.field("opened").appendBool(watchdog.opened());
     text.field("open_refused").appendBool(watchdog.openRefused());
     text.field("timeout_ms").appendUnsigned(watchdog.requestedTimeoutMs());
+    // The period the timer actually programmed, from the library's own
+    // computation (`WDTimer::getTimeout()`, which returns the realized period of
+    // the prescaler/reload pair it selected, rounded up from the request). This is
+    // the number P-H0W Step 7 asks for: the requested `timeout_ms` is **not** the
+    // realized period. It reports 0 when the timer was never opened, which
+    // `opened` tells apart from a realized period of zero; the read is a pure
+    // member read and touches no timer register.
+    text.field("wdt_realized_ms").appendUnsigned(WDT.getTimeout());
     text.field("passes").appendUnsigned(watchdog.passes());
     text.field("refreshes").appendUnsigned(watchdog.refreshes());
     text.field("withheld").appendUnsigned(watchdog.withheldRefreshes());
@@ -357,12 +368,120 @@ inline void pinsLine() {
     respond(text);
 }
 
+// `bench resetsrc [clear]` - the reset-status registers, as the MCU holds them now
+// (P-H0W Step 3: "if a reset-cause register is readable on this core, record it;
+// do not assume one exists").
+//
+// `source=register_read` is part of the reading, not decoration: these are
+// `R_SYSTEM->RSTSR0`/`RSTSR1` as the MCU reads them, and the decode uses the bit
+// masks the vendor device header defines (`src/bench/ResetCause.h` explains and
+// cites them). The raw values lead, so the decode can be checked and a flag this
+// firmware does not name is not silently discarded.
+//
+// Plain `bench resetsrc` writes nothing. `bench resetsrc clear` clears both
+// registers *first* and reports what they read afterwards, with `cleared` saying
+// which of the two happened - because the flags latch (D30: a board that has taken
+// one watchdog reset reports `wdtrf=1` on every later boot), a session that wants
+// to attribute a reset must record the state, clear, cause the reset, and read
+// again. The clear is deliberately not implicit: a readout must never destroy the
+// evidence it was asked for.
+//
+// What a read does **not** establish on its own: that the value it returns is the
+// one the last reset produced. Nothing in this firmware clears these flags, and the
+// boot path before this code (the DFU bootloader, then FSP startup, which ships
+// prebuilt in this framework) is not this firmware's to inspect - so attribution
+// comes from the read/clear/observe/read sequence, never from one reading.
+inline void resetCauseLine(bool clearFirst) {
+    if (clearFirst) {
+        resetCause::clear();
+    }
+    const resetCause::Snapshot cause = resetCause::read();
+    ev::BoundedText text(serialTransport::port().workingBuffer(),
+                         benchConfig::kReadoutLineCapacity);
+    text.appendText("BENCH,resetsrc=1");
+    text.field("source").appendText("register_read");
+    text.field("cleared").appendBool(clearFirst);
+    text.field("rstsr0").appendUnsigned(cause.rstsr0);
+    text.field("rstsr1").appendUnsigned(cause.rstsr1);
+    text.field("porf").appendBool(cause.powerOnReset);
+    text.field("dpsrstf").appendBool(cause.deepSoftwareReset);
+    text.field("wdtrf").appendBool(cause.watchdogReset);
+    text.field("iwdtrf").appendBool(cause.independentWatchdogReset);
+    text.field("swrf").appendBool(cause.softwareReset);
+    text.field("rperf").appendBool(cause.ramParityError);
+    text.field("reerf").appendBool(cause.reeError);
+    text.field("busmrf").appendBool(cause.busMasterError);
+    text.field("bussrf").appendBool(cause.busSlaveError);
+    text.field("sperf").appendBool(cause.securityError);
+    respond(text);
+}
+
+// `bench wdt` - what the watchdog hardware was actually programmed with (P-H0W
+// Steps 6 and 7: "do not treat `kWatchdogTimeoutMs` as the realized period";
+// "record the realized period").
+//
+// The health line reports the library's own computed period as
+// `wdt_realized_ms`; this line reports the registers behind it, so the two can be
+// checked against each other rather than trusted. `source=register_read` says the
+// numbers are the MCU's own view, and the raw `WDTCR`/`WDTSR` values lead the
+// decoded fields for the same reason the reset-cause line leads with raw values.
+//
+// `tops` and `cks` are **field values, not periods**: which period or division a
+// value selects is hardware-manual knowledge, and this firmware reports the field
+// rather than decoding it (`src/bench/WatchdogRegisters.h` explains). `pclkb_hz`
+// is the vendor clock API's number, which is the half of a period calculation that
+// cannot be guessed from the register contents.
+//
+// `cntval` is the live down-counter. Refreshes happen once per pass (tens of
+// microseconds apart), so a healthy loop shows it near its reload value; reading it
+// twice with a known gap is how a caller can see the countdown rate.
+inline void watchdogLine() {
+    const watchdogRegisters::Snapshot registers = watchdogRegisters::read();
+    ev::BoundedText text(serialTransport::port().workingBuffer(),
+                         benchConfig::kReadoutLineCapacity);
+    text.appendText("BENCH,wdt=1");
+    text.field("source").appendText("register_read");
+    text.field("wdtcr").appendUnsigned(registers.wdtcr);
+    text.field("tops").appendUnsigned(registers.tops);
+    text.field("cks").appendUnsigned(registers.cks);
+    text.field("rpes").appendUnsigned(registers.rpes);
+    text.field("rpss").appendUnsigned(registers.rpss);
+    text.field("wdtsr").appendUnsigned(registers.wdtsr);
+    text.field("cntval").appendUnsigned(registers.counterValue);
+    text.field("underflow").appendBool(registers.underflow);
+    text.field("refresh_error").appendBool(registers.refreshError);
+    text.field("pclkb_hz").appendUnsigned(watchdogRegisters::pclkbHz());
+    text.field("wdt_realized_ms").appendUnsigned(WDT.getTimeout());
+    respond(text);
+}
+
+// `bench resetsrc [clear]` - dispatch, including the argument check.
+//
+// An argument that is not `clear` is **refused**, not ignored: an operator who
+// typed `clear`, saw a readout and believed the flags were reset would draw the
+// wrong conclusion from the next read - and the whole point of this instrument is
+// that a conclusion about a reset is drawn from these numbers.
+inline void applyResetCause(const ev::BenchTokens& tokens) {
+    if (tokens.count > 3U) {
+        ++detail::refusedLines();
+        refuseLine("TooManyTokens");
+        return;
+    }
+    if (tokens.count == 3U &&
+        !ev::benchTokenEquals(tokens.token(2), tokens.tokenLength(2), "clear")) {
+        ++detail::refusedLines();
+        refuseLine("UnknownResetCauseArgument");
+        return;
+    }
+    resetCauseLine(tokens.count == 3U);
+}
+
 inline void helpLine() {
     ev::BoundedText text(serialTransport::port().workingBuffer(),
                          benchConfig::kReadoutLineCapacity);
     text.appendText("BENCH,help=1");
     text.field("verbs")
-        .appendText("health drive arm stop reset ticks inputs pins");
+        .appendText("health drive arm stop reset resetsrc wdt ticks inputs pins");
     respond(text);
 }
 
@@ -475,6 +594,12 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
             return;
         case ev::BenchVerb::Pins:
             pinsLine();
+            return;
+        case ev::BenchVerb::ResetCause:
+            applyResetCause(tokens);
+            return;
+        case ev::BenchVerb::Wdt:
+            watchdogLine();
             return;
         case ev::BenchVerb::Unknown:
         case ev::BenchVerb::None:

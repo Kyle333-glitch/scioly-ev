@@ -90,6 +90,8 @@ void test_every_verb_is_recognized_by_its_whole_name(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Inputs), static_cast<int>(ev::benchVerbFor(split("bench inputs"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Inputs), static_cast<int>(ev::benchVerbFor(split("bench trigger"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Pins), static_cast<int>(ev::benchVerbFor(split("bench pins"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::ResetCause), static_cast<int>(ev::benchVerbFor(split("bench resetsrc"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Wdt), static_cast<int>(ev::benchVerbFor(split("bench wdt"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::DriveStatus), static_cast<int>(ev::benchVerbFor(split("bench drive-status"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Drive), static_cast<int>(ev::benchVerbFor(split("bench drive fwd 10 10"))));
 }
@@ -99,8 +101,20 @@ void test_a_prefix_of_a_verb_is_not_the_verb(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench dri"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench drive-stat"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench pin"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench wd"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench arming"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench ARM"))));
+}
+
+// `reset` (the drive latch) and `resetsrc` (the reset-status readout) share a
+// prefix in both directions, so they are the case that shows the comparison is
+// length-checked rather than a prefix match - and `resetsrc` must not be reachable
+// by typing the shorter verb, or a session would read the wrong thing.
+void test_the_reset_latch_and_the_reset_readout_do_not_alias(void) {
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Reset), static_cast<int>(ev::benchVerbFor(split("bench reset"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::ResetCause), static_cast<int>(ev::benchVerbFor(split("bench resetsrc"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench resets"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench resetsrcx"))));
 }
 
 // A line that is not a bench line at all is `None`, which is what routes it to the
@@ -221,6 +235,7 @@ int main(int, char**) {
     RUN_TEST(test_token_access_past_the_end_is_empty_not_undefined);
     RUN_TEST(test_every_verb_is_recognized_by_its_whole_name);
     RUN_TEST(test_a_prefix_of_a_verb_is_not_the_verb);
+    RUN_TEST(test_the_reset_latch_and_the_reset_readout_do_not_alias);
     RUN_TEST(test_a_non_bench_line_is_not_a_bench_verb);
     RUN_TEST(test_decimals_are_plain_and_overflow_is_refused);
     RUN_TEST(test_a_well_formed_drive_line_parses_to_the_request_as_typed);
