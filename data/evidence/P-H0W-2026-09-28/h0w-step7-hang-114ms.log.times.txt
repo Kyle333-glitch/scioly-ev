@@ -1,0 +1,63 @@
+   0.000	#	capture begin; port=COM3 hold=80.0s
+   0.000	#	connected (attempt 1)
+   0.203	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+   0.203	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+   1.032	>>>	telemetry on
+   1.250	LINE	OK,cmd=telemetry on,enabled=1,stride=1,rate_hz=50.0000,drop_s=0,drop_e=0
+   1.250	LINE	EVE1,ver=1,t_ms=2962,phase=Idle,armed=0,event=TelemetryEnabled,detail=-,fault=None,drop_s=0,drop_e=0
+  10.172	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  10.578	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  10.578	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  10.797	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  11.047	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  11.297	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  11.547	#	connected (attempt 2)
+  11.750	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  11.750	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  21.672	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  22.094	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  22.094	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  22.297	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  22.547	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  22.797	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  23.047	#	connected (attempt 3)
+  23.250	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  23.250	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  33.203	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  33.610	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  33.625	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  33.828	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  34.078	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  34.328	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  34.578	#	connected (attempt 4)
+  34.782	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  34.782	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  44.797	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  45.000	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  45.141	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  45.344	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  45.594	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  45.844	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  46.110	#	connected (attempt 5)
+  46.313	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  46.313	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  56.297	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  56.703	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  56.907	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  57.157	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  57.407	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  57.657	#	connected (attempt 6)
+  57.860	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  57.860	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  67.813	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  68.235	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  68.266	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))
+  68.485	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  68.735	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  68.985	#	connect failed: could not open port 'COM3': FileNotFoundError(2, 'The system cannot find the file specified.', None, 2)
+  69.235	#	connected (attempt 7)
+  69.453	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  69.453	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+  79.391	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  79.813	HANG	BENCH,hang=1,image=bench,after_passes=460000
+  79.844	#	disconnected: ClearCommError failed (PermissionError(13, 'The device does not recognize the command.', None, 22))

@@ -1,0 +1,90 @@
+Processing nano_r4 (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\nano_r4\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.2% (used 5964 bytes from 32768 bytes)
+Flash: [===       ]  25.4% (used 66612 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\nano_r4\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2688 bytes
+Download	[==                       ]   8%         5376 bytes
+Download	[===                      ]  12%         8064 bytes
+Download	[====                     ]  16%        10688 bytes
+Download	[=====                    ]  20%        13376 bytes
+Download	[=====                    ]  21%        14336 bytes
+Download	[======                   ]  24%        16064 bytes
+Download	[=======                  ]  28%        18688 bytes
+Download	[========                 ]  32%        21376 bytes
+Download	[=========                ]  36%        24064 bytes
+Download	[==========               ]  40%        26688 bytes
+Download	[===========              ]  44%        29376 bytes
+Download	[============             ]  48%        32064 bytes
+Download	[=============            ]  52%        34688 bytes
+Download	[==============           ]  56%        37376 bytes
+Download	[===============          ]  60%        40064 bytes
+Download	[================         ]  64%        42688 bytes
+Download	[=================        ]  68%        45376 bytes
+Download	[==================       ]  72%        48064 bytes
+Download	[===================      ]  76%        50688 bytes
+Download	[====================     ]  80%        53376 bytes
+Download	[=====================    ]  84%        56064 bytes
+Download	[======================   ]  88%        58688 bytes
+Download	[======================   ]  89%        59392 bytes
+Download	[=======================  ]  92%        61376 bytes
+Download	[======================== ]  96%        64064 bytes
+Download	[=========================] 100%        66612 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 5.98 seconds =========================
+
+Environment    Status    Duration
+-------------  --------  ------------
+nano_r4        SUCCESS   00:00:05.983
+========================= 1 succeeded in 00:00:05.983 =========================

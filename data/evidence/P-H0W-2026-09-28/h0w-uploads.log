@@ -1,0 +1,905 @@
+H0W uploads - 2026-09-28T22:19:42-07:00
+Processing bench (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6156 bytes from 32768 bytes)
+Flash: [===       ]  27.2% (used 71252 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8576 bytes
+Download	[====                     ]  16%        11456 bytes
+Download	[=====                    ]  20%        14272 bytes
+Download	[=====                    ]  22%        16384 bytes
+Download	[======                   ]  24%        17152 bytes
+Download	[=======                  ]  28%        20032 bytes
+Download	[========                 ]  32%        22848 bytes
+Download	[=========                ]  36%        25728 bytes
+Download	[==========               ]  40%        28544 bytes
+Download	[===========              ]  44%        31424 bytes
+Download	[============             ]  48%        34240 bytes
+Download	[=============            ]  52%        37120 bytes
+Download	[==============           ]  56%        40000 bytes
+Download	[===============          ]  60%        42816 bytes
+Download	[================         ]  64%        45696 bytes
+Download	[================         ]  67%        47936 bytes
+Download	[=================        ]  68%        48512 bytes
+Download	[==================       ]  72%        51392 bytes
+Download	[===================      ]  76%        54208 bytes
+Download	[====================     ]  80%        57088 bytes
+Download	[=====================    ]  84%        59968 bytes
+Download	[======================   ]  88%        62784 bytes
+Download	[=======================  ]  92%        65664 bytes
+Download	[======================== ]  96%        68480 bytes
+Download	[=========================] 100%        71252 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 8.57 seconds =========================
+
+Environment    Status    Duration
+-------------  --------  ------------
+bench          SUCCESS   00:00:08.566
+========================= 1 succeeded in 00:00:08.566 =========================
+71f42e40417d2dcd780607f0e0d6ab04715bea1f992ae37ab46c29e22773e9a7 *.pio/build/bench/firmware.bin
+
+=== H0W Step 1: env:bench-watchdog at 2026-09-28T22:21:03-07:00 ===
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Compiling .pio\build\bench-watchdog\src\VehicleRuntime.cpp.o
+Compiling .pio\build\bench-watchdog\src\bench\BenchMain.cpp.o
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6156 bytes from 32768 bytes)
+Flash: [===       ]  27.3% (used 71580 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14336 bytes
+Download	[======                   ]  24%        17216 bytes
+Download	[=======                  ]  28%        20096 bytes
+Download	[========                 ]  32%        22976 bytes
+Download	[=========                ]  36%        25792 bytes
+Download	[==========               ]  40%        28672 bytes
+Download	[===========              ]  44%        31552 bytes
+Download	[===========              ]  44%        31872 bytes
+Download	[============             ]  48%        34432 bytes
+Download	[=============            ]  52%        37312 bytes
+Download	[==============           ]  56%        40128 bytes
+Download	[===============          ]  60%        43008 bytes
+Download	[================         ]  64%        45888 bytes
+Download	[=================        ]  68%        48768 bytes
+Download	[==================       ]  72%        51584 bytes
+Download	[===================      ]  76%        54464 bytes
+Download	[====================     ]  80%        57344 bytes
+Download	[=====================    ]  84%        60224 bytes
+Download	[======================   ]  88%        63104 bytes
+Download	[=======================  ]  92%        65920 bytes
+Download	[======================== ]  96%        68800 bytes
+Download	[=========================] 100%        71580 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 7.38 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:07.377
+========================= 1 succeeded in 00:00:07.377 =========================
+dc5a1bcb1e7d36339a45201fc112c031e8196f47c529d5837d1a976df99b244a *.pio/build/bench-watchdog/firmware.bin
+
+=== leaving the board on the vehicle image at 2026-09-28T22:23:29-07:00 ===
+Processing nano_r4 (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\nano_r4\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.2% (used 5972 bytes from 32768 bytes)
+Flash: [===       ]  25.5% (used 66836 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\nano_r4\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2688 bytes
+Download	[==                       ]   8%         5376 bytes
+Download	[==                       ]  11%         7680 bytes
+Download	[===                      ]  12%         8064 bytes
+Download	[====                     ]  16%        10752 bytes
+Download	[=====                    ]  20%        13440 bytes
+Download	[======                   ]  24%        16064 bytes
+Download	[=======                  ]  28%        18752 bytes
+Download	[========                 ]  32%        21440 bytes
+Download	[=========                ]  36%        24128 bytes
+Download	[==========               ]  40%        26816 bytes
+Download	[===========              ]  44%        29440 bytes
+Download	[===========              ]  45%        30720 bytes
+Download	[============             ]  48%        32128 bytes
+Download	[=============            ]  52%        34816 bytes
+Download	[==============           ]  56%        37504 bytes
+Download	[===============          ]  60%        40192 bytes
+Download	[================         ]  64%        42816 bytes
+Download	[=================        ]  68%        45504 bytes
+Download	[==================       ]  72%        48192 bytes
+Download	[===================      ]  76%        50880 bytes
+Download	[====================     ]  80%        53568 bytes
+Download	[====================     ]  82%        55296 bytes
+Download	[=====================    ]  84%        56256 bytes
+Download	[======================   ]  88%        58880 bytes
+Download	[=======================  ]  92%        61568 bytes
+Download	[======================== ]  96%        64256 bytes
+Download	[=========================] 100%        66836 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 8.97 seconds =========================
+
+Environment    Status    Duration
+-------------  --------  ------------
+nano_r4        SUCCESS   00:00:08.973
+========================= 1 succeeded in 00:00:08.973 =========================
+
+=== H0W Step 2 baseline: env:bench-watchdog (with worst_refresh_gap_ms) at 2026-09-28T22:31:53-07:00 ===
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6160 bytes from 32768 bytes)
+Flash: [===       ]  27.3% (used 71632 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17216 bytes
+Download	[=======                  ]  28%        20096 bytes
+Download	[=======                  ]  31%        22528 bytes
+Download	[========                 ]  32%        22976 bytes
+Download	[=========                ]  36%        25856 bytes
+Download	[==========               ]  40%        28736 bytes
+Download	[===========              ]  44%        31552 bytes
+Download	[============             ]  48%        34432 bytes
+Download	[=============            ]  52%        37312 bytes
+Download	[==============           ]  56%        40192 bytes
+Download	[===============          ]  60%        43072 bytes
+Download	[================         ]  64%        45888 bytes
+Download	[================         ]  67%        48192 bytes
+Download	[=================        ]  68%        48768 bytes
+Download	[==================       ]  72%        51648 bytes
+Download	[===================      ]  76%        54528 bytes
+Download	[====================     ]  80%        57408 bytes
+Download	[=====================    ]  84%        60288 bytes
+Download	[======================   ]  88%        63104 bytes
+Download	[======================   ]  89%        64512 bytes
+Download	[=======================  ]  92%        65984 bytes
+Download	[======================== ]  96%        68864 bytes
+Download	[=========================] 100%        71632 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 8.68 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:08.680
+========================= 1 succeeded in 00:00:08.680 =========================
+40067e39e423522175e9ebd6ff240245ebdaeaf40886c84b28b0bcaaa79ce3b9 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W Step 3: hang hook = 460000 (bench-watchdog) at 2026-09-28T22:36:02-07:00 ===
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:05.418
+========================= 1 succeeded in 00:00:05.418 =========================
+2566610c41f0d503a0a89f71343c2b3c5b2e5cfc14bc9b85e6b66b5d1f6aedb0 *.pio/build/bench-watchdog/firmware.bin
+hang-build upload exit=0
+
+=== H0W Step 4: five recovery uploads into a hang/looping board at 2026-09-28T22:38:48-07:00 ===
+--- recovery upload 1 at 2026-09-28T22:38:48-07:00 ---
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6168 bytes from 32768 bytes)
+Flash: [===       ]  27.4% (used 71804 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[=                        ]   6%         4736 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17280 bytes
+Download	[=======                  ]  28%        20160 bytes
+Download	[========                 ]  32%        23040 bytes
+Download	[=========                ]  36%        25920 bytes
+Download	[==========               ]  40%        28800 bytes
+Download	[===========              ]  44%        31680 bytes
+Download	[============             ]  48%        34560 bytes
+Download	[=============            ]  52%        37376 bytes
+Download	[==============           ]  56%        40256 bytes
+Download	[===============          ]  60%        43136 bytes
+Download	[================         ]  64%        46016 bytes
+Download	[=================        ]  68%        48896 bytes
+Download	[=================        ]  71%        51520 bytes
+Download	[==================       ]  72%        51776 bytes
+Download	[===================      ]  76%        54656 bytes
+Download	[====================     ]  80%        57536 bytes
+Download	[=====================    ]  84%        60416 bytes
+Download	[======================   ]  88%        63296 bytes
+Download	[=======================  ]  92%        66176 bytes
+Download	[======================== ]  96%        69056 bytes
+Download	[=========================] 100%        71804 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 5.86 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:05.862
+========================= 1 succeeded in 00:00:05.862 =========================
+recovery 1 exit=0
+--- recovery upload 2 at 2026-09-28T22:38:56-07:00 ---
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6168 bytes from 32768 bytes)
+Flash: [===       ]  27.4% (used 71804 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[                         ]   2%         2048 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17280 bytes
+Download	[=======                  ]  28%        20160 bytes
+Download	[========                 ]  32%        23040 bytes
+Download	[=========                ]  36%        25920 bytes
+Download	[==========               ]  40%        28800 bytes
+Download	[===========              ]  44%        31680 bytes
+Download	[============             ]  48%        34560 bytes
+Download	[=============            ]  52%        37376 bytes
+Download	[==============           ]  56%        40256 bytes
+Download	[===============          ]  60%        43136 bytes
+Download	[================         ]  64%        46016 bytes
+Download	[=================        ]  68%        48896 bytes
+Download	[==================       ]  72%        51776 bytes
+Download	[==================       ]  73%        52608 bytes
+Download	[===================      ]  76%        54656 bytes
+Download	[====================     ]  80%        57536 bytes
+Download	[=====================    ]  84%        60416 bytes
+Download	[======================   ]  88%        63296 bytes
+Download	[=======================  ]  92%        66176 bytes
+Download	[======================== ]  96%        69056 bytes
+Download	[=========================] 100%        71804 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 5.63 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:05.630
+========================= 1 succeeded in 00:00:05.630 =========================
+recovery 2 exit=0
+--- recovery upload 3 at 2026-09-28T22:39:03-07:00 ---
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6168 bytes from 32768 bytes)
+Flash: [===       ]  27.4% (used 71804 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[=                        ]   5%         4096 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17280 bytes
+Download	[=======                  ]  28%        20160 bytes
+Download	[========                 ]  32%        23040 bytes
+Download	[=========                ]  36%        25920 bytes
+Download	[==========               ]  40%        28800 bytes
+Download	[===========              ]  44%        31680 bytes
+Download	[============             ]  48%        34560 bytes
+Download	[=============            ]  52%        37376 bytes
+Download	[==============           ]  56%        40256 bytes
+Download	[===============          ]  60%        43136 bytes
+Download	[================         ]  64%        46016 bytes
+Download	[=================        ]  68%        48896 bytes
+Download	[=================        ]  71%        51264 bytes
+Download	[==================       ]  72%        51776 bytes
+Download	[===================      ]  76%        54656 bytes
+Download	[====================     ]  80%        57536 bytes
+Download	[=====================    ]  84%        60416 bytes
+Download	[======================   ]  88%        63296 bytes
+Download	[=======================  ]  92%        66176 bytes
+Download	[======================== ]  96%        69056 bytes
+Download	[=========================] 100%        71804 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 5.58 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:05.582
+========================= 1 succeeded in 00:00:05.582 =========================
+recovery 3 exit=0
+--- recovery upload 4 at 2026-09-28T22:39:10-07:00 ---
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6168 bytes from 32768 bytes)
+Flash: [===       ]  27.4% (used 71804 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[====                     ]  18%        13568 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17280 bytes
+Download	[=======                  ]  28%        20160 bytes
+Download	[========                 ]  32%        23040 bytes
+Download	[=========                ]  36%        25920 bytes
+Download	[==========               ]  40%        28800 bytes
+Download	[===========              ]  44%        31680 bytes
+Download	[============             ]  48%        34560 bytes
+Download	[=============            ]  52%        37376 bytes
+Download	[==============           ]  56%        40256 bytes
+Download	[===============          ]  60%        43136 bytes
+Download	[================         ]  64%        46016 bytes
+Download	[=================        ]  68%        48896 bytes
+Download	[==================       ]  72%        51776 bytes
+Download	[===================      ]  76%        54656 bytes
+Download	[====================     ]  80%        57536 bytes
+Download	[====================     ]  81%        58688 bytes
+Download	[=====================    ]  84%        60416 bytes
+Download	[======================   ]  88%        63296 bytes
+Download	[=======================  ]  92%        66176 bytes
+Download	[======================== ]  96%        69056 bytes
+Download	[=========================] 100%        71804 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 7.62 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:07.624
+========================= 1 succeeded in 00:00:07.624 =========================
+recovery 4 exit=0
+--- recovery upload 5 at 2026-09-28T22:39:19-07:00 ---
+Processing bench-watchdog (platform: renesas-ra; board: nano_r4; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/renesas-ra/nano_r4.html
+PLATFORM: Renesas RA (1.9.0) > Arduino Nano R4
+HARDWARE: RA4M1 48MHz, 32KB RAM, 256KB Flash
+DEBUG: Current (cmsis-dap) External (cmsis-dap, jlink)
+PACKAGES: 
+ - framework-arduinorenesas-uno @ 1.6.0 
+ - tool-dfuutil-arduino @ 1.11.0 
+ - tool-jlink @ 1.92000.0 (9.20.0) 
+ - tool-openocd @ 3.1200.7 (12.0) 
+ - toolchain-gccarmnoneeabi @ 1.70201.0 (7.2.1)
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 24 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- evcore
+|-- WDT @ 0.0.1
+Building in release mode
+Checking size .pio\build\bench-watchdog\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.8% (used 6168 bytes from 32768 bytes)
+Flash: [===       ]  27.4% (used 71804 bytes from 262144 bytes)
+Touch the port for the bootloader
+Auto-detected: COM3
+nano_touch: touching COM3 at 1200 bps (attempt 1/2)
+nano_touch: COM3 closed during the touch: Cannot configure port, something went wrong. Original message: OSError(22, 'A device which does not exist was specified.', None, 433)
+nano_touch: bootloader present; uploading
+Configuring upload protocol...
+AVAILABLE: cmsis-dap, dfu, jlink
+CURRENT: upload_protocol = dfu
+Uploading .pio\build\bench-watchdog\firmware.bin
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Opening DFU capable USB device...
+Device ID 2341:0374
+Device DFU version 0101
+Claiming USB DFU Interface...
+Setting Alternate Interface #0 ...
+Determining device status...
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+DFU mode device DFU version 0101
+Device returned transfer size 64
+Copying data from PC to DFU device
+
+Download	[                         ]   0%            0 bytes
+Download	[=                        ]   4%         2880 bytes
+Download	[==                       ]   8%         5760 bytes
+Download	[===                      ]  12%         8640 bytes
+Download	[====                     ]  16%        11520 bytes
+Download	[=====                    ]  20%        14400 bytes
+Download	[======                   ]  24%        17280 bytes
+Download	[=======                  ]  28%        20160 bytes
+Download	[========                 ]  32%        23040 bytes
+Download	[=========                ]  36%        25920 bytes
+Download	[==========               ]  40%        28800 bytes
+Download	[===========              ]  44%        31680 bytes
+Download	[============             ]  48%        34560 bytes
+Download	[============             ]  48%        34816 bytes
+Download	[=============            ]  52%        37376 bytes
+Download	[==============           ]  56%        40256 bytes
+Download	[===============          ]  60%        43136 bytes
+Download	[================         ]  64%        46016 bytes
+Download	[=================        ]  68%        48896 bytes
+Download	[==================       ]  72%        51776 bytes
+Download	[===================      ]  76%        54656 bytes
+Download	[====================     ]  80%        57536 bytes
+Download	[=====================    ]  84%        60416 bytes
+Download	[======================   ]  88%        63296 bytes
+Download	[=======================  ]  92%        66176 bytes
+Download	[======================== ]  96%        69056 bytes
+Download	[=========================] 100%        71804 bytes
+Download done.
+DFU state(7) = dfuMANIFEST, status(0) = No error condition is present
+DFU state(2) = dfuIDLE, status(0) = No error condition is present
+Done!
+========================= [SUCCESS] Took 7.73 seconds =========================
+
+Environment     Status    Duration
+--------------  --------  ------------
+bench-watchdog  SUCCESS   00:00:07.734
+========================= 1 succeeded in 00:00:07.734 =========================
+recovery 5 exit=0
+
+=== H0W Step 7a: timeout=114, hook=0 at 2026-09-28T22:43:30-07:00 ===
+Step7a upload exit=0
+ba50cfb4533537629c3653c985fdaea549d3c4a5f5d8c65a0af490411a08773f *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W Step 7b: timeout=114, hook=460000 at 2026-09-28T22:44:54-07:00 ===
+bench-watchdog  SUCCESS   00:00:02.791
+========================= 1 succeeded in 00:00:02.791 =========================
+Step7b upload exit=0
+47813b0e90e96baa60458c27bef6d3de4762066939ddb0c03f21fe0410b8ba44 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W Step 7c: hook restored to 0U, timeout=114 at 2026-09-28T22:46:47-07:00 ===
+bench-watchdog  SUCCESS   00:00:05.981
+========================= 1 succeeded in 00:00:05.981 =========================
+restore upload exit=0
+ba50cfb4533537629c3653c985fdaea549d3c4a5f5d8c65a0af490411a08773f *.pio/build/bench-watchdog/firmware.bin
+
+=== leaving the board on the vehicle image at 2026-09-28T22:47:46-07:00 ===
+final restore exit=0
+7fc8d3b563aceb819d52e514fe96ca1665c4b6027ebec7f5a66871197b6b8dc8 *.pio/build/nano_r4/firmware.bin
+
+=== H0W Step 3b: pin/stall instrumentation, hook=0, timeout=114 at 2026-09-28T23:01:01-07:00 ===
+upload exit=0
+27449ca19f721bcaa337c7a3dc951c5828b911a5c4d79111f514ce8e47e68030 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W Step 3c: hang + per-reset pin readout at 2026-09-28T23:02:28-07:00 ===
+bench-watchdog  SUCCESS   00:00:02.664
+========================= 1 succeeded in 00:00:02.664 =========================
+upload exit=0
+5b1c9a8bbecaf1bb15fe5634fcc9df0af4bc328cb7142844d6000332cf8807c2 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W stall measurement, hook=0 at 2026-09-28T23:05:07-07:00 ===
+bench-watchdog  SUCCESS   00:00:05.015
+========================= 1 succeeded in 00:00:05.015 =========================
+upload exit=0
+27449ca19f721bcaa337c7a3dc951c5828b911a5c4d79111f514ce8e47e68030 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W Step 7d: final image validation at 2026-09-28T23:08:59-07:00 ===
+upload exit=0
+ddba3b9d9c0f4fbfd1f5a05051e81d943d4e442fc73bfcea798f2245957f2714 *.pio/build/bench-watchdog/firmware.bin
+
+=== H0W final hang confirmation (final source, hook=460000) at 2026-09-28T23:10:01-07:00 ===
+bench-watchdog  SUCCESS   00:00:02.376
+========================= 1 succeeded in 00:00:02.376 =========================
+upload exit=0
+858a5a323723347ef856dbcc9afec37a85aa32059ab80e40cc181fdbf92cd77b *.pio/build/bench-watchdog/firmware.bin
+
+=== final: hook back to 0U, then the vehicle image, at 2026-09-28T23:11:03-07:00 ===
+bench-watchdog  SUCCESS   00:00:01.496
+========================= 1 succeeded in 00:00:01.496 =========================
+hook0 upload exit=0
+858a5a323723347ef856dbcc9afec37a85aa32059ab80e40cc181fdbf92cd77b *.pio/build/bench-watchdog/firmware.bin
+eb440b319a8a09aeb4ee82f0aa37f24a80f3f4a011b49d14639d895bc5d88d50 *.pio/build/nano_r4/firmware.bin
+vehicle upload exit=0
+
+!!! CORRECTION (appended after the fact) - the block above labelled
+"=== final: hook back to 0U, then the vehicle image" did NOT have the hook
+back at 0U: the source still said 460000U for that build, so the
+bench-watchdog image uploaded there (858a5a32...) contained the hang hook.
+The mistake was found by reading the tree afterwards, not by the build; the
+hook was then set back to 0U in src/bench/BenchMain.cpp and the rebuilt image
+is ddba3b9d... The vehicle-image upload that followed is unaffected (the
+vehicle image cannot contain the hook - src/main.cpp asserts it and the bench
+tree is not compiled there). Recorded in DEVELOPMENT_LOG.md D28.

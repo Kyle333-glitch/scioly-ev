@@ -1,0 +1,66 @@
+# D22 follow-up - F-4 on target: three late-attach observations
+#
+# Session: 2026-09-28, after the D22 fixes were built and uploaded
+# (data/evidence/P-H0-2026-09-28/d22-f1-upload-verify.log, image
+# fw=ev-nano-r4-p7b, 66612 bytes).
+#
+# What was tested
+#   The F-4 failure case exactly: the board boots with NO host reading the port
+#   (the bounded boot wait in setup() runs its full 2000 ms - visible in the
+#   capture as the first sample's dt_ms=2000), and a host attaches later. Before
+#   D22 the boot line was never seen in that case.
+#
+# How
+#   data/raw/d22_boot_capture.py COM3 <seconds>, opening at 115200 (never 1200,
+#   so the board is not re-touched into its bootloader), DTR asserted - which is
+#   what the CDC writes need. Each run attaches, reads, and closes.
+#
+# Three attaches were made, and they did NOT all behave the same way. All three
+# are recorded: the difference is the finding.
+
+--- attach 1 (6.0 s) - BOOT-first: True, total lines: 309
+BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=0,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+EVS1,ver=1,t_ms=2000,dt_ms=2000,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=524,curr_counts=578,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=0,drop_e=0
+# The first sample is the run's very first tick (t_ms=2000, dt_ms=2000): the
+# board really did boot with nobody reading. The BOOT line still arrived, first.
+
+--- attach 2 (5.0 s) - BOOT-first: False, total lines: 250
+# (the first printed line was empty - the tail of a record that had been written
+#  into the USB FIFO while no application was reading it)
+EVS1,ver=1,t_ms=74622,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=586,curr_counts=577,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+EVS1,ver=1,t_ms=74642,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=585,curr_counts=578,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+EVS1,ver=1,t_ms=74662,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=586,curr_counts=579,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+# t_ms of the first 10 samples: 74622, 74642, 74662, 74682, 74702, 74722, 74742,
+# 74762, 74782, 74802 - current records, no jump out of the oldest lane records.
+# last sample drop_s/drop_e: 588 / 0; any drop_s > 0: True
+# NO BOOT line was sent on this attach.
+
+--- attach 3 (4.0 s) - BOOT-first: True, total lines: 209 (file: d22-f4-attach3.txt)
+BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=0,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+EVS1,ver=1,t_ms=79622,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=586,curr_counts=577,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=1844,drop_e=0
+# t_ms of the first 10 samples: 79622, 79642, 79662, 79682, 79702, 79722, 79742,
+# 79762, then 104902, 104922 - the oldest lane records first, then current ones.
+# last sample drop_s/drop_e: 1844 / 0
+
+--- What this says, and what it does not
+#
+# Verified: F-4's failure case is fixed. A board that boots with no host reading
+# is greeted with `BOOT,...` as the first line when a host attaches later - seen
+# on attach 1 and attach 3, from a boot whose first sample proves nobody was
+# attached during the boot wait.
+#
+# Not verified, and observed the other way: the code re-arms the greeting on a
+# host-attach *transition*, and attach 2 shows no transition was seen - the boot
+# line was not re-sent, and the telemetry stream resumed mid-flight with current
+# records. The host-presence signal is the USB CDC `connected()` predicate (DTR),
+# and why the detach between attach 1 and attach 2 was not observed is NOT
+# determined: the port was closed by the capturing process, and whether the host
+# stack deasserted DTR (and when) was not measured. Attach 3 then behaved as
+# attached-again, so the signal does flap sometimes.
+#
+# Consequence for the record: the honest statement is "the boot line is sent once
+# per boot, to the first host that attaches, whenever it attaches". A greeting per
+# attach is what the code intends but it is NOT demonstrated here, and it is not
+# claimed. Nothing in this file is a claim about a second image or another host
+# machine, and no motor supply was connected (USB only).

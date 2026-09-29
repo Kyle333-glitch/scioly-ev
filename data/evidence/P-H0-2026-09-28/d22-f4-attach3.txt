@@ -1,0 +1,12 @@
+attached to COM3 at 115200; reading 4.0 s
+first lines (oldest first):
+  BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=0,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  EVS1,ver=1,t_ms=79622,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=587,curr_counts=579,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+  EVS1,ver=1,t_ms=79642,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=588,curr_counts=582,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+  EVS1,ver=1,t_ms=79662,dt_ms=20,phase=Idle,cmd=none,armed=0,pos_m=0.0000,pos_ok=0,vel_mps=0.0000,vel_ok=0,vel_cmd_mps=0.0000,rem_m=0.0000,motor=Disabled,effort_permille=0,batt_counts=587,curr_counts=581,nfault_low=0,fault=None,authz=AuthorizedStop,check=ConfigurationValid,drop_s=588,drop_e=0
+total lines: 209
+BOOT-first: True
+t_ms of the first 10 samples: ['79622', '79642', '79662', '79682', '79702', '79722', '79742', '79762', '104902', '104922']
+t_ms of the last sample:     108882
+last sample drop_s/drop_e:   1844 / 0
+any drop_s > 0:              True

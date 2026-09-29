@@ -1,0 +1,26 @@
+# H0 session 1 - toolchain and host-link transcript
+# Re-run 2026-09-28 after the session's uploads. Verbatim output.
+
+$ pio --version
+PlatformIO Core, version 6.2.0
+
+$ python -c 'import serial' (PlatformIO penv)
+python 3.11.7 pyserial 3.5
+
+$ pio device list
+COM3
+----
+Hardware ID: USB VID:PID=2341:0074 SER=350D331C5A333131021133354B573462 LOCATION=1-3:x.0
+Description: USB Serial Device (COM3)
+
+
+
+$ ~/.platformio/packages/tool-dfuutil-arduino/dfu-util -l   # application mode, bootloader not present
+dfu-util 0.11-arduino4
+
+Copyright 2005-2009 Weston Schmidt, Harald Welte and OpenMoko Inc.
+Copyright 2010-2021 Tormod Volden and Stefan Schmidt
+This program is Free Software and has ABSOLUTELY NO WARRANTY
+Please report bugs to http://sourceforge.net/p/dfu-util/tickets/
+
+Found Runtime: [2341:0074] ver=0100, devnum=25, cfg=1, intf=2, path="1-3", alt=0, name="DFU-RT Port", serial="350D331C5A333131021133354B573462"
