@@ -169,6 +169,8 @@ inline const char* telemetryFaultName(FaultCode code) {
             return "DisarmedDuringRun";
         case FaultCode::RunSequencingError:
             return "RunSequencingError";
+        case FaultCode::DriverFaultBar:
+            return "DriverFaultBar";
     }
     return "?";
 }

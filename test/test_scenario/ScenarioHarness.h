@@ -205,6 +205,12 @@ constexpr double kFixtureStopThresholdMps = 0.05;
 constexpr double kFixtureStopDwellS = 0.1;
 constexpr double kFixtureReversalTimeoutS = 1.0;
 
+// The fixture limit on the gap between two updates that may still be credited as
+// continued near-zero evidence. Wide relative to the scenario cadence, because
+// these scenarios are about the chain rather than about the gap rule; the rule
+// itself is tested in `test_near_zero_verifier`.
+constexpr uint32_t kFixtureMaxUpdateGapMs = 250U;
+
 // The staleness limit for the estimate the stop-verification packet pairs with
 // the current zero-speed claim. Deliberately longer than the stop dwell: the
 // window-derived zero is always produced before the claim interval it is paired
@@ -230,6 +236,16 @@ inline ev::Sourced<ev::MotionDirection> measuredPositiveDirection(ev::MotionDire
 
 inline ev::Sourced<ev::MotorMode> measuredPositiveMode(ev::MotorMode mode) {
     return ev::Sourced<ev::MotorMode>(mode, ev::ValueSource::Measured);
+}
+
+// The fixture stop-verification policy, in one place: threshold, dwell and the
+// fixture gap limit. A new configuration field has to be added here rather than
+// at each of the two call sites below.
+inline ev::NearZeroConfig fixtureStopConfig() {
+    return ev::NearZeroConfig(measuredValue(kFixtureStopThresholdMps),
+                              measuredValue(kFixtureStopDwellS),
+                              ev::Sourced<uint32_t>(kFixtureMaxUpdateGapMs,
+                                                    ev::ValueSource::Measured));
 }
 
 // The single fixture set every scenario uses.
@@ -325,11 +341,8 @@ inline ScenarioFixtures nominalFixtures() {
                            measuredValue(kFixtureFinalApproachTimeoutS),
                            measuredValue(kFixtureFinalStopTimeoutS),
                            measuredValue(kFixtureFinalApproachDistanceM),
-                           ev::NearZeroConfig(measuredValue(kFixtureStopThresholdMps),
-                                              measuredValue(kFixtureStopDwellS))),
-        ev::ReversalConfig(ev::NearZeroConfig(measuredValue(kFixtureStopThresholdMps),
-                                              measuredValue(kFixtureStopDwellS)),
-                           measuredValue(kFixtureReversalTimeoutS)),
+                           fixtureStopConfig()),
+        ev::ReversalConfig(fixtureStopConfig(), measuredValue(kFixtureReversalTimeoutS)),
         measuredPositiveDirection(ev::MotionDirection::Forward));
 }
 
@@ -982,15 +995,18 @@ private:
     int32_t encoderTicks_ = 0;
 
     ev::VelocityEstimator estimator_;
-    ev::VelocityEstimate estimate_{0.0, false, false, ev::VelocityEstimateStatus::WarmingUp, 0U, 0U,
-                                  0};
+    // Held defaults before the first estimate exists. The shape of an absent
+    // number is owned by `refusedVelocityEstimate()`; this harness mirrors the
+    // vehicle layer's members, so it uses the same definition.
+    ev::VelocityEstimate estimate_ =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
     bool hasEstimate_ = false;
 
     // The last window-derived estimate, held for the stop-verification packet's
     // speed fact (see the header). Nothing else reads it: the control path uses
     // the current answer. Cleared with everything else at a chain reset.
-    ev::VelocityEstimate lastValidEstimate_{0.0, false, false,
-                                            ev::VelocityEstimateStatus::WarmingUp, 0U, 0U, 0};
+    ev::VelocityEstimate lastValidEstimate_ =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
     bool hasLastValidEstimate_ = false;
 
     ev::OdometryEstimate odometryTravel_{0.0, false, ev::OdometryEstimateStatus::ScaleIsNotMeasured};

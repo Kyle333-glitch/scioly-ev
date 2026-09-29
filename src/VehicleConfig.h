@@ -2,6 +2,7 @@
 
 #include <CompetitionStateMachine.h>
 #include <ConfigurationChecks.h>
+#include <DriverFault.h>
 #include <Motion.h>
 #include <MotionProfile.h>
 #include <NearZeroVerifier.h>
@@ -68,6 +69,15 @@ constexpr uint32_t kMaxSampleAgeMs = 60U;
 // packet pairs it with the current cycle's zero-speed claim, so this limit must
 // span the longer of the two stop dwells; `stopEvidenceLimitSpansDwell()` is what
 // refuses a limit that does not.
+//
+// This is a cadence-and-staleness policy value, so it is a plain constant rather
+// than a `Sourced` measurement - but it is also a guess, and it is the *longest*
+// staleness this firmware acts on. Its honest value comes out of the H5 velocity
+// trace and the H7 stop characterization (how fast the window estimate is worth
+// trusting at each speed), and until those exist the number is only as good as
+// the dwell it spans. It is deliberately not derived from the loop period: a
+// limit tied to the control cadence would shrink silently when the cadence
+// changed, and the dwell it has to span did not change with it.
 constexpr uint32_t kStopEvidenceMaxAgeMs = 3200U;
 
 // The velocity estimator's window span and its explicit zero-speed claim timeout.
@@ -121,6 +131,15 @@ constexpr double kPlannedMaxIntegrationStepS = 0.05;
 constexpr double kPlannedReversalStopThresholdMps = 0.05;
 constexpr double kPlannedReversalStopDwellS = 0.2;
 
+// The longest gap between two control updates that may still be credited as
+// continued near-zero evidence, milliseconds. This is what bounds how much of a
+// stop dwell can accumulate without being observed, so its honest value is the
+// measured maximum control-loop stall from H0W - not the 20 ms control period,
+// which is the cadence the loop is *asked* for rather than the worst one it
+// delivers. Provisional until that measurement exists, which is why a stop
+// cannot be verified yet (`NearZeroVerifier.h`).
+constexpr uint32_t kPlannedMaxDwellGapMs = 40U;
+
 // Run-policy bounds. Every one of these is a bound the run is allowed to wait
 // for evidence under, so a placeholder that is too short turns into a phase
 // timeout rather than into motion - which is the safe direction.
@@ -144,6 +163,17 @@ constexpr ev::MotionDirection kPlannedPositiveCommandDirection = ev::MotionDirec
 constexpr ev::MotorMode kPlannedPositiveEffortMode = ev::MotorMode::DriveForward;
 constexpr ev::MotionDirection kPlannedPositiveTicksDirection = ev::MotionDirection::Forward;
 
+// The planned reading of the driver's nFAULT line. `Unverified` - the zero value -
+// is deliberate and is what this build ships: nobody has measured the line, so no
+// level is interpreted as a fault and the raw level is reported instead
+// (`VERIFIED_STATE.md` #1, #2). H1B measures which level the driver drives for
+// each line state; promoting this value to `ActiveLow` or `ActiveHigh` with a
+// citation is what turns the line into a latched fault, and
+// `DriverFaultPolarityVerified` refuses to arm the vehicle until that has
+// happened - a driver fault nobody interprets is a driver fault nobody stops for.
+constexpr ev::DriverFaultPolarity kPlannedDriverFaultPolarity =
+    ev::DriverFaultPolarity::Unverified;
+
 // ---------------------------------------------------------------------------
 // Provenance helpers
 // ---------------------------------------------------------------------------
@@ -156,6 +186,10 @@ inline ev::Sourced<uint16_t> provisionalPermille(uint16_t value) {
     return ev::Sourced<uint16_t>(value, ev::ValueSource::Provisional);
 }
 
+inline ev::Sourced<uint32_t> provisionalGapMs(uint32_t value) {
+    return ev::Sourced<uint32_t>(value, ev::ValueSource::Provisional);
+}
+
 inline ev::Sourced<ev::MotionDirection> provisionalDirection(ev::MotionDirection direction) {
     return ev::Sourced<ev::MotionDirection>(direction, ev::ValueSource::Provisional);
 }
@@ -164,11 +198,19 @@ inline ev::Sourced<ev::MotorMode> provisionalEffortMode(ev::MotorMode mode) {
     return ev::Sourced<ev::MotorMode>(mode, ev::ValueSource::Provisional);
 }
 
+inline ev::Sourced<ev::DriverFaultPolarity> plannedDriverFaultPolarity() {
+    return ev::Sourced<ev::DriverFaultPolarity>(kPlannedDriverFaultPolarity,
+                                                ev::ValueSource::Provisional);
+}
+
 // The final stop dwell is the event's Complete Stop (rule 8.p). It is a rule
 // value, never a measurement: the run must hold its final stop at least this
-// long before it may be called complete.
+// long before it may be called complete. The citation is the rule itself, which
+// is what `Sourced::citesEvidence()` asks for on anything that is not a
+// placeholder.
 inline ev::Sourced<double> completeStopDwellS() {
-    return ev::Sourced<double>(ev::rules2027::kCompleteStopS, ev::ValueSource::RuleDerived);
+    return ev::Sourced<double>(ev::rules2027::kCompleteStopS, ev::ValueSource::RuleDerived,
+                               "rules2027 8.p (Complete Stop)");
 }
 
 // ---------------------------------------------------------------------------
@@ -222,12 +264,14 @@ inline ev::DirectionalMotionProfileLimits profileLimits() {
 
 inline ev::NearZeroConfig reversalStopVerification() {
     return ev::NearZeroConfig(provisionalValue(kPlannedReversalStopThresholdMps),
-                              provisionalValue(kPlannedReversalStopDwellS));
+                              provisionalValue(kPlannedReversalStopDwellS),
+                              provisionalGapMs(kPlannedMaxDwellGapMs));
 }
 
 inline ev::NearZeroConfig finalStopVerification() {
     return ev::NearZeroConfig(provisionalValue(kPlannedReversalStopThresholdMps),
-                              completeStopDwellS());
+                              completeStopDwellS(),
+                              provisionalGapMs(kPlannedMaxDwellGapMs));
 }
 
 inline ev::RunPhaseConfig runPhaseConfig() {
@@ -252,6 +296,96 @@ inline ev::Sourced<ev::MotionDirection> positiveTicksDirection() {
 }
 
 // ---------------------------------------------------------------------------
+// Provenance: does every promoted value cite where it came from?
+// ---------------------------------------------------------------------------
+//
+// Promoting a placeholder to `ValueSource::Measured` is the one edit that lets a
+// value authorize powered motion, and the promotion is supposed to carry a
+// pointer to the evidence with it (`VERIFIED_STATE.md`, "How to promote a
+// fact": the row, the capture under `data/evidence/`, the log entry). Nothing
+// about that is enforceable by the compiler, so it is made into a
+// configuration-build check instead: the report carries
+// `MeasuredValuesCiteEvidence`, and it is false for as long as any non-placeholder
+// value here names no evidence.
+//
+// The check passes vacuously while every value is provisional, and that is
+// correct rather than a loophole: a placeholder is not a claim about the vehicle
+// and needs no citation. It bites exactly when the promotion happens - which is
+// the moment a missing citation would otherwise be invisible, because the value
+// would start authorizing motion while looking like every other "measured" one.
+//
+// This is deliberately not a `firstFailure()` ordering device: it reports a
+// missing record, not a missing measurement, so it is listed after
+// `CalibrationMeasured` (the measurement itself comes first) and is checked for
+// every value the builders produce.
+namespace provenance {
+
+template <typename T>
+inline bool cited(const ev::Sourced<T>& value) {
+    return value.citesEvidence();
+}
+
+inline bool cited(const ev::NearZeroConfig& config) {
+    return cited(config.velocityThresholdMps) && cited(config.dwellS) &&
+           cited(config.maxUpdateGapMs);
+}
+
+inline bool cited(const ev::MotionProfileLimits& limits) {
+    return cited(limits.cruiseVelocityMps) && cited(limits.velocityCeilingMps) &&
+           cited(limits.accelLimitMps2) && cited(limits.decelLimitMps2) &&
+           cited(limits.brakeOffsetM) && cited(limits.positiveCommandDirection);
+}
+
+}  // namespace provenance
+
+// True when every value the builders above produce that is not a placeholder
+// names its evidence. Read by the configuration-build report; nothing reads it at
+// run time.
+inline bool allPromotedValuesCiteEvidence() {
+    const ev::VehicleCalibration calibrationValues = calibration();
+    const ev::SafetyLimits limits = safetyLimits();
+    const ev::VelocityControllerConfig controller = controllerConfig();
+    const ev::DirectionalMotionProfileLimits profile = profileLimits();
+    const ev::NearZeroConfig reversalStop = reversalStopVerification();
+    const ev::NearZeroConfig finalStop = finalStopVerification();
+    const ev::RunPhaseConfig phase = runPhaseConfig();
+    const ev::ReversalConfig reversal = reversalConfig();
+
+    const bool calibrationCited =
+        provenance::cited(calibrationValues.distancePerEncoderTickM) &&
+        provenance::cited(calibrationValues.forwardBrakeOffsetM) &&
+        provenance::cited(calibrationValues.reverseBrakeOffsetM);
+    const bool limitsCited = provenance::cited(limits.maxEffortPermille) &&
+                             provenance::cited(limits.maxForwardVelocityMps) &&
+                             provenance::cited(limits.maxReverseVelocityMps) &&
+                             provenance::cited(limits.maxRunDurationS) &&
+                             provenance::cited(limits.minBatteryV);
+    const bool controllerCited = provenance::cited(controller.feedForwardPermillePerMps) &&
+                                 provenance::cited(controller.proportionalPermillePerMps) &&
+                                 provenance::cited(controller.integralPermillePerMpsSecond) &&
+                                 provenance::cited(controller.positiveEffortMode) &&
+                                 provenance::cited(controller.maxEffortPermille);
+    const bool polarityCited = provenance::cited(positiveTicksDirection()) &&
+                               provenance::cited(plannedDriverFaultPolarity());
+    const bool profileCited = provenance::cited(profile.forward) &&
+                              provenance::cited(profile.reverse);
+    const bool stopCited =
+        provenance::cited(reversalStop) && provenance::cited(finalStop) &&
+        provenance::cited(reversal.verification) && provenance::cited(reversal.reversalTimeoutS);
+    const bool phaseCited = provenance::cited(phase.optionalDelayS) &&
+                            provenance::cited(phase.approachTimeoutS) &&
+                            provenance::cited(phase.captureTimeoutS) &&
+                            provenance::cited(phase.pushTimeoutS) &&
+                            provenance::cited(phase.reverseTimeoutS) &&
+                            provenance::cited(phase.finalApproachTimeoutS) &&
+                            provenance::cited(phase.finalStopTimeoutS) &&
+                            provenance::cited(phase.finalApproachDistanceM);
+
+    return calibrationCited && limitsCited && controllerCited && polarityCited && profileCited &&
+           stopCited && phaseCited;
+}
+
+// ---------------------------------------------------------------------------
 // The configuration-build check report
 // ---------------------------------------------------------------------------
 //
@@ -266,7 +400,11 @@ inline ev::Sourced<ev::MotionDirection> positiveTicksDirection() {
 // false: the calibration, the limits, the gains and every polarity encoding are
 // provisional, so `calibrationMeasured`, `safetyLimitsValid`, `controllerConfigValid`,
 // `profileLimitsValid`, `phaseConfigValid` and `reversalConfigValid` all fail, and
-// `configurationValid` is false because no run has been announced.
+// `configurationValid` is false because no run has been announced. Two of the
+// checks are about facts rather than values and are false for their own reasons:
+// `driverFaultPolarityVerified` waits on H1B's line measurement, and
+// `measuredValuesCiteEvidence` will bite on the first promotion that names no
+// evidence.
 using ConfigurationBuildChecks = ev::ConfigurationBuildChecks;
 
 // Evaluates the checks against the running chain. `announcedConfigValid` is the
@@ -284,6 +422,9 @@ inline ConfigurationBuildChecks configurationBuildChecks(bool announcedConfigVal
 
     checks.configurationValid = announcedConfigValid;
     checks.calibrationMeasured = calibrationValues.isFullyMeasured();
+    checks.measuredValuesCiteEvidence = allPromotedValuesCiteEvidence();
+    checks.driverFaultPolarityVerified =
+        ev::validateDriverFaultConfig(plannedDriverFaultPolarity()).ok;
     checks.effortCeilingsAgree =
         ev::effortCeilingsAgree(controller.maxEffortPermille, limits.maxEffortPermille);
     checks.commandPolarityAgrees =

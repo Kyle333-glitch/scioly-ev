@@ -6,8 +6,10 @@
 **Answers:** does this image upload and reboot reliably; does the operator
 interface behave over a real host; what is the observed control cadence; how does
 a real host draining (or not draining) the port affect the loop.
-**Bench instrumentation required:** B1 (loop/watchdog counters) for the cadence
-step; the rest needs nothing beyond the shipped interface.
+**Bench instrumentation required:** B1 (`bench health` in the bench image,
+`pio run -e bench -t upload`) for the cadence step and for the
+boot-to-first-refresh gap; the rest needs nothing beyond the shipped interface,
+and the `BOOT,...` line reports which image and configuration a boot is running.
 
 **This protocol does not establish** any electrical or physical fact about the
 vehicle. It also does not establish motor-output safety on a reset - that is
@@ -46,7 +48,11 @@ each step, operator.
 1. **Upload and boot.** Run the pre-registered number of uploads and power
    cycles. Record the upload output, the count of successes, the time from reset
    to the first `BOOT,...` line, and whether that line appears exactly once per
-   boot and never without one.
+   boot and never without one. Record `BOOT,...` verbatim: it reports the firmware
+   id, the cadence, whether watchdog enablement is requested, whether every
+   configuration check passed, whether the regulator enabled and whether the
+   vehicle is armed - the facts that say which image and which configuration this
+   boot is running.
 2. **Inspection, verbatim.** Record the exact bytes of `version`, `status`,
    `checks`, `config show`, `help`. Then record `announce` and `arm`: with the
    shipped provisional configuration both must be refused, and the refusal must
@@ -70,8 +76,12 @@ each step, operator.
    (`dt_ms` in the last samples before) is unchanged, whether the drop counters
    rise, and whether reconnecting produces a burst of stale lines.
 7. **Cadence.** With telemetry at its default rate, capture a soak and read the
-   `dt_ms` distribution; with B1, also record the worst lateness, dropped
-   deadlines and the pass/refresh counts. Repeat at the highest admissible rate.
+   `dt_ms` distribution. This step and Step 6 are the two the watchdog timeout
+   choice leans on, so they are not optional: B1 (`bench health` in the bench
+   image, `pio run -e bench -t upload`) also reports the worst lateness, the
+   dropped deadlines, the pass/refresh/withheld counts and the measured
+   boot-to-first-refresh gap. Repeat at the highest admissible rate, and record
+   the worst case across both - never the average.
 
 ## Repetitions
 
@@ -99,6 +109,10 @@ do not proceed - that is a defect in the boot path or the host link.
 
 - Add on-target rows for the upload/boot reliability, the host-drain behaviour of
   the link, and the observed cadence and lateness (none of these has a row yet).
+  The cadence numbers are per image: a deployment measure from one of these steps
+  means nothing unless the capture says which image produced it (`BOOT,...` has no
+  `image` field - record the upload command - while `bench health` reports
+  `image=bench`).
 - Record which check the `arm` refusal names, verbatim.
 - Log in `DEVELOPMENT_LOG.md`. No numbered hardware row (#1-#12) changes.
 

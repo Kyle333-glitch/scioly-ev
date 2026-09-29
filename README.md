@@ -67,6 +67,29 @@ Serial monitor:
 
     pio device monitor
 
+## Bench instrumentation (not the vehicle image)
+
+The bring-up protocols in `docs/bringup/` need readouts and one bounded motion
+command that the vehicle image deliberately does not contain. Those live in
+`src/bench/` and are built only by the `bench` environment:
+
+    pio run -e bench -t upload
+
+`pio run` never builds it, the production image does not contain it, and neither
+image contains the other's entry point (`platformio.ini`, `SOFTWARE_ARCHITECTURE.md`
+section 17). A bench session's lines all start with `BENCH`; `bench health`
+reports `image=bench`, and the analyzer treats a `BENCH` line as an ignored line,
+not as telemetry.
+
+The verbs are `bench help`, `bench arm`, `bench drive <fwd|rev> <permille> <ms>`,
+`bench stop`, `bench reset`, `bench health`, `bench drive-status`, `bench ticks`
+and `bench inputs`. Nothing is applied before a deliberate `bench arm`; every
+command expires on its own; an abort or an encoder that stops changing while
+driving latches until `bench reset`; and the physical kill switch is still the
+primary stop in every powered step. No protocol may use the bench drive until its
+bounded expiration and its latched fault have been demonstrated (that is H3's
+first step).
+
 ## Host tests
 
 Logic in `lib/` is tested on the development computer, independent of the
@@ -104,20 +127,59 @@ recorded in `DEVELOPMENT_LOG.md`.
   the response formatter, the versioned telemetry schema with its drop counters,
   and the non-blocking line transport. Both are consumers of the control chain;
   neither can change a run.
-- **P8A (current)** - PC-side analysis tooling in `tools/telemetry/`, so a capture
+- **P8A** - PC-side analysis tooling in `tools/telemetry/`, so a capture
   can be interpreted as soon as hardware arrives: the schema mirror, the strict
   parser, descriptive metrics, reproducible SVG charts and the endpoint
   comparison. It is validated against clearly-labelled synthetic fixtures and
   makes no claim about any vehicle.
-- **P8B (current)** - exact physical bring-up and experiment protocols in
+- **P8B** - exact physical bring-up and experiment protocols in
   `docs/bringup/`: upload/boot/serial link, the watchdog qualification and its
   timeout choice, the driver electrical checks, the sense inputs, hand-driven
   encoder counting, the first powered drive, rollout and slip, the velocity
   trace, tuning, distance/braking/reversal, the bottle, fault injection, and
   full-run repeatability. Each protocol isolates one unknown and names what it
-  may record. The bench instrumentation several of them need is listed there and
-  is **not built**; there is no motion command in the firmware. None of it is
-  evidence and none of it has been run.
+  may record. None of it is evidence and none of it has been run.
+- **P9A (current)** - pre-hardware readiness validation: every native test, the
+  Nano R4 build and the ARM cross-check over `lib/` re-run clean from a fresh
+  build, the P8 tool suite re-run, and a static audit of the tree (no debug
+  leftovers, no writer of the motor pins outside the adapter, no blocking call,
+  no dynamic allocation, no placeholder marked `Measured`). It adds no behavior
+  and changes no status: every `VERIFIED_STATE.md` row stays UNVERIFIED and the
+  watchdog stays disabled pending H0W. It found no firmware or tooling defect -
+  only a stale evidence tally, corrected in `DEVELOPMENT_LOG.md` D17.
+- **P9A audit fixes** - a follow-up audit returned two findings and one recorded
+  observation, closed in `DEVELOPMENT_LOG.md` D18. The profile's zero-elapsed-time
+  hold can no longer hand back a target in the direction a same-cycle reversal
+  just left, and the absent-`VelocityEstimate` shape now has one owner with
+  `WarmingUp` pinned at compile time. The observation - that the final stop's
+  dwell can be credited across a control-loop stall - is not a firmware defect, so
+  no behavior changed; its bound is now a required H0W measurement. Every
+  `VERIFIED_STATE.md` row stays UNVERIFIED.
+- **P9D / bench instrumentation** - an adversarial first-power software review
+  returned findings that are now closed in code (`DEVELOPMENT_LOG.md` D19). The
+  watchdog is opened at the end of initialization instead of during it, so a
+  requested timeout can no longer expire before the first refresh, and the rule
+  and the requested constants are asserted at compile time. The driver's fault
+  line is now interpreted from a configured polarity that refuses to guess, and a
+  measured value that cites no evidence fails a configuration check. The stop
+  dwell can no longer be credited across a control-loop stall. And bench
+  instrumentation B1-B4 is **built** (`src/bench/`, `env:bench`): read-only
+  health/tick/input readouts and one bounded, latched bench drive, excluded from
+  the production image by the build graph
+  (`SOFTWARE_ARCHITECTURE.md` section 17). No physical test has been run and every
+  `VERIFIED_STATE.md` hardware row is still UNVERIFIED.
+- **P9D, second pass (D20)** - a follow-up review of the bench/production seam
+  found and closed the composition defects: the bench layer and the control tick
+  no longer both write the motor pins in one pass (the bench takes pin ownership
+  for the pass, and `failSafe()` never yields), the bench's permission to write is
+  now a host-tested predicate that refuses on a latched fault, a violated tick
+  order, an armed run or a run under way - not the inverted `!armed` test it used
+  to be - and a refusal aborts and latches the bench instrument. H0W's missing
+  deliberate-hang hook exists (`kDeliberateHangAfterPasses`), watchdog enablement
+  is a per-environment build define (`env:bench-watchdog`) that the vehicle image
+  refuses to compile, and H3 now states that the firmware acts on `nFAULT` not at
+  all until H1B's polarity is promoted - so the supply's current limit and the
+  kill switch are the stop authority. See `DEVELOPMENT_LOG.md` D20.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
   electrical checks P-H1A and P-H1B.
@@ -142,6 +204,14 @@ and can ask to `announce` or `arm` - but with the placeholder configuration ever
 arming intent is refused, and the refusal names the check that failed. No command
 commands an effort or a direction, and none starts a run. The watchdog is
 deliberately disabled pending its own on-target check.
+
+The one way to apply effort is the bench image (`pio run -e bench`), which is not
+the vehicle image: it contains the bench console and the bounded, latched bench
+drive, and the vehicle image contains neither. That command is what the
+bring-up protocols will use, and it may not be used until its bounded expiration
+and its latched fault have been demonstrated at the bench. H0W additionally needs
+the watchdog enabled, which is a separate bench environment - `pio run -e
+bench-watchdog` - rather than an edit to a header both images compile.
 
 The vehicle still has no measured behavior: no motor, encoder, sensor, trigger,
 watchdog, serial timing or bottle mechanism behavior has been observed on

@@ -166,6 +166,7 @@ FAULTS: Final[tuple[str, ...]] = (
     "ReversalNotVerified",
     "DisarmedDuringRun",
     "RunSequencingError",
+    "DriverFaultBar",
 )
 
 # `telemetryAuthzOutcomeName()`.
@@ -219,9 +220,11 @@ EVENT_CODES: Final[tuple[str, ...]] = (
 CONFIG_CHECKS: Final[tuple[str, ...]] = (
     "ConfigurationValid",
     "CalibrationMeasured",
+    "MeasuredValuesCiteEvidence",
     "EffortCeilingsAgree",
     "CommandPolarityAgrees",
     "TickPolarityAgrees",
+    "DriverFaultPolarityVerified",
     "StopEvidenceSpansReversalStop",
     "StopEvidenceSpansFinalStop",
     "SafetyLimitsValid",

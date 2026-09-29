@@ -7,8 +7,9 @@ because it needs no motor power at all.
 **Answers:** which tick sign means forward travel; how many ticks one wheel
 revolution produces; whether the count is clean and repeatable by hand; how much
 mechanical hysteresis (backlash) sits in the count.
-**Bench instrumentation required:** B3 (raw signed tick readout plus
-`countedEdges`/`ignoredUpdates`).
+**Bench instrumentation required:** B3 (`bench ticks`: raw signed tick readout
+plus `counted_edges`/`ignored_updates`). Built (`src/bench/`, `env:bench`), never
+run.
 
 Do not use `pos_m` for this test: it is derived through the rollout scale, which
 is itself unmeasured until H4. Raw ticks only.

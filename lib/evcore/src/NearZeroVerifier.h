@@ -35,16 +35,26 @@ namespace ev {
 //   update whose evidence does not hold clears the interval, so a vehicle
 //   oscillating around the threshold never verifies a stop and can never earn a
 //   direction change through this module.
-// * What it cannot observe is the time between two updates: a gap between two
-//   advancing stamps is credited as if the evidence had continued across it.
-//   Two stamps do not say whether the control loop was running, and this module
-//   does not pretend to know - a stalled loop is a command-timeout question with
-//   its own owner (AGENTS.md section 5), and `NearZeroEvidence::velocityUsable`
-//   is the caller's assertion that the evidence handed in is fresh
-//   (`velocityReadiness()`), which this module deliberately does not re-derive.
-//   Every sequence that consumes a verdict also carries a timeout that is
-//   evaluated before the verification step, so a stalled loop during a reversal
-//   refuses the reversal rather than quietly earning it.
+// * Two stamps do not say whether the control loop was running in between, so
+//   the module does not pretend to know: a gap longer than the configured
+//   `maxUpdateGapMs` is *not* credited as continued evidence. The interval
+//   restarts at the observation that ended the gap, and the verdict reports
+//   `UpdateGapExceeded`, which is why the dwell that earns a stop can never have
+//   been accumulated across a stall the caller never saw.
+//
+//   The limit is not a number this module invents. What it bounds is the amount
+//   of the stop dwell that could be credited without observation, and the only
+//   thing that bounds that on the real board is how long the control loop can
+//   stall - an explicit measurement in the H0W bench record
+//   (`docs/bringup/P-H0W-watchdog-qualification.md`, the maximum control-loop
+//   stall). The limit therefore arrives as a `Sourced` value like the threshold
+//   and the dwell: until the stall has been measured, no interval may be
+//   credited across a gap, because no gap is known to be short enough.
+//
+//   A sequence that consumes a verdict still carries its own timeout as well,
+//   and a gap longer than that timeout still refuses the sequence. The two are
+//   independent: the timeout answers "has this taken too long?", and this limit
+//   answers "was the interval I am crediting actually observed?".
 //
 // What this module is not
 //
@@ -66,8 +76,11 @@ namespace ev {
 // are supplied by the caller; neither has a default, because neither has been
 // measured.
 struct NearZeroConfig {
-    constexpr NearZeroConfig(Sourced<double> velocityThresholdMps_, Sourced<double> dwellS_)
-        : velocityThresholdMps(velocityThresholdMps_), dwellS(dwellS_) {}
+    constexpr NearZeroConfig(Sourced<double> velocityThresholdMps_, Sourced<double> dwellS_,
+                             Sourced<uint32_t> maxUpdateGapMs_)
+        : velocityThresholdMps(velocityThresholdMps_),
+          dwellS(dwellS_),
+          maxUpdateGapMs(maxUpdateGapMs_) {}
 
     // A measured speed magnitude at or below this counts as near zero, metres per
     // second. A bench candidate value, not a measured property of the vehicle.
@@ -78,14 +91,20 @@ struct NearZeroConfig {
     // (SafetyAuthority.h); a bench candidate value, not a measured stopping
     // behavior.
     Sourced<double> dwellS;
+
+    // The longest gap between two updates that may still be credited as continued
+    // evidence, milliseconds. Supplied by the caller from the measured maximum
+    // control-loop stall (H0W); not a default and not a guess.
+    Sourced<uint32_t> maxUpdateGapMs;
 };
 
 enum class NearZeroConfigError : uint8_t {
     None = 0,
-    ValuesAreNotMeasured,     // threshold or dwell is not ValueSource::Measured
+    ValuesAreNotMeasured,     // threshold, dwell or gap limit is not ValueSource::Measured
     NonFiniteValue,           // NaN or infinity
     NonPositiveThreshold,     // a zero threshold could never be observed
     NonPositiveDwell,         // a zero dwell would verify on the first observation
+    NonPositiveUpdateGap,     // a zero gap limit would refuse every continued interval
 };
 
 struct NearZeroConfigValidation {
@@ -101,7 +120,8 @@ struct NearZeroConfigValidation {
 // measurement, and a zero dwell would verify a stop on the first near-zero
 // observation, which is not an observed interval at all.
 inline NearZeroConfigValidation validateNearZeroConfig(const NearZeroConfig& config) {
-    if (!config.velocityThresholdMps.isMeasured() || !config.dwellS.isMeasured()) {
+    if (!config.velocityThresholdMps.isMeasured() || !config.dwellS.isMeasured() ||
+        !config.maxUpdateGapMs.isMeasured()) {
         return {false, NearZeroConfigError::ValuesAreNotMeasured};
     }
     if (!std::isfinite(config.velocityThresholdMps.value) || !std::isfinite(config.dwellS.value)) {
@@ -112,6 +132,14 @@ inline NearZeroConfigValidation validateNearZeroConfig(const NearZeroConfig& con
     }
     if (!(config.dwellS.value > 0.0)) {
         return {false, NearZeroConfigError::NonPositiveDwell};
+    }
+    // A zero gap limit is refused rather than reinterpreted: it would mean "no
+    // interval may ever be credited across any gap", which is not a policy
+    // anyone can state from a stall measurement and would silently make every
+    // stop unverifiable. A caller that means "the loop is a single instant"
+    // states a positive millisecond value.
+    if (config.maxUpdateGapMs.value == 0U) {
+        return {false, NearZeroConfigError::NonPositiveUpdateGap};
     }
     return {true, NearZeroConfigError::None};
 }
@@ -221,10 +249,15 @@ enum class NearZeroStatus : uint8_t {
     DwellInProgress = 1,
     // The evidence does not show a near zero (or shows nothing at all).
     AwaitingEvidence = 2,
-    // Threshold/dwell are not Measured or are malformed: no verdict is possible.
+    // Threshold/dwell/gap limit are not Measured or are malformed: no verdict is
+    // possible.
     ConfigIsNotUsable = 3,
     // The stamp did not advance (or was rewound): the dwell is held, not grown.
     TimeDidNotAdvance = 4,
+    // The gap since the previous update was longer than the configured limit, so
+    // the interval was not credited: the evidence holds now, but the observed
+    // dwell restarts here. The control loop was not seen to run across the gap.
+    UpdateGapExceeded = 5,
 };
 
 // One verification answer. Deliberately no default constructor: a verdict with
@@ -292,11 +325,11 @@ public:
     // frozen clock should do; the sequence that owns the timeout still sees time
     // standing still and starts nothing new.
     //
-    // A gap between two advancing updates is credited as continued evidence (see
-    // the module header): whether the loop ran in between is not answerable from
-    // two stamps, so the caller that needs "and it stayed stopped while I
-    // watched" owns the watching - the reversal sequence does exactly that, by
-    // evaluating its own timeout before this step.
+    // A gap longer than `maxUpdateGapMs` is NOT credited as continued evidence
+    // (see the module header): the interval restarts at this observation and the
+    // verdict reports `UpdateGapExceeded`. Whether the loop ran across the gap is
+    // not answerable from two stamps, so a gap the caller cannot vouch for does
+    // not grow a dwell that earns a stop.
     NearZeroVerdict update(uint32_t nowMs, const NearZeroEvidence& evidence) {
         if (!configUsable()) {
             return NearZeroVerdict(false, NearZeroStatus::ConfigIsNotUsable, evidence.velocityUsable,
@@ -333,6 +366,16 @@ public:
         if (sinceLastMs <= 0) {
             return NearZeroVerdict(false, NearZeroStatus::TimeDidNotAdvance, true, true, true,
                                    dwellElapsedMs_);
+        }
+
+        // The evidence holds now, but not across an interval longer than the
+        // configured gap limit. The interval restarts here rather than being
+        // credited: the observation is real, the continuity is not observed.
+        if (static_cast<uint32_t>(sinceLastMs) > config_.maxUpdateGapMs.value) {
+            nearZeroSinceMs_ = nowMs;
+            dwellElapsedMs_ = 0U;
+            lastStampMs_ = nowMs;
+            return NearZeroVerdict(false, NearZeroStatus::UpdateGapExceeded, true, true, true, 0U);
         }
 
         lastStampMs_ = nowMs;

@@ -20,14 +20,32 @@ enum class ValueSource : uint8_t {
 
 // A physical value together with the evidence behind it. There is no default
 // constructor on purpose: every use has to state where the number came from.
+//
+// `evidence` is the pointer to where that something is recorded - a
+// `VERIFIED_STATE.md` row plus the capture under `data/evidence/`, a rule number,
+// or a release. It may be null for a placeholder and must not be for anything
+// else: `citesEvidence()` is the rule, and the configuration-build report carries
+// its verdict so a promoted value that names no evidence cannot be armed on.
+//
+// The pointer is deliberately not a `std::string` or an owned buffer: this is a
+// compile-time literal in a microcontroller's flash, the same way the rule
+// citations beside the values are, and nothing here may allocate.
 template <typename T>
 struct Sourced {
-    constexpr Sourced(T value_, ValueSource source_) : value(value_), source(source_) {}
+    constexpr Sourced(T value_, ValueSource source_, const char* evidence_ = nullptr)
+        : value(value_), source(source_), evidence(evidence_) {}
 
     constexpr bool isMeasured() const { return source == ValueSource::Measured; }
 
+    // True when this value's provenance is complete: a placeholder needs no
+    // citation, and anything else has to name where it came from.
+    constexpr bool citesEvidence() const {
+        return source == ValueSource::Provisional || evidence != nullptr;
+    }
+
     T value;
     ValueSource source;
+    const char* evidence;
 };
 
 // Pin the "no silent defaults" contract at compile time rather than relying on

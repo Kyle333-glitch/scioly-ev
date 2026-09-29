@@ -9,8 +9,10 @@ powered command (Step 0); which PH level turns the wheel in the vehicle's forwar
 direction (motor polarity, #3); whether the tick sign under power agrees with the
 hand-driven sign; the smallest effort that moves the shaft from rest; what the
 driver does at zero command and after de-energizing.
-**Bench instrumentation required:** B2 (bench-only bounded diagnostic drive) and
-B3 (raw tick readout).
+**Bench instrumentation required:** B2 (bench-only bounded diagnostic drive,
+`bench arm` / `bench drive` / `bench stop` / `bench reset`) and B3 (raw tick
+readout, `bench ticks`). Both are built (`src/bench/`, `env:bench`) and neither has
+been run.
 
 This is the protocol the whole bring-up sequence is aimed at. Until it passes, no
 direction, speed or distance result downstream means anything.
@@ -22,10 +24,34 @@ direction, speed or distance result downstream means anything.
   A0's table.
 - H2 passed: the forward-direction convention is documented and the hand-driven
   tick sign is recorded.
-- A bench build containing B2 and B3; the production image must not contain B2.
-- B2 in that build implements the safety model the index requires: a command that
-  expires on its own, and a fault that latches the motor off until a deliberate
-  `reset`. This protocol's Step 0 demonstrates both before any powered command.
+- H1B passed, so the driver's fault output has a **measured** polarity and
+  `bench inputs`' `nfault_low` is a level anyone can read. If H1B was skipped or
+  inconclusive, stop: a powered test with an uninterpreted fault line is the test
+  this protocol's Step 0 exists to make safe.
+- **Whether the firmware is acting on `nFAULT` at all - check this before you rely
+  on it.** The firmware interprets *no* level as a fault while the configured
+  polarity is `Unverified`: `ev::observedDriverFault()` returns `FaultCode::None`
+  for every level, so the level is still sampled, counted (`driverFaultLowCycles`)
+  and reported (`nfault_low` here and in telemetry, `bench inputs`), but **no fault
+  is latched and no automatic stop happens**. H1B having *read* the level is not
+  the same as the firmware *acting* on it; the promotion of
+  `kPlannedDriverFaultPolarity` to `Measured` is what changes that. Read `checks`
+  before the first powered step: `DriverFaultPolarityVerified=1` means a driver
+  fault will latch `FaultCode::DriverFaultBar` and stop the vehicle;
+  `DriverFaultPolarityVerified=0` means the firmware is **not** watching the line.
+  Either way, this protocol's stop authority is the bench supply's **current
+  limit** and the **physical kill switch** - `bench stop` and B2's bounded expiry
+  stop a *bench command*, and neither is a response to a driver fault.
+- A bench build: `pio run -e bench -t upload`. The production image does not
+  contain B2 or B3, and the bench image is not the vehicle image - record which
+  one was flashed (`bench health` reports `image=bench`).
+- B2's safety model is `ev::BenchDrive` (`lib/evcore/src/BenchDrive.h`): a command
+  that expires on its own, and a fault that latches the motor off until a
+  deliberate `bench reset`. This protocol's Step 0 demonstrates both before any
+  powered command. The effort ceiling, duration ceiling, stall window and per-arm
+  command budget in force are the constants in `src/bench/BenchConsole.h` -
+  **record their values before starting**, because the protocol's Step 0 is a
+  demonstration of those numbers and a later session has to be able to compare.
 - Wheels **off the floor** (drivetrain unloaded), nothing loose or hanging near
   the shaft, eye protection.
 - Supply current limit set conservatively and recorded; physical kill switch
@@ -47,21 +73,33 @@ whose stop path has not been shown to work is not a trial that may be run.
 
 1. **De-energized baseline.** With the driver de-energized, confirm the shaft does
    not move and the firmware reports the de-energized motor mode.
-2. **Bounded expiration.** Command the smallest duty B2 allows and then issue
-   *nothing*. Confirm the command expires on its own after its pre-registered
-   interval and the shaft stops - the timer, not the operator, is the stop.
-3. **Latched fault.** Provoke B2's fault (for example, hold the shaft so the
-   encoder stops changing while B2 commands it), confirm the motor de-energizes,
-   and confirm it **stays** de-energized through a further attempt to drive until a
-   deliberate `reset`. A fault that clears itself, or that a resent command
-   re-arms, fails this step.
+2. **Bounded expiration.** `bench arm`, then `bench drive fwd <smallest> <short>`, and
+   then issue *nothing*. Confirm the command expires on its own after the interval
+   it was given (`bench drive-status` reports the state and the latched fact) and
+   the shaft stops - the timer, not the operator, is the stop.
+3. **Latched fault.** Provoke B2's stall fault **with a fixture, not a hand**:
+   block the output shaft (or clamp the coupling) so the encoder cannot turn while
+   `bench drive` commands it, with the drivetrain unloaded and the kill switch in
+   reach. Confirm the motor de-energizes within the stall window, and confirm it
+   **stays** de-energized through a further `bench drive` attempt - which must be
+   refused with `FaultLatched` - until a deliberate `bench reset`. A fault that
+   clears itself, or that a resent command re-arms, fails this step.
+
+   The fixture is deliberate and not squeamishness: the point of the step is that
+   the *firmware* detects a shaft that is not following its command, and a hand on
+   a shaft either follows the command (proving nothing) or fights it (proving
+   something about the operator). A clamp cannot be argued with, and it cannot be
+   hurt.
 
 Record the observed stop behaviour and the interval from command to de-energize
 for each step. If any of the three is not demonstrated, stop here: the only
 remaining stop would be the operator's hand, and that is not a stop path.
 
-Only then apply, through B2, one bounded command at a time with a fixed short
-dwell and a de-energizing step between commands.
+Only then apply, through B2, one bounded command at a time - `bench drive` with a
+fixed short dwell - with a de-energizing step between commands, and the kill
+switch in reach throughout. `bench stop` is the operator abort and it latches:
+after using it, `bench reset` and a fresh `bench arm` are required before the next
+command, which is the point.
 
 ## Held constant
 
@@ -107,6 +145,12 @@ heat, smell or abnormal noise; a command/response mismatch; or anything that
 moves while the firmware reports the driver de-energized. Do not "see what
 happens" past a first surprise.
 
+The abort is a physical act (the kill switch, and the supply's own current limit)
+because with the polarity unverified the firmware acts on `nfault_low` not at all
+(see Prerequisites). An operator waiting for a firmware fault report during the
+first overcurrent event would be waiting for something that cannot happen; a
+change in `nfault_low` is an observation to record, not an alarm to rely on.
+
 ## Acceptance / decision rule
 
 Pass requires: **all three Step 0 demonstrations passed**, including a latched
@@ -127,7 +171,12 @@ recorded.
   and `kPlannedPositiveTicksDirection` - and expect
   `CommandPolarityAgrees`/`TickPolarityAgrees` to read true afterward. Because
   these are measurements, a `ValueSource` of `Measured` requires the raw data
-  recorded with them.
+  recorded with them **and a citation**: a promoted value that names no evidence
+  fails `MeasuredValuesCiteEvidence` and the arm gate refuses (see `Sourced::citesEvidence()`
+  and the promotion steps in `docs/bringup/README.md`).
+- Confirm `checks` after the promotion: every field this protocol is responsible
+  for should read true, and any that does not is the next finding rather than a
+  number to adjust.
 - Record the minimum drive duty and the de-energized behaviour as new facts.
 - Log in `DEVELOPMENT_LOG.md`.
 

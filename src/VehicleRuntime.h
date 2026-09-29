@@ -135,9 +135,14 @@ struct TelemetrySnapshot {
     bool driverFaultBarLow = false;
     bool startTriggerActive = false;
     // How many control ticks have seen the planned driver fault line low since
-    // boot. A count of a raw level, not a fault: see the tick's own note on why
-    // this input is not yet interpreted as one.
+    // boot. A count of a raw level, not a fault: see the tick's own note on the
+    // interpretation.
     uint32_t driverFaultLowCycles = 0U;
+    // True when the fault line's polarity has been measured, so the raw level
+    // above was interpreted rather than only recorded (`DriverFault.h`). False
+    // with the shipped configuration, where the level is reported and no fault is
+    // claimed from it.
+    bool driverFaultPolarityVerified = false;
 
     // The run policy and the request this cycle presented.
     ev::RunPhase phase = ev::RunPhase::Idle;
@@ -251,6 +256,33 @@ public:
 
     ev::RunPhase runPhase() const { return run_.phase(); }
 
+    // True while either fault latch of record is set: the run policy's or the
+    // safety authority's. Exactly the fact `status` reports as `faultLatched`,
+    // exposed because a latched fault *clears* arming - so `!armed()` cannot tell
+    // a free motor from a faulted one, and a caller that needs to know whether the
+    // motor is free (the bench layer's arbitration, `MotorArbitration.h`) must ask
+    // this instead of inferring it. The two latches are separate and only `reset`
+    // clears both.
+    bool faultLatched() const {
+        return run_.faultCode() != ev::FaultCode::None ||
+               authority_.latchedFault().code != ev::FaultCode::None;
+    }
+
+    // True while the run is in a phase that must stay armed
+    // (`ev::isRunPhaseUnderway`): travelling, braking to a verified stop, or
+    // reversing. False in `Idle`, `ParameterValid`, `Armed`, `Done` and `Fault`.
+    bool runUnderway() const { return ev::isRunPhaseUnderway(run_.phase()); }
+
+    // True when the control-tick order guard has recorded any violation since
+    // boot: a tick whose stages arrived out of order, or a tick begun while a
+    // previous one was unfinished. It latches for the life of the build on
+    // purpose - a structural fault in the caller is not a vehicle condition, and a
+    // firmware whose control cycle ran wrongly must not be allowed to keep
+    // driving (see `ev::ControlTickOrderGuard`).
+    bool orderViolationDetected() const {
+        return orderGuard_.violatedTicks() != 0U || orderGuard_.abandonedTicks() != 0U;
+    }
+
     // Attaches an event hook. A null hook detaches; nothing in this firmware
     // attaches one, so the hook stays null and the call in `runPass()` is never
     // reached in production.
@@ -266,6 +298,24 @@ public:
     // deliberate transitions an operator asked for. A host that pipelines several
     // commands into one read window waits a pass per command.
     void serviceSerial(uint32_t nowMs);
+
+    // The two halves of `serviceSerial()`, available separately because the bench
+    // image (B1-B4, `src/bench/`) owns its own read loop: it pumps the operator
+    // output and drains telemetry in the same order the production loop does,
+    // around its own command dispatch. Production calls neither of these
+    // directly - it calls `serviceSerial()`, which is exactly these two around the
+    // read loop - so the bench cannot change the production order by using them.
+    void serviceStagedText();
+    void drainTelemetry();
+
+    // One operator line, applied: parsed, gated by the operator policy, answered,
+    // and - when it is one of the deliberate transitions - applied through the
+    // chain's own entry points. `serviceSerial()` calls it for every line it
+    // reads. It is public so the bench console can hand back a line it did not
+    // recognize as a bench verb rather than reimplement any part of the operator
+    // interface; it grants no capability a host typing the same line does not
+    // already have, and it can no more drive the motor than it could before.
+    void handleCommandLine(const char* line, uint16_t length, uint32_t nowMs);
 
     // The held configuration an operator has entered, as `config show` reports it.
     const ev::RunConfigFields& heldConfig() const { return heldConfig_; }
@@ -295,7 +345,6 @@ private:
     // host-tested; these methods are the wiring: they read the chain, call the
     // policy, and apply what the policy allowed through the chain's own entry
     // points.
-    void handleCommandLine(const char* line, uint16_t length, uint32_t nowMs);
     void rejectWithoutCommand(ev::CommandError error);
     void applyCommand(const ev::OperatorRequest& request, uint32_t nowMs);
     void applyConfigSet(const ev::RunConfigFields& supplied);
@@ -317,15 +366,6 @@ private:
     // from the tick's own snapshot, so a record cannot disagree with the control
     // path about what happened.
     ev::TelemetrySample buildSample() const;
-
-    // Sends what fits: the staged line, then the boot line, then as many help
-    // lines as the port has room for.
-    void serviceStagedText();
-
-    // Moves queued records out, bounded per pass, and only while the port is
-    // free (a record popped and then refused by the transport would be lost
-    // outside the queue's own counters).
-    void drainTelemetry();
 
     // Records this tick in the telemetry session when one is due, and reports the
     // transitions it revealed. Called from stage 10 of the control tick.
@@ -353,11 +393,14 @@ private:
     int32_t runOriginTicks_ = 0;
     bool legForward_ = true;
     ev::RunAxisGeometry axisGeometry_{0.0, 0.0, 0.0};
-    ev::VelocityEstimate estimate_{0.0, false, false, ev::VelocityEstimateStatus::WarmingUp, 0U, 0U,
-                                   0};
+    // Held defaults before the first estimate exists. The shape of an absent
+    // number is owned by `refusedVelocityEstimate()`; spelling it here by hand
+    // would silently survive a new field or a reordered enumerator.
+    ev::VelocityEstimate estimate_ =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
     bool hasEstimate_ = false;
-    ev::VelocityEstimate lastValidEstimate_{0.0, false, false,
-                                            ev::VelocityEstimateStatus::WarmingUp, 0U, 0U, 0};
+    ev::VelocityEstimate lastValidEstimate_ =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
     bool hasLastValidEstimate_ = false;
     ev::OdometryEstimate odometryTravel_{0.0, false, ev::OdometryEstimateStatus::ScaleIsNotMeasured};
     uint32_t odometrySampleMs_ = 0U;
@@ -367,6 +410,11 @@ private:
     sensorInputs::RawSample rawInputs_{};
     vehicleConfig::ConfigurationBuildChecks configurationChecks_{};
     bool positionUsable_ = false;
+    // Control ticks observed with the driver's nFAULT line low, since the current
+    // run started. Reset at a successful arm and at `reset`, deliberately: H1B
+    // Part 3 (ten deliberate ground-and-release cycles) and H9's trip both read
+    // this as evidence about *that* test, and a since-boot total cannot tell this
+    // test's activity from an earlier one's.
     uint32_t cyclesWithDriverFaultLow_ = 0U;
 
     // The state of the vehicle layer itself.

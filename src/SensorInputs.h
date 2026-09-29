@@ -24,8 +24,10 @@
 // * It does not decide what an input means. Whether the nFAULT line's low level is
 //   a fault, whether the trigger's low level is "pressed", and what either line
 //   does when nothing is connected are all waiting on the wiring check and on a
-//   measured truth table. The control cycle records the raw level and, until that
-//   measurement exists, interprets nothing.
+//   measured truth table. The control cycle records the raw level and interprets
+//   it from configuration (`lib/evcore/src/DriverFault.h`), which refuses to claim
+//   a fault while the line's polarity is unverified, so nothing is interpreted
+//   here and nothing is interpreted from a guess anywhere else either.
 // * It does not run in an interrupt. Sampling analog channels belongs to the
 //   control tick, which is also the only place its results are consumed.
 // * It does not carry a timestamp. The cycle has one clock reading and passes it

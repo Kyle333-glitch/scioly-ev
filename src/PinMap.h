@@ -45,8 +45,17 @@ constexpr uint8_t kEncoderB = 3U;  // planned: D3, read as a level only
 
 // --- Motor driver: planned DRV8874 PH/EN interface -------------------------
 // The only code allowed to write these is `MotorDriver.h`.
+//
+// `kMotorEnable` is the firmware's **only** PWM consumer. `analogWriteResolution()`
+// (`MotorDriver.h`) is a core-wide setting, not a per-pin one, and the timer this
+// pin lands on is not recorded - H1A has not yet measured the frequency it
+// produces. So: **no second `analogWrite()` consumer, and no second
+// `analogWriteResolution()` call, may be added on this board until H1A test 6
+// records the switching frequency at `EN`.** A second consumer on the same timer
+// silently changes the duty that reaches the driver, and nothing in this firmware
+// would report it.
 constexpr uint8_t kMotorPhase = 9U;        // planned DRV8874 PH
-constexpr uint8_t kMotorEnable = 6U;       // planned DRV8874 EN, PWM-capable
+constexpr uint8_t kMotorEnable = 6U;       // planned DRV8874 EN, PWM-capable, the only PWM consumer
 constexpr uint8_t kMotorSleepBar = 7U;     // planned DRV8874 nSLEEP, active low
 
 // --- Inputs ----------------------------------------------------------------

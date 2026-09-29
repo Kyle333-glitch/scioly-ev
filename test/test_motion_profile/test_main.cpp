@@ -530,6 +530,54 @@ void test_no_elapsed_time_holds_the_previous_target_exactly(void) {
     TEST_ASSERT_TRUE(command.decelCeilingMps == 1.234);
 }
 
+void test_no_elapsed_time_never_hands_back_the_previous_direction(void) {
+    // A same-cycle direction change with no elapsed time is the one input
+    // combination the dt > 0 reversal guard never sees. Holding the previous
+    // target there would return a fully signed value in the direction the run
+    // has just left - the exact step the one-way reversal street forbids - so
+    // the hold collapses to zero instead. Zero asks for no powered effort, and
+    // it is the value a ramped reversal converges to anyway.
+    const ev::MotionProfileLimits limits = fixtureLimits();
+
+    const ev::MotionProfileCommand reversed = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                1.0, 0U),
+        limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::TimeDidNotAdvance),
+                          static_cast<int>(reversed.status));
+    TEST_ASSERT_TRUE(reversed.targetVelocityMps == 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfilePhase::Stopped),
+                          static_cast<int>(reversed.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::None),
+                          static_cast<int>(reversed.binding));
+    // The geometry is still reported, so a log shows why the target fell to
+    // zero while the elapsed time did not advance.
+    TEST_ASSERT_TRUE(std::fabs(reversed.cruiseCeilingMps - 2.0) <= kVelocityToleranceMps);
+    TEST_ASSERT_TRUE(std::fabs(reversed.taperCeilingMps - 2.0) <= kVelocityToleranceMps);
+    TEST_ASSERT_TRUE(reversed.accelCeilingMps == 0.0);
+    TEST_ASSERT_TRUE(reversed.decelCeilingMps == 0.0);
+
+    // The same zero step in the target's own direction still holds exactly: the
+    // exception is a contradiction of sign, not a blanket cancel.
+    const ev::MotionProfileCommand stillForward =
+        ev::nextTargetVelocity(travelForward(1.234, 0.1, 0U), limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::TimeDidNotAdvance),
+                          static_cast<int>(stillForward.status));
+    TEST_ASSERT_TRUE(stillForward.targetVelocityMps == 1.234);
+
+    // Already at zero there is no sign to contradict, so the hold is unchanged.
+    const ev::MotionProfileCommand atZero = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                0.0, 0U),
+        limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::TimeDidNotAdvance),
+                          static_cast<int>(atZero.status));
+    TEST_ASSERT_TRUE(atZero.targetVelocityMps == 0.0);
+    // The gate would refuse a leaked sign; nothing leaks here, so a zero target
+    // is along the leg and the reversal can proceed on the next advancing step.
+    TEST_ASSERT_TRUE(ev::targetVelocityPointsAlongLeg(atZero, ev::MotionDirection::Reverse, limits));
+}
+
 // --- Timing intent and duration ---------------------------------------------
 
 void test_timing_intent_validation(void) {
@@ -777,7 +825,10 @@ void test_the_target_never_exceeds_the_ceilings_or_flips_itself(void) {
     // finite.
     const double remainingsM[] = {0.0, 1e-9, 0.05, 0.1, 1.0, 5.0, 100.0, 1e300};
     const double currentsMps[] = {-2.0, -0.5, 0.0, 0.5, 2.0};
-    const uint32_t stepsMs[] = {1U, 20U, 1000U};
+    // 0 is included: the no-elapsed-time hold is the one path where a same-cycle
+    // direction change could otherwise leak a signed target in the old
+    // direction, so it is part of the cross product that must never flip.
+    const uint32_t stepsMs[] = {0U, 1U, 20U, 1000U};
     const ev::MotionProfileIntent intents[] = {ev::MotionProfileIntent::Travel,
                                                ev::MotionProfileIntent::Stop};
     const ev::MotionDirection directions[] = {ev::MotionDirection::Forward,
@@ -931,6 +982,7 @@ int main(int, char**) {
     RUN_TEST(test_the_polarity_maps_the_requested_direction_to_the_command_sign);
 
     RUN_TEST(test_no_elapsed_time_holds_the_previous_target_exactly);
+    RUN_TEST(test_no_elapsed_time_never_hands_back_the_previous_direction);
 
     RUN_TEST(test_timing_intent_validation);
     RUN_TEST(test_the_duration_is_the_trapezoid_profile);

@@ -44,6 +44,12 @@ enum class FaultCode : uint8_t {
     // (a direction change requested that is not a change of direction, or a
     // reversal requested while one is already being sequenced).
     RunSequencingError,
+    // The planned driver's fault output reported a fault. This identity is
+    // produced only when the line's polarity has been measured
+    // (`DriverFault.h`); until then the raw level is reported and no fault is
+    // claimed, because an unverified polarity would turn a healthy driver into a
+    // fault or a real fault into a log entry nobody acts on.
+    DriverFaultBar,
 };
 
 // A fault together with when it happened and whether it is latched. Fault

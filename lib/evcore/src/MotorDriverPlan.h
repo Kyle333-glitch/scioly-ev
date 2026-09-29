@@ -75,20 +75,35 @@ struct Drv8874Inputs {
 // A Drive command with a duty of 0 is a legitimate level combination (an
 // authorized zero-effort drive), and it is NOT a stop: `MotorMode::Disabled`,
 // `Coast` and `Brake` are. Zero duty simply applies no drive.
-inline Drv8874Inputs drv8874InputsFor(const AuthorizedMotorCommand& command) {
-    switch (command.mode()) {
+// The mapping itself, from a mode and a magnitude. This is the one place the
+// levels are written down; `drv8874InputsFor()` below is the authorized-command
+// form of it, and the bench adapter's bounded output goes through the same
+// function. Two callers, one table: a second copy of these levels is how the plan
+// and the pins start disagreeing.
+//
+// A command that is not authorized is not what this takes - it takes levels, not
+// permission. Permission is the caller's: the production adapter accepts only an
+// `AuthorizedMotorCommand`, and the bench adapter accepts only the bounded,
+// latched output of `BenchDrive` (`BenchDrive.h`).
+inline Drv8874Inputs drv8874InputsForRequest(MotorMode mode, uint16_t magnitudePermille) {
+    switch (mode) {
         case MotorMode::Disabled:
         case MotorMode::Coast:
             return Drv8874Inputs{false, false, 0U};
         case MotorMode::Brake:
             return Drv8874Inputs{true, false, 0U};
         case MotorMode::DriveForward:
-            return Drv8874Inputs{true, true, command.magnitudePermille()};
+            return Drv8874Inputs{true, true, magnitudePermille};
         case MotorMode::DriveReverse:
-            return Drv8874Inputs{true, false, command.magnitudePermille()};
+            return Drv8874Inputs{true, false, magnitudePermille};
     }
     // An unknown mode is never a powered request.
     return Drv8874Inputs{false, false, 0U};
+}
+
+// The planned mapping for one authorized command.
+inline Drv8874Inputs drv8874InputsFor(const AuthorizedMotorCommand& command) {
+    return drv8874InputsForRequest(command.mode(), command.magnitudePermille());
 }
 
 // The PWM resolution the driver adapter programs into the Arduino Renesas core

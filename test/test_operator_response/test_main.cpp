@@ -37,21 +37,13 @@ ev::RunConfigFields validStateConfig() {
 }
 
 ev::ConfigurationBuildChecks allChecksPassing() {
+    // Set through the id mapping rather than field by field, so a check added to
+    // the vocabulary cannot be left false here by accident - which would show up
+    // as a mystery extra bit in some other test's mask.
     ev::ConfigurationBuildChecks checks;
-    checks.configurationValid = true;
-    checks.calibrationMeasured = true;
-    checks.effortCeilingsAgree = true;
-    checks.commandPolarityAgrees = true;
-    checks.tickPolarityAgrees = true;
-    checks.stopEvidenceSpansReversalStop = true;
-    checks.stopEvidenceSpansFinalStop = true;
-    checks.safetyLimitsValid = true;
-    checks.controllerConfigValid = true;
-    checks.estimatorConfigValid = true;
-    checks.profileLimitsValid = true;
-    checks.phaseConfigValid = true;
-    checks.reversalConfigValid = true;
-    checks.runPolicyUsable = true;
+    for (uint8_t index = 0U; index < ev::kConfigurationCheckCount; ++index) {
+        checks.setPassed(static_cast<ev::ConfigurationCheckId>(index), true);
+    }
     return checks;
 }
 
@@ -226,21 +218,25 @@ void test_check_report_names_every_check(void) {
 
     TEST_ASSERT_TRUE(ev::formatChecksLine(allFailing, buffer, ev::kSerialLineCapacity) > 0U);
     TEST_ASSERT_EQUAL_STRING(
-        "CHECK,all=0,count=14,first=ConfigurationValid,mask=16383,"
-        "ConfigurationValid=0,CalibrationMeasured=0,EffortCeilingsAgree=0,CommandPolarityAgrees=0,"
-        "TickPolarityAgrees=0,StopEvidenceSpansReversalStop=0,StopEvidenceSpansFinalStop=0,"
-        "SafetyLimitsValid=0,ControllerConfigValid=0,EstimatorConfigValid=0,ProfileLimitsValid=0,"
-        "PhaseConfigValid=0,ReversalConfigValid=0,RunPolicyUsable=0",
+        "CHECK,all=0,count=16,first=ConfigurationValid,mask=65535,"
+        "ConfigurationValid=0,CalibrationMeasured=0,MeasuredValuesCiteEvidence=0,"
+        "EffortCeilingsAgree=0,CommandPolarityAgrees=0,TickPolarityAgrees=0,"
+        "DriverFaultPolarityVerified=0,StopEvidenceSpansReversalStop=0,"
+        "StopEvidenceSpansFinalStop=0,SafetyLimitsValid=0,ControllerConfigValid=0,"
+        "EstimatorConfigValid=0,ProfileLimitsValid=0,PhaseConfigValid=0,"
+        "ReversalConfigValid=0,RunPolicyUsable=0",
         buffer);
 
     const ev::ConfigurationBuildChecks allPassing = allChecksPassing();
     TEST_ASSERT_TRUE(ev::formatChecksLine(allPassing, buffer, ev::kSerialLineCapacity) > 0U);
     TEST_ASSERT_EQUAL_STRING(
         "CHECK,all=1,count=0,first=none,mask=0,"
-        "ConfigurationValid=1,CalibrationMeasured=1,EffortCeilingsAgree=1,CommandPolarityAgrees=1,"
-        "TickPolarityAgrees=1,StopEvidenceSpansReversalStop=1,StopEvidenceSpansFinalStop=1,"
-        "SafetyLimitsValid=1,ControllerConfigValid=1,EstimatorConfigValid=1,ProfileLimitsValid=1,"
-        "PhaseConfigValid=1,ReversalConfigValid=1,RunPolicyUsable=1",
+        "ConfigurationValid=1,CalibrationMeasured=1,MeasuredValuesCiteEvidence=1,"
+        "EffortCeilingsAgree=1,CommandPolarityAgrees=1,TickPolarityAgrees=1,"
+        "DriverFaultPolarityVerified=1,StopEvidenceSpansReversalStop=1,"
+        "StopEvidenceSpansFinalStop=1,SafetyLimitsValid=1,ControllerConfigValid=1,"
+        "EstimatorConfigValid=1,ProfileLimitsValid=1,PhaseConfigValid=1,"
+        "ReversalConfigValid=1,RunPolicyUsable=1",
         buffer);
 }
 
@@ -258,9 +254,12 @@ void test_checks_failure_attribution_is_named_and_masked(void) {
                           static_cast<int>(verdict.firstFailedCheck));
 
     TEST_ASSERT_TRUE(ev::formatArmRefusal(verdict, buffer, ev::kSerialLineCapacity) > 0U);
-    // Bit 1 (CalibrationMeasured) and bit 10 (ProfileLimitsValid).
+    // The two failing checks' bits: CalibrationMeasured and ProfileLimitsValid.
+    const uint16_t expectedMask =
+        checks.failureMask();
+    TEST_ASSERT_EQUAL_UINT32(4098U, static_cast<uint32_t>(expectedMask));
     TEST_ASSERT_EQUAL_STRING(
-        "ERR,cmd=arm,reason=ChecksFailed,first_fail=CalibrationMeasured,mask=1026", buffer);
+        "ERR,cmd=arm,reason=ChecksFailed,first_fail=CalibrationMeasured,mask=4098", buffer);
 }
 
 // An accepted arm needs no explanation; a refused announcement does, and which

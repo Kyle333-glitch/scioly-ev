@@ -7,8 +7,9 @@
 the estimator takes to report a usable velocity, how long it takes to claim zero
 speed again after the command is removed, and what the estimator does at zero
 command. This is the input to tuning (H6), not tuning itself.
-**Bench instrumentation required:** B2 (bench-only bounded diagnostic drive) and
-B3.
+**Bench instrumentation required:** B2 (bench-only bounded diagnostic drive:
+`bench arm`, `bench drive <fwd|rev> <permille> <ms>`, `bench stop`, `bench reset`)
+and B3 (`bench ticks`).
 
 Keep the drivetrain **unloaded** for this protocol. That isolates the
 effort-to-velocity relationship from traction and from the vehicle's mass, and it

@@ -5,8 +5,16 @@
 **Order:** after H0 and H1A.
 **Answers:** what does each analog input read against a measured reference; what
 are the nFAULT and trigger idle and active levels; does the trigger bounce.
-**Bench instrumentation required:** B4 (raw trigger level readout); the battery,
-current and nFAULT raw values are already in the telemetry sample.
+**Bench instrumentation required:** B4 (raw input readout, `bench inputs` in the
+bench image); the battery, current and nFAULT raw values are also in the telemetry
+sample, so either source may be recorded - but **say which one** in every reading,
+because only the bench image reports the trigger's raw level.
+
+**This protocol also unblocks arming.** The `DriverFaultPolarityVerified`
+configuration check is false for as long as the driver's fault output has an
+unverified polarity, and the arm gate refuses on it. That is deliberate: until
+Part 3 has been read, no firmware path may claim a driver fault (`DriverFault.h`),
+so an armed vehicle would be one whose fault input nobody reads.
 
 **Scope.** This protocol establishes what each raw input reads. It deliberately
 does **not** establish the current scaling (there is no load with the motor
@@ -64,10 +72,22 @@ this protocol cannot supply.
 2. **Driver idle level.** With the driver awake and no fault, record the idle
    level and what `nfault_low` reports. Toggle `nSLEEP` and record whether the
    line stays high, releases, or does something else.
-3. Record, explicitly, that a genuine overcurrent/thermal trip is **not**
-   established here. That needs a load and belongs to P-H9. Until then the
-   firmware maps no `FaultCode` from this line, which is the current, deliberate
-   behaviour.
+3. **Which level means fault.** From the two levels observed above, record the
+   polarity this line uses: `ActiveLow` if a low level is the fault claim,
+   `ActiveHigh` if a high level is. Do not assume the datasheet's expected
+   polarity - the wiring is what is being measured (`VERIFIED_STATE.md` #1).
+4. Record, explicitly, that a genuine overcurrent/thermal trip is **not**
+   established here. That needs a load and belongs to P-H9. What this part
+   establishes is the *level's meaning*, not the trip behaviour.
+
+**If it passes:** set `kPlannedDriverFaultPolarity` in `src/VehicleConfig.h` from
+step 3, as a **`Measured`** value with a citation (the two levels recorded here and
+the capture under `data/evidence/`, per the promotion steps in
+`docs/bringup/README.md`). After that, `checks` should report
+`DriverFaultPolarityVerified=1`, and a fault claim on this line becomes a latched
+`FaultCode::DriverFaultBar` that stops the vehicle - which P-H9 then observes end
+to end. A value that is `Measured` without a citation fails
+`MeasuredValuesCiteEvidence` and the arm gate still refuses.
 
 ## Part 4 - Start trigger
 

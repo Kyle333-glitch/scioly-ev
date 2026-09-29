@@ -59,56 +59,109 @@ the same pattern.
 | H9 | [Fault injection](P-H9-fault-injection.md) | P (+E, +S) | H3, H7 |
 | H10 | [Full-run repeatability](P-H10-full-run-repeatability.md) | P | H7, H8, H9 |
 
-## Bench instrumentation that does not exist yet
+## Bench instrumentation (built; not yet exercised)
 
-Several protocols need the firmware to report something it currently cannot.
-These are **software prerequisites, not built**; listing them here is the point
-of pre-writing the protocols, so the gap is closed deliberately rather than
-discovered on the bench. Each is bench-only and must be impossible to include in
-a production image. The decided mechanism is a separate PlatformIO `bench`
-environment: like `native`, it lives beside `nano_r4` and adds the bench sources,
-so the production environment never compiles them. A build flag inside the
-production translation units is not sufficient - the guarantee would then rest on
-a macro being absent rather than on the build graph. None of these may become a
+Several protocols need the firmware to report something the production image
+deliberately cannot, one needs a bounded way to command effort outside a run, and
+H0W needs a deliberate way to stall the loop. These instruments now exist **in
+code**, and none of them has been run on hardware: they are prerequisites, not
+evidence.
+
+**Status: BUILT, NEVER RUN.** Every instrument below is in the tree and builds;
+none has been observed on the board, and this section is not a result. Nothing
+here changes a `VERIFIED_STATE.md` row.
+
+The mechanism is the separate PlatformIO `bench` environment described in
+`SOFTWARE_ARCHITECTURE.md` section 17: `env:bench` compiles `src/bench/` and the
+bench entry point, and `env:nano_r4` (the vehicle image, and what `pio run`
+builds) does not compile either. The guarantee is in the build graph rather than
+in a macro, because a macro that is merely absent could be defined by accident,
+while a source tree the production environment does not compile cannot run. It is
+verifiable without running anything: a symbol search over the two `firmware.elf`
+files finds the console's symbols in the bench image and none in the vehicle
+image.
+
+Build and use it with `pio run -e bench -t upload`; every line it prints starts
+with `BENCH`, and `bench health` reports `image=bench`. The analyzer treats a
+`BENCH` line as an ignored line, not as telemetry. None of these may become a
 control input.
 
-- **B1 - loop and watchdog health readout.** `WatchdogCheckpoint` already counts
-  `passes()`, `refreshes()`, `withheldRefreshes()` and `lastRefreshMs()`, and the
-  scheduler reports lateness and dropped deadlines, but no readout exposes them.
-  Needed by H0 and H0W (cadence evidence and the watchdog timeout choice). It
-  must not be a production path: the refresh stays in exactly one place.
-- **B2 - bench-only diagnostic drive.** A bounded, time-limited way to command a
-  conservative effort and a direction outside the run, for H3-H10. The operator
-  interface deliberately has no such command (D14); this is a bench instrument,
-  and the production image must not contain it. **Its safety model is part of
-  what has to be built, not an afterthought**, because the first protocol that
-  uses it (H3) is the first powered test and has no run to `disarm`:
+H0W needs the watchdog **enabled**, which is a separate environment rather than an
+edit to a header both images compile: `pio run -e bench-watchdog -t upload` builds
+the same bench tree with `-DEV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED=1`, which is the
+define `kWatchdogEnablementRequested` reads. H0W Step 0 uses `env:bench` (disabled,
+the shipped value); Steps 1-7 use `env:bench-watchdog`. The vehicle image never
+receives the define, and `src/main.cpp` refuses to compile if it ever does.
 
-  - B2 owns a **latched fault**: any abort - an effort or duration ceiling
-    reached, an exceeded limit, or an encoder that stops changing while the
-    motor is commanded to drive - de-energizes the motor *and stays
-    de-energized* until a deliberate `reset`, exactly as the shipped fault path
-    does (`AGENTS.md` section 5);
-  - B2 is **bounded by construction**: the command expires on its own after a
-    pre-registered short interval, so a lost host, a dropped serial line or an
-    operator mistake cannot leave effort applied;
-  - B2 is entered through a **deliberate bench arm**, never a command that
-    resumes anything after boot or reset;
-  - B2 does **not** replace the physical kill switch (the motor-supply
+- **B1 - loop and watchdog health readout.** `bench health`. Reports the
+  checkpoint's `passes`, `refreshes`, `withheld`, `last_refresh_ms`, the
+  **measured boot-to-first-refresh gap** (`first_refresh_ms`), whether the open was
+  attempted/opened/refused, whether enablement is requested, the requested timeout,
+  and the scheduler's `control_ticks`/`dt_ms`/`late_ms`/`dropped`/`violations`.
+  Needed by H0 and H0W (cadence evidence, the watchdog timeout choice, and the
+  maximum control-loop stall that bounds the near-zero dwell credited without
+  observation - see the H0W protocol). It is read-only, and the refresh stays in
+  exactly one place: a readout cannot feed the watchdog.
+- **B2 - bench-only diagnostic drive.** `bench arm`, `bench drive <fwd|rev>
+  <permille> <ms>`, `bench stop`, `bench reset`, `bench drive-status`. A bounded,
+  time-limited way to command a conservative effort and a direction outside the
+  run, for H3-H10. The operator interface deliberately has no such command (D14);
+  the production image does not contain this one either (see above). Its safety
+  model is `ev::BenchDrive` (`lib/evcore/src/BenchDrive.h`), which is pure logic
+  and host-tested (`test_bench_drive`):
+
+  - a **latched fault** on an abort. An operator `bench stop`, or an encoder that
+    stops changing while the motor is commanded to drive, de-energizes the motor
+    *and stays* de-energized until a deliberate `bench reset`, exactly as the
+    shipped fault path does (`AGENTS.md` section 5). A refusal that never applied
+    anything - an effort or duration above the ceiling, a zero-effort or
+    zero-duration command - is refused with a named reason and latches nothing:
+    nothing was energized, so there is nothing to abort;
+  - **bounded by construction**: every command carries its own duration and
+    expires on its own, so a lost host, a dropped serial line, a frozen console or
+    an operator mistake cannot leave effort applied;
+  - entered through a **deliberate bench arm**, never a command that resumes
+    anything after boot or reset;
+  - refused while **anything outranks it**, which is `ev::benchApplyVerdict()`
+    (`lib/evcore/src/MotorArbitration.h`, pure and host-tested): a latched fault, a
+    violated control-tick order, an armed run, or a run under way. The test is
+    deliberately *not* `!armed` - a latched fault clears arming and an order
+    violation disarms, so `!armed` cannot tell a free motor from a faulted one.
+    When the verdict refuses, the instrument is **aborted** (latched), not silently
+    disarmed;
+  - bounded by a **hard effort ceiling, a hard duration ceiling and a per-arm
+    command budget** (the planned values are constants in `src/bench/BenchConsole.h`
+    and H3 records the ones used);
+  - **the pass's single writer** while it is driving: the bench takes ownership of
+    the motor pins before the tick (`motorDriver::setMotorPinsOwned()`), so the pins
+    see one intent instead of a sleep/wake toggle once per control period. The
+    write happens **after** the control tick, and ownership is released on the next
+    pass (or immediately if the tick ran out of order), so the tick's own
+    de-energized command is the backstop if the bench layer stops running;
+  - it does **not** replace the physical kill switch (the motor-supply
     disconnect), which remains the primary stop in every powered step.
 
   No protocol that uses B2 runs until the bounded expiration and the latched
   fault have themselves been demonstrated and recorded - that is H3's first step.
-- **B3 - raw encoder tick readout.** The telemetry sample carries `pos_m` (which
-  needs a scale that is not yet measured), not the raw tick count. H2, H3, H4 and
-  H5 need raw signed ticks plus `countedEdges`/`ignoredUpdates`.
-- **B4 - raw trigger level readout.** The telemetry sample carries
-  `batt_counts`, `curr_counts` and `nfault_low`, but the start trigger's raw
-  level is not reported anywhere. H1B needs it (active level and bounce).
+- **B3 - raw encoder tick readout.** `bench ticks`. Reports the raw signed tick
+  count plus `counted_edges`/`ignored_updates`. The telemetry sample carries
+  `pos_m` instead (which needs a scale nobody has measured). H2, H3, H4 and H5
+  need these raw numbers.
+- **B4 - raw input readout.** `bench inputs` (also `bench trigger`). Reports the
+  raw trigger level (`trigger_low`), the driver fault line's raw level, and
+  `batt_counts`/`curr_counts`. H1B needs it (active level and bounce).
+- **The deliberate-hang hook (H0W Step 3).** `kDeliberateHangAfterPasses` in
+  `src/bench/BenchMain.cpp`: a compile-time pass count after which the loop hangs
+  inside a pass, and it stages one `BENCH,hang=1,...` line first. It is a constant
+  and **not** a console verb, deliberately - no serial input can hang the board -
+  and it lives in the bench tree, so the vehicle image cannot contain it. H0W
+  Step 3 sets it, rebuilds, and observes the resulting watchdog reset. It must
+  only ever be set with the motor supply off: B2's bounded expiry is evaluated by
+  the same loop, so a hang suspends it too.
 
-Anything a protocol measures that the firmware cannot yet report is a defect to
-close in code before the test, not something to approximate with a scale that is
-itself unmeasured.
+Anything a protocol measures that the firmware cannot report is a defect to close
+in code before the test, not something to approximate with a scale that is itself
+unmeasured.
 
 ## Common safety preconditions
 
@@ -132,7 +185,9 @@ protocol lists only its *additional* hazards.
 A session that is not recorded is not evidence. For every protocol, capture:
 
 - the build identity - `VERSION,fw=...` from the interface, plus `git rev-parse
-  HEAD` of the tree that was flashed;
+  HEAD` of the tree that was flashed, **and which image it was**: `BOOT,...` for
+  the vehicle image, or `bench health`'s `image=bench` for a bench session. A
+  capture that does not say which image produced it cannot be re-read later;
 - date, operator, board and vehicle identity, supply voltage and current limit;
 - the exact commands typed, and the exact responses, verbatim;
 - the raw serial capture saved verbatim as a file. `data/raw/` is scratch and is
@@ -162,7 +217,11 @@ acceptable derivation; "five because the protocol said five" is not one.
    only for the rows the protocol names, and only if it passed.
 4. Replacing a `Provisional` placeholder in `src/VehicleConfig.h` is one edit
    there plus the log entry, with `ValueSource::Measured` (the promotion steps in
-   `VERIFIED_STATE.md`).
+   `VERIFIED_STATE.md`) **and the evidence pointer**: a promoted value has to pass
+   `Sourced::citesEvidence()`, or the configuration-build check
+   `MeasuredValuesCiteEvidence` reports false and the vehicle cannot be armed. The
+   citation is the `VERIFIED_STATE.md` row and the capture under
+   `data/evidence/`, not a comment.
 5. `docs/hardware/motor-driver-drv8874.md` tables updated if the measured driver
    behaviour contradicts the plan. Fix the plan or the wiring - never add a sign
    somewhere else.

@@ -11,7 +11,10 @@ changing while the motor is still driven** - the case that can make the zero-spe
 gate report a stop the vehicle is not making.
 **Bench instrumentation required:** none beyond the shipped interface for the
 state-machine faults; a current-limited supply and a means of briefly loading the
-driver for the electrical faults.
+driver for the electrical faults; and for the driver-fault part, the **measured
+polarity** from H1B - the firmware claims a `FaultCode::DriverFaultBar` only when
+`kPlannedDriverFaultPolarity` is `Measured`, so an unverified polarity makes this
+part unreadable rather than unsafe.
 
 **Inject one fault at a time.** Each trial is a single cause with everything else
 nominal. Record the exact command sequence and the exact response.

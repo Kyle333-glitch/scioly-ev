@@ -45,9 +45,30 @@ writes the pins is `evhw::motorDriver` in `src/MotorDriver.h`.
 
 Notes:
 
+* **`Coast` and `Disabled` are pin-identical in this plan**, and `Brake` is the
+  same pin combination as a drive with a zero duty - so the firmware has, at
+  present, only two distinct *level* combinations for four mode names. Whether
+  `Brake` (awake, no drive level) is a shorted bridge (braking) or a high-Z output
+  (coasting) is a measured fact, not a claim of this table. Both candidate
+  mappings are therefore **pre-registered** here, and bench test 3 below decides
+  which one is real:
+
+  | Candidate | `Brake` electrically | If H1A test 3 measures this | Consequence |
+  |---|---|---|---|
+  | B1 - brake | The bridge is enabled with both low-side (or both high-side) FETs on: the motor is shorted and resists rotation. | Shaft resists turning while `bench drive` holds zero drive / the stop dwell is credited. | `Brake` may be used as a hold; `FaultStopPolicy::Brake` and the near-zero dwell mean what their names say. |
+  | B2 - coast | The bridge is enabled but both outputs are high-Z: the motor spins freely. | Shaft freewheels with `nSLEEP` high and `EN` low. | `Brake` is **not** a hold; `FaultStopPolicy::Brake` and any stop-verification dwell that assumed it must be revisited, and the plan needs a distinct brake level (or a different stop policy). |
+
+  Until H1A test 3 is recorded, **`Brake` must not be used as a hold** - not in a
+  stop-verification dwell, not as a fault stop, and not in P-H7's braking
+  characterization (`P-H7-distance-braking-reversal.md` prerequisites).
 * the duty is `magnitudePermille` (0-1000) of full scale, mapped onto the PWM
   timer's counts (`ev::pwmCountFromPermille()`); the adapter programs the core's
-  `analogWriteResolution()` explicitly to 8 bits rather than inheriting a default;
+  `analogWriteResolution()` explicitly to 8 bits rather than inheriting a default.
+  That setting is **core-wide, not per-pin**, and the timer assignment for the EN
+  pin is not recorded: **no second PWM consumer may be added on this board until
+  H1A test 6 records the switching frequency at `EN`**, because a second
+  `analogWrite` (or a changed `analogWriteResolution`) can silently change the
+  frequency the driver sees (see `src/PinMap.h`);
 * an authorized Drive with a magnitude of 0 is a legal level combination and
   applies no drive. It is **not** a stop: only `Disabled`, `Coast` and `Brake` are;
 * the mapping is the "fourth encoding" of the one polarity fact

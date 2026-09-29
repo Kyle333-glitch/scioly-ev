@@ -31,9 +31,11 @@ namespace ev {
 enum class ConfigurationCheckId : uint8_t {
     ConfigurationValid = 0,   // an announced RunConfig passed rule validation
     CalibrationMeasured,      // VehicleCalibration::isFullyMeasured()
+    MeasuredValuesCiteEvidence,  // every Measured value cites its evidence
     EffortCeilingsAgree,      // regulator ceiling == safety ceiling
     CommandPolarityAgrees,    // profile command direction == regulator effort mode
     TickPolarityAgrees,       // measured tick direction == command direction
+    DriverFaultPolarityVerified,  // the driver fault line has been measured
     StopEvidenceSpansReversalStop,
     StopEvidenceSpansFinalStop,
     SafetyLimitsValid,        // validateSafetyLimits()
@@ -60,12 +62,16 @@ inline const char* configurationCheckName(ConfigurationCheckId id) {
             return "ConfigurationValid";
         case ConfigurationCheckId::CalibrationMeasured:
             return "CalibrationMeasured";
+        case ConfigurationCheckId::MeasuredValuesCiteEvidence:
+            return "MeasuredValuesCiteEvidence";
         case ConfigurationCheckId::EffortCeilingsAgree:
             return "EffortCeilingsAgree";
         case ConfigurationCheckId::CommandPolarityAgrees:
             return "CommandPolarityAgrees";
         case ConfigurationCheckId::TickPolarityAgrees:
             return "TickPolarityAgrees";
+        case ConfigurationCheckId::DriverFaultPolarityVerified:
+            return "DriverFaultPolarityVerified";
         case ConfigurationCheckId::StopEvidenceSpansReversalStop:
             return "StopEvidenceSpansReversalStop";
         case ConfigurationCheckId::StopEvidenceSpansFinalStop:
@@ -96,9 +102,11 @@ inline const char* configurationCheckName(ConfigurationCheckId id) {
 struct ConfigurationBuildChecks {
     bool configurationValid = false;
     bool calibrationMeasured = false;
+    bool measuredValuesCiteEvidence = false;
     bool effortCeilingsAgree = false;
     bool commandPolarityAgrees = false;
     bool tickPolarityAgrees = false;
+    bool driverFaultPolarityVerified = false;
     bool stopEvidenceSpansReversalStop = false;
     bool stopEvidenceSpansFinalStop = false;
     bool safetyLimitsValid = false;
@@ -117,12 +125,16 @@ struct ConfigurationBuildChecks {
                 return configurationValid;
             case ConfigurationCheckId::CalibrationMeasured:
                 return calibrationMeasured;
+            case ConfigurationCheckId::MeasuredValuesCiteEvidence:
+                return measuredValuesCiteEvidence;
             case ConfigurationCheckId::EffortCeilingsAgree:
                 return effortCeilingsAgree;
             case ConfigurationCheckId::CommandPolarityAgrees:
                 return commandPolarityAgrees;
             case ConfigurationCheckId::TickPolarityAgrees:
                 return tickPolarityAgrees;
+            case ConfigurationCheckId::DriverFaultPolarityVerified:
+                return driverFaultPolarityVerified;
             case ConfigurationCheckId::StopEvidenceSpansReversalStop:
                 return stopEvidenceSpansReversalStop;
             case ConfigurationCheckId::StopEvidenceSpansFinalStop:
@@ -159,6 +171,9 @@ struct ConfigurationBuildChecks {
             case ConfigurationCheckId::CalibrationMeasured:
                 calibrationMeasured = value;
                 return;
+            case ConfigurationCheckId::MeasuredValuesCiteEvidence:
+                measuredValuesCiteEvidence = value;
+                return;
             case ConfigurationCheckId::EffortCeilingsAgree:
                 effortCeilingsAgree = value;
                 return;
@@ -167,6 +182,9 @@ struct ConfigurationBuildChecks {
                 return;
             case ConfigurationCheckId::TickPolarityAgrees:
                 tickPolarityAgrees = value;
+                return;
+            case ConfigurationCheckId::DriverFaultPolarityVerified:
+                driverFaultPolarityVerified = value;
                 return;
             case ConfigurationCheckId::StopEvidenceSpansReversalStop:
                 stopEvidenceSpansReversalStop = value;
@@ -203,8 +221,9 @@ struct ConfigurationBuildChecks {
     // True only when every check passed. There is deliberately no partial
     // "close enough": this is the gate a deliberate arming decision reads.
     bool allPass() const {
-        return configurationValid && calibrationMeasured && effortCeilingsAgree &&
-               commandPolarityAgrees && tickPolarityAgrees && stopEvidenceSpansReversalStop &&
+        return configurationValid && calibrationMeasured && measuredValuesCiteEvidence &&
+               effortCeilingsAgree && commandPolarityAgrees && tickPolarityAgrees &&
+               driverFaultPolarityVerified && stopEvidenceSpansReversalStop &&
                stopEvidenceSpansFinalStop && safetyLimitsValid && controllerConfigValid &&
                estimatorConfigValid && profileLimitsValid && phaseConfigValid &&
                reversalConfigValid && runPolicyUsable;
@@ -227,8 +246,8 @@ struct ConfigurationBuildChecks {
     }
 
     // Every failing check as a bitmask, bit `n` set for enumerator value `n`.
-    // Fourteen checks fit in a `uint16_t`; the static assertion below keeps that
-    // true if a check is added later.
+    // Sixteen checks fill a `uint16_t` exactly; the static assertion below keeps
+    // that true if a check is added later, which by then needs a wider mask.
     uint16_t failureMask() const {
         uint16_t mask = 0U;
         for (uint8_t index = 0U; index < kConfigurationCheckCount; ++index) {

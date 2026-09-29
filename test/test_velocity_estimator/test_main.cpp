@@ -36,6 +36,11 @@ static_assert(static_cast<int>(ev::VelocityEstimateStatus::Valid) == 0,
               "the valid status must stay the zero value");
 static_assert(static_cast<int>(ev::VelocityUsability::Usable) == 0,
               "the usable verdict must stay the zero value");
+// The held defaults in the vehicle layer are built by
+// `refusedVelocityEstimate(WarmingUp)`, so the enumerator's value is pinned
+// explicitly: a reorder would otherwise silently change what those members mean.
+static_assert(static_cast<int>(ev::VelocityEstimateStatus::WarmingUp) == 6,
+              "the warm-up status must stay the value the held defaults assume");
 // A default-built configuration is {0, 0}, which fails validation: a forgotten
 // configuration must produce refusals, never numbers.
 static_assert(ev::VelocityEstimatorConfig{0U, 0U}.windowMs == 0U,
@@ -896,10 +901,42 @@ void test_a_forgotten_configuration_fails_closed(void) {
     TEST_ASSERT_FALSE(ev::validateVelocityEstimatorConfig(zero).ok);
 }
 
+void test_the_refused_estimate_shape_is_owned_in_one_place(void) {
+    // The one definition of the value the vehicle layer's held members use: an
+    // absent number is this shape with a status that says why, and the
+    // estimator's own refusals are the same value.
+    const ev::VelocityEstimate held =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
+    expectEstimate(ev::VelocityEstimateStatus::WarmingUp, false, false, held);
+    TEST_ASSERT_TRUE(held.velocityMps == 0.0);
+    TEST_ASSERT_EQUAL_UINT32(0U, held.elapsedMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, held.effectiveWindowMs);
+    TEST_ASSERT_TRUE(held.effectiveWindowTicks == 0);
+
+    // Only the status differs, and it is the caller's reason, not a measurement.
+    const ev::VelocityEstimate refusedScale =
+        ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::ScaleIsNotMeasured);
+    expectEstimate(ev::VelocityEstimateStatus::ScaleIsNotMeasured, false, false, refusedScale);
+    TEST_ASSERT_TRUE(refusedScale.velocityMps == 0.0);
+
+    // A real refusal from the estimator carries exactly that shape.
+    ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{20U, 5000U});
+    const ev::VelocityEstimate fromEstimator = estimator.update(0U, 0, provisionalScale(0.0001));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::VelocityEstimateStatus::ScaleIsNotMeasured),
+                          static_cast<int>(fromEstimator.status));
+    TEST_ASSERT_FALSE(fromEstimator.valid);
+    TEST_ASSERT_FALSE(fromEstimator.zeroSpeedClaimed);
+    TEST_ASSERT_TRUE(fromEstimator.velocityMps == 0.0);
+    TEST_ASSERT_EQUAL_UINT32(0U, fromEstimator.elapsedMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, fromEstimator.effectiveWindowMs);
+    TEST_ASSERT_TRUE(fromEstimator.effectiveWindowTicks == 0);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
     RUN_TEST(test_configuration_validation_rejects_the_zero_values);
+    RUN_TEST(test_the_refused_estimate_shape_is_owned_in_one_place);
     RUN_TEST(test_an_invalid_configuration_never_produces_a_number);
     RUN_TEST(test_a_forgotten_configuration_fails_closed);
 

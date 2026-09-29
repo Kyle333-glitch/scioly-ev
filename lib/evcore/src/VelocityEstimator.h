@@ -184,6 +184,22 @@ struct VelocityEstimate {
     int64_t effectiveWindowTicks;
 };
 
+// The shape of every absent number, in one place.
+//
+// A refusal carries no number, no claim and no stamp: `velocityMps == 0.0`,
+// `valid == false`, `zeroSpeedClaimed == false`, `elapsedMs == 0`,
+// `effectiveWindowMs == 0` and `effectiveWindowTicks == 0`, with only `status`
+// saying why. `VelocityEstimator::refuse()` is the estimator's internal use of
+// exactly this shape; this is the same value for a caller that must declare an
+// estimate before the first one exists (the vehicle layer's held members,
+// `src/VehicleRuntime.h`). Spelling the shape by hand is what this exists to
+// stop: a new field or a reordered enumerator would keep compiling and silently
+// leave a garbage-looking default estimate behind, and the defaults are the one
+// place no test looks at the value.
+inline constexpr VelocityEstimate refusedVelocityEstimate(VelocityEstimateStatus status) {
+    return VelocityEstimate{0.0, false, false, status, 0U, 0U, 0};
+}
+
 // ---------------------------------------------------------------------------
 // VelocityEstimator
 // ---------------------------------------------------------------------------
@@ -356,9 +372,11 @@ private:
     }
 
     // A refusal carries no stamp: it produced neither a number nor a claim, so
-    // there is nothing for a consumer to age.
+    // there is nothing for a consumer to age. The shape itself lives in
+    // `refusedVelocityEstimate()`, so the estimator and the held defaults that a
+    // caller zero-initializes cannot drift apart.
     static VelocityEstimate refuse(VelocityEstimateStatus status) {
-        return VelocityEstimate{0.0, false, false, status, 0U, 0U, 0};
+        return refusedVelocityEstimate(status);
     }
 
     uint32_t sampleMsAt(uint8_t index) const {
@@ -499,5 +517,12 @@ static_assert(static_cast<int>(VelocityEstimateStatus::Valid) == 0,
               "the valid status must stay the zero value");
 static_assert(static_cast<int>(VelocityUsability::Usable) == 0,
               "the usable verdict must stay the zero value");
+// WarmingUp is the status of every held default built by
+// `refusedVelocityEstimate(VelocityEstimateStatus::WarmingUp)` in
+// `src/VehicleRuntime.h` and `test/test_scenario/ScenarioHarness.h`. It is
+// pinned so a reorder cannot silently change what those members mean; nothing
+// else depends on its numeric value.
+static_assert(static_cast<int>(VelocityEstimateStatus::WarmingUp) == 6,
+              "the warm-up status must stay the value the held defaults assume");
 
 }  // namespace ev

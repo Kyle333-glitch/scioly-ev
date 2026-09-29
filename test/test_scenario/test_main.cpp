@@ -537,9 +537,7 @@ void test_the_stop_evidence_packet_is_composed_from_two_production_answers(void)
     // the packet's own longer limit: the zero is always produced before the claim
     // interval it is paired with, so a limit as short as the control path's can
     // never span both.
-    const ev::NearZeroConfig stopPolicy(
-        measured(evscenario::kFixtureStopThresholdMps),
-        measured(evscenario::kFixtureStopDwellS));
+    const ev::NearZeroConfig stopPolicy = evscenario::fixtureStopConfig();
     const auto verify = [&](uint32_t packetMaxAgeMs) {
         ev::VelocityEstimator source(ev::VelocityEstimatorConfig{
             evscenario::kFixtureEstimatorWindowMs,

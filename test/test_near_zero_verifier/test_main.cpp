@@ -11,7 +11,9 @@
 
 // Host tests for the near-zero verification policy: threshold + continuous dwell
 // over three independently supplied facts (a fresh valid estimate, the speed
-// below the threshold, and the estimator's explicit zero-speed claim).
+// below the threshold, and the estimator's explicit zero-speed claim), plus the
+// bound on the gap between two updates that may still be credited as continued
+// evidence.
 //
 // Every threshold, dwell and speed below is a test fixture. None is a measured
 // vehicle value and none is a tuning suggestion: the vehicle has no verified
@@ -42,8 +44,20 @@ ev::Sourced<double> provisional(double value) {
     return ev::Sourced<double>(value, ev::ValueSource::Provisional);
 }
 
-// Fixture policy: within 0.05 m/s, held continuously for 0.2 s.
-ev::NearZeroConfig fixtureConfig() { return ev::NearZeroConfig(measured(0.05), measured(0.2)); }
+ev::Sourced<uint32_t> measuredGap(uint32_t value) {
+    return ev::Sourced<uint32_t>(value, ev::ValueSource::Measured);
+}
+
+// Fixture policy: within 0.05 m/s, held continuously for 0.2 s, with an update
+// gap limit of 250 ms.
+//
+// The limit is deliberately wider than every cadence the tests below step at
+// (20, 50 and 100 ms), so those tests stay about the cadence and the dwell rather
+// than about the gap. The gap rule has its own tests, which use a narrow limit so
+// the behavior is visible rather than incidental.
+ev::NearZeroConfig fixtureConfig() {
+    return ev::NearZeroConfig(measured(0.05), measured(0.2), measuredGap(250U));
+}
 
 // A fresh, usable measurement at `velocityMps`, with the explicit claim either
 // present or absent.
@@ -88,27 +102,41 @@ ev::VelocityEstimate syntheticEstimate(double velocityMps, bool valid, bool clai
 void test_config_refuses_unmeasured_and_degenerate_values(void) {
     TEST_ASSERT_TRUE(ev::validateNearZeroConfig(fixtureConfig()).ok);
 
-    // A placeholder threshold or dwell can never verify anything.
-    const ev::NearZeroConfig provisionalThreshold(provisional(0.05), measured(0.2));
+    // A placeholder threshold, dwell or gap limit can never verify anything.
+    const ev::NearZeroConfig provisionalThreshold(provisional(0.05), measured(0.2),
+                                                  measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::ValuesAreNotMeasured),
                           static_cast<int>(ev::validateNearZeroConfig(provisionalThreshold).error));
-    const ev::NearZeroConfig provisionalDwell(measured(0.05), provisional(0.2));
+    const ev::NearZeroConfig provisionalDwell(measured(0.05), provisional(0.2),
+                                              measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::ValuesAreNotMeasured),
                           static_cast<int>(ev::validateNearZeroConfig(provisionalDwell).error));
+    // The gap limit is what bounds how much dwell can be credited without
+    // observation, so an unmeasured one is not usable either.
+    const ev::NearZeroConfig provisionalGapLimit(measured(0.05), measured(0.2),
+                                                 ev::Sourced<uint32_t>(
+                                                     250U, ev::ValueSource::Provisional));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::ValuesAreNotMeasured),
+                          static_cast<int>(ev::validateNearZeroConfig(provisionalGapLimit).error));
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    const ev::NearZeroConfig nanThreshold(measured(nan), measured(0.2));
+    const ev::NearZeroConfig nanThreshold(measured(nan), measured(0.2), measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonFiniteValue),
                           static_cast<int>(ev::validateNearZeroConfig(nanThreshold).error));
 
     // A zero threshold could never be observed on a real measurement, and a zero
     // dwell would verify on the first observation, which is not an interval.
-    const ev::NearZeroConfig zeroThreshold(measured(0.0), measured(0.2));
+    const ev::NearZeroConfig zeroThreshold(measured(0.0), measured(0.2), measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonPositiveThreshold),
                           static_cast<int>(ev::validateNearZeroConfig(zeroThreshold).error));
-    const ev::NearZeroConfig zeroDwell(measured(0.05), measured(0.0));
+    const ev::NearZeroConfig zeroDwell(measured(0.05), measured(0.0), measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonPositiveDwell),
                           static_cast<int>(ev::validateNearZeroConfig(zeroDwell).error));
+    // A zero gap limit would refuse every continued interval, which is not a
+    // policy anyone states from a stall measurement.
+    const ev::NearZeroConfig zeroGap(measured(0.05), measured(0.2), measuredGap(0U));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonPositiveUpdateGap),
+                          static_cast<int>(ev::validateNearZeroConfig(zeroGap).error));
 }
 
 // --- The composed evidence packet -------------------------------------------
@@ -197,7 +225,7 @@ void test_a_window_derived_zero_is_only_a_speed_fact_not_a_stop(void) {
 }
 
 void test_the_packet_limit_must_span_the_stop_dwell(void) {
-    const ev::NearZeroConfig dwell200(measured(0.05), measured(0.2));
+    const ev::NearZeroConfig dwell200(measured(0.05), measured(0.2), measuredGap(250U));
     TEST_ASSERT_TRUE(ev::stopEvidenceLimitSpansDwell(200U, dwell200));
     TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(199U, dwell200));
     TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(0U, dwell200));
@@ -205,11 +233,11 @@ void test_the_packet_limit_must_span_the_stop_dwell(void) {
     // An unusable configuration has no dwell to span, so no limit spans it - a
     // check that answered true here would look like approval of a placeholder.
     TEST_ASSERT_FALSE(ev::stopEvidenceLimitSpansDwell(
-        1000U, ev::NearZeroConfig(measured(0.05), provisional(0.2))));
+        1000U, ev::NearZeroConfig(measured(0.05), provisional(0.2), measuredGap(250U))));
 
     // The fixture policy the scenarios use: a 0.1 s dwell with a 200 ms limit.
     TEST_ASSERT_TRUE(ev::stopEvidenceLimitSpansDwell(
-        200U, ev::NearZeroConfig(measured(0.05), measured(0.1))));
+        200U, ev::NearZeroConfig(measured(0.05), measured(0.1), measuredGap(250U))));
 }
 
 void test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop(void) {
@@ -219,7 +247,8 @@ void test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop(void)
     // under the harness's policy: a 0.1 s dwell and a 200 ms speed-fact limit.
     const ev::Sourced<double> scale = measured(0.0001);
     ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{20U, 100U});
-    ev::NearZeroVerifier verifier(ev::NearZeroConfig(measured(0.05), measured(0.1)));
+    ev::NearZeroVerifier verifier(
+        ev::NearZeroConfig(measured(0.05), measured(0.1), measuredGap(250U)));
 
     ev::VelocityEstimate current = estimator.update(0U, 0, scale);
     ev::VelocityEstimate lastValid = current;
@@ -272,7 +301,8 @@ void test_default_built_evidence_observes_nothing(void) {
 }
 
 void test_unusable_config_never_verifies(void) {
-    ev::NearZeroVerifier verifier(ev::NearZeroConfig(provisional(0.05), measured(0.2)));
+    ev::NearZeroVerifier verifier(
+        ev::NearZeroConfig(provisional(0.05), measured(0.2), measuredGap(250U)));
     TEST_ASSERT_FALSE(verifier.configUsable());
 
     ev::NearZeroVerdict verdict = verifier.update(1000U, evidenceAt(0.0, true));
@@ -481,20 +511,60 @@ void test_reset_clears_the_observed_interval(void) {
     TEST_ASSERT_FALSE(verdict.verified);
 }
 
-void test_an_update_gap_is_credited_as_continued_evidence(void) {
-    // Pinned deliberate behavior, not a defect: two advancing stamps are all
-    // this module sees, so the time between them is credited as if the evidence
-    // had continued across it. What keeps that honest is elsewhere on purpose: a
-    // stalled control loop is a command-timeout question with its own owner
-    // (AGENTS.md section 5), and every sequence that consumes a verdict carries a
-    // timeout evaluated before the verification step. Pinning it here means a
-    // future change to it has to be a decision.
-    ev::NearZeroVerifier verifier(fixtureConfig());
+void test_a_gap_beyond_the_limit_is_not_credited(void) {
+    // Two advancing stamps do not say whether the loop ran in between, so a gap
+    // wider than the configured limit does not grow the dwell. The evidence holds
+    // now - the interval simply restarts here, and the verdict says why.
+    //
+    // The dwell here is 50 ms and the gap limit 60 ms, so "the restarted interval
+    // can still be earned" is observable within the test rather than after 200 ms
+    // of fixture time.
+    ev::NearZeroVerifier verifier(
+        ev::NearZeroConfig(measured(0.05), measured(0.05), measuredGap(60U)));
     verifier.update(0U, evidenceAt(0.0, true));
 
     const ev::NearZeroVerdict verdict = verifier.update(2000U, evidenceAt(0.0, true));
-    expectStatus(ev::NearZeroStatus::Verified, verdict);
-    TEST_ASSERT_EQUAL_UINT32(2000U, verdict.dwellElapsedMs);
+    expectStatus(ev::NearZeroStatus::UpdateGapExceeded, verdict);
+    TEST_ASSERT_FALSE(verdict.verified);
+    TEST_ASSERT_EQUAL_UINT32(0U, verdict.dwellElapsedMs);
+    TEST_ASSERT_TRUE(verdict.velocityUsable);
+    TEST_ASSERT_TRUE(verdict.withinThreshold);
+    TEST_ASSERT_TRUE(verdict.zeroSpeedClaimed);
+    expectVerdictInvariant(verdict);
+
+    // The restarted interval is real: the dwell is earned from the observation
+    // that ended the gap, not from the time before it.
+    TEST_ASSERT_FALSE(verifier.update(2030U, evidenceAt(0.0, true)).verified);
+    const ev::NearZeroVerdict earned = verifier.update(2060U, evidenceAt(0.0, true));
+    expectStatus(ev::NearZeroStatus::Verified, earned);
+    TEST_ASSERT_EQUAL_UINT32(60U, earned.dwellElapsedMs);
+}
+
+void test_a_gap_of_exactly_the_limit_is_still_credited(void) {
+    // The limit is inclusive: a gap equal to it was observed at the cadence the
+    // limit describes. One millisecond more is not.
+    ev::NearZeroVerifier verifier(
+        ev::NearZeroConfig(measured(0.05), measured(0.2), measuredGap(60U)));
+    verifier.update(0U, evidenceAt(0.0, true));
+
+    expectStatus(ev::NearZeroStatus::DwellInProgress,
+                 verifier.update(60U, evidenceAt(0.0, true)));
+    expectStatus(ev::NearZeroStatus::UpdateGapExceeded,
+                 verifier.update(121U, evidenceAt(0.0, true)));
+}
+
+void test_a_gap_does_not_credit_an_interval_across_a_stall(void) {
+    // The whole point of the bound: a stalled loop cannot silently earn the dwell
+    // a stop is verified from. Without the gap rule this sequence verifies at the
+    // second update.
+    ev::NearZeroVerifier verifier(
+        ev::NearZeroConfig(measured(0.05), measured(0.2), measuredGap(60U)));
+    verifier.update(0U, evidenceAt(0.0, true));
+
+    for (uint32_t ms = 5000U; ms <= 5000U + 100U; ms += 50U) {
+        TEST_ASSERT_FALSE_MESSAGE(verifier.update(ms, evidenceAt(0.0, true)).verified,
+                                  "a stall was credited as an observed dwell");
+    }
 }
 
 // --- The invariant over a varied evidence sequence ---------------------------
@@ -540,7 +610,9 @@ int main(int, char**) {
     RUN_TEST(test_a_non_advancing_stamp_holds_the_dwell);
     RUN_TEST(test_a_rewound_stamp_cannot_verify_early);
     RUN_TEST(test_reset_clears_the_observed_interval);
-    RUN_TEST(test_an_update_gap_is_credited_as_continued_evidence);
+    RUN_TEST(test_a_gap_beyond_the_limit_is_not_credited);
+    RUN_TEST(test_a_gap_of_exactly_the_limit_is_still_credited);
+    RUN_TEST(test_a_gap_does_not_credit_an_interval_across_a_stall);
     RUN_TEST(test_verdict_invariants_hold_over_a_varied_sequence);
     RUN_TEST(test_the_packet_pairs_the_current_claim_with_the_retained_window_estimate);
     RUN_TEST(test_each_packet_fact_expires_on_its_own_limit);

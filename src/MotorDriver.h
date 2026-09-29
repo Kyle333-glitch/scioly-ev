@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include <BenchDrive.h>
 #include <MotorDriverPlan.h>
 
 #include "PinMap.h"
@@ -45,9 +46,45 @@
 //     grep -rn "kMotorPhase\|kMotorEnable\|kMotorSleepBar" src/
 //
 // must match only `src/PinMap.h` (the definitions) and this file (the writes).
+// `src/bench/` reaches the pins through this file's `applyBench()` and does not
+// write them itself, and the production build does not compile `src/bench/` at
+// all, so the production image's list of motor-pin writers is still this one
+// file.
 
 namespace evhw {
 namespace motorDriver {
+
+// ---------------------------------------------------------------------------
+// Who owns the pins this pass
+// ---------------------------------------------------------------------------
+//
+// There are two writers to the three driver inputs, and only one of them may
+// write in a given pass. The production tick's stage 9 is the default writer; the
+// bench layer takes the pins for a pass when its bounded instrument is driving and
+// `ev::benchApplyVerdict()` says nothing outranks it (`MotorArbitration.h`).
+//
+// Why the flag exists rather than "write both, last one wins": a bench command
+// written after the tick's de-energized write would put a sleep/wake edge on
+// `nSLEEP` once per control period (20 ms). The pin state the driver actually sees
+// would then be neither writer's intent, and whether a wake delay is required
+// before a drive is an UNVERIFIED fact (`docs/hardware/motor-driver-drv8874.md`) -
+// so a 50 Hz sleep/wake toggle is exactly the state no measurement bounds. Setting
+// this before the tick means one writer per pass and a pin state that is somebody's
+// intent.
+//
+// `failSafe()` deliberately ignores the flag: a de-energize must always reach the
+// pins. Only the authority's ordinary per-pass command yields.
+inline bool& motorPinsOwned() {
+    static bool pinsOwned = false;
+    return pinsOwned;
+}
+
+// Hands the pins to the bench layer (`true`) or back to the production tick
+// (`false`). Only `src/bench/` ever passes `true`; the production image has no
+// caller, so its value is always false there and the tick's write is never
+// skipped. The accessor's name is neutral on purpose: the production image must
+// contain no bench-named symbol, and `apply()` legitimately reads this flag.
+inline void setMotorPinsOwned(bool pinsOwned) { motorPinsOwned() = pinsOwned; }
 
 // Configures the three pins and leaves the driver de-energized: nSLEEP low,
 // PH low, EN at zero duty. This is the first hardware action the firmware takes,
@@ -87,8 +124,49 @@ inline void failSafe() {
 
 // Applies one authorized command. `ev::drv8874InputsFor()` decides the levels;
 // this function writes them.
+//
+// Yields the pins for a pass when the bench layer owns them (`setMotorPinsOwned()`).
+// The authority's command is still what the tick recorded in its telemetry
+// snapshot; only the pin write is skipped, so that the pass has exactly one writer
+// instead of two writes one instruction apart. The write resumes on the first pass
+// the bench no longer owns the driver.
 inline void apply(const ev::AuthorizedMotorCommand& command) {
+    if (motorPinsOwned()) {
+        return;
+    }
     const ev::Drv8874Inputs levels = ev::drv8874InputsFor(command);
+    digitalWrite(kMotorSleepBar, levels.nSleepHigh ? HIGH : LOW);
+    digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
+    analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
+                                                       ev::kPlannedPwmResolutionBits));
+}
+
+// Applies one bounded bench command (B2).
+//
+// This is a separate entry point, and it takes a separate type, on purpose. The
+// production path can reach it in exactly one way - by calling it - and the only
+// caller in the repository is `src/bench/`, which the production build does not
+// compile (`platformio.ini`). A production module cannot build a
+// `BenchDriveOutput` (its constructor is private to `ev::BenchDrive`), so there is
+// no type it could pass to this function by accident.
+//
+// The levels come from the same pure table as every other write here, so the plan
+// still has exactly one definition. What the bench layer owns is different: when it
+// is allowed to be called at all, and that is `ev::benchApplyVerdict()`
+// (`MotorArbitration.h`) - a latched fault, a violated tick order, an armed run or
+// a run under way all outrank the bench, and `!armed()` alone is *not* that test.
+//
+// Called after the control tick, and only while the bench layer holds ownership
+// for the pass (`setMotorPinsOwned()`), so this write is the pass's only write to the
+// pins. Continuing to hold ownership is what keeps a bench command from being
+// toggled off and on once per control period by the tick's own write; releasing it
+// - which happens on the pass after the instrument stops driving, and immediately
+// if the tick ran out of order - hands the driver back to the production tick,
+// whose next write de-energizes a bench command the bench code can no longer
+// reach.
+inline void applyBench(const ev::BenchDriveOutput& output) {
+    const ev::Drv8874Inputs levels =
+        ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille());
     digitalWrite(kMotorSleepBar, levels.nSleepHigh ? HIGH : LOW);
     digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
     analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,

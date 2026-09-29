@@ -475,6 +475,14 @@ another's, and none is a run state machine.
   before the chain is armed. Without that check the run would arm into a stop it
   could only time out waiting for. Reason recorded in `DEVELOPMENT_LOG.md`
   (D11, D12); pinned by `test_near_zero_verifier` and `test/test_scenario/`.
+  The dwell itself is credited only across updates the caller actually made: two
+  stamps do not say whether the loop ran in between, so a gap wider than the
+  configured `NearZeroConfig::maxUpdateGapMs` restarts the interval and reports
+  `NearZeroStatus::UpdateGapExceeded` instead of being credited as continued
+  evidence. That limit is a `Sourced` value like the threshold and the dwell, and
+  its measured source is the maximum control-loop stall H0W records - so a stall
+  cannot silently earn the interval a stop is verified over. Reason recorded in
+  `DEVELOPMENT_LOG.md` D19; pinned by `test_near_zero_verifier`.
 - **The two effort ceilings must be equal.**
   `VelocityControllerConfig::maxEffortPermille` is derived from
   `SafetyLimits::maxEffortPermille`, and `ev::effortCeilingsAgree()` is the
@@ -764,23 +772,45 @@ is the implementation of the wiring obligations sections 12-14 recorded
   section is about coherence between fields, not about tearing.
 - **Raw inputs stay raw, and an unverified input is not invented into a fault.**
   The battery, current, nFAULT and trigger inputs are sampled as ADC counts and
-  logic levels and are consumed as such (section 12). Until the wiring and the
-  driver's fault output are measured (`VERIFIED_STATE.md` #1, #2), a raw level
-  does not become a `FaultCode`: it is reported and counted, and the reason it is
-  not interpreted is recorded (`DEVELOPMENT_LOG.md` D13).
-- **The watchdog has one checkpoint and one centralized setting.** Only a
-  main-loop pass that finished - and whose control tick, if one ran, completed in
-  the frozen stage order - may refresh the watchdog. The refresh lives in exactly
-  one place, `src/WatchdogCheckpoint.h`, and is called from exactly one place, the
-  firmware's loop, after the pass returns. Nothing in the control tick, in a
-  module, in the safety boundary, in a telemetry hook or in an interrupt may
-  refresh it: a component that could refresh the watchdog by itself could hide
-  its own hang. A pass that is not refreshable counts as a withheld refresh, so
-  firmware whose control cycle ran wrongly stops feeding the watchdog and the
-  watchdog's reset then returns the vehicle to the de-energized state it boots
-  into. Production enablement is one obvious centralized constant and it is
-  **off**: no watchdog behavior has been observed on this target, and compiling
-  and linking the adapter is not validation of any of it.
+  logic levels and are consumed as such (section 12). The driver's fault output is
+  interpreted by one module, `lib/evcore/src/DriverFault.h`, from a configured
+  polarity: while that polarity is `Unverified` - the shipped state - no level
+  becomes a `FaultCode` and the raw level is reported and counted instead. The
+  refusal is a configuration fact with a name, not a gap: the
+  `DriverFaultPolarityVerified` check keeps the vehicle unarmable until H1B has
+  measured the line, so an armed vehicle can never be one whose fault input nobody
+  reads. Reason recorded in `DEVELOPMENT_LOG.md` D13 and D19.
+- **The watchdog has one checkpoint, one centralized setting, and one open.**
+  Only a main-loop pass that finished - and whose control tick, if one ran,
+  completed in the frozen stage order - may refresh the watchdog. The refresh
+  lives in exactly one place, `src/WatchdogCheckpoint.h`, and is called from
+  exactly one place, the firmware's loop, after the pass returns. Nothing in the
+  control tick, in a module, in the safety boundary, in a telemetry hook or in an
+  interrupt may refresh it: a component that could refresh the watchdog by itself
+  could hide its own hang. A pass that is not refreshable counts as a withheld
+  refresh, so firmware whose control cycle ran wrongly stops feeding the watchdog
+  and the watchdog's reset then returns the vehicle to the de-energized state it
+  boots into.
+  The timer is opened by a separate, deliberate call at the **end** of
+  initialization, after the one bounded boot wait, so the interval between the
+  request and the first refresh - which happens at the end of the first completed
+  pass - is small and bounded. Opening it at the start of `setup()` would let a
+  timeout chosen from steady-state refresh intervals alone expire during boot,
+  which is a board that never comes up rather than a safe stop. The two gaps a
+  timeout must cover, and the margin, are one pure rule
+  (`lib/evcore/src/WatchdogPlan.h`), and the requested constants are asserted
+  against it at compile time, so enablement cannot be flipped with a timeout that
+  cannot survive boot. The measured boot gap
+  (`WatchdogCheckpoint::timeToFirstRefreshMs()`) is reported to the bench for
+  H0W's timeout choice.
+  Enablement is one centralized expression and it is **off**: no watchdog behavior
+  has been observed on this target, and compiling and linking the adapter is not
+  validation of any of it. Its value comes from a build define that only the
+  bench environment for H0W sets (`env:bench-watchdog`), rather than from a literal
+  in a header both images compile - enabling the watchdog for a bench
+  qualification must not be able to change the vehicle build's decision, and
+  `src/main.cpp` refuses to compile if the production image ever receives the
+  define.
 - **The configuration's provenance is the arming refusal.** The vehicle layer's
   configuration (`src/VehicleConfig.h`) is where cadence policy, provisional
   placeholders and rule-derived values are kept separate, and
@@ -790,6 +820,12 @@ is the implementation of the wiring obligations sections 12-14 recorded
   single boolean may summarize them: a refused arm must be attributable to the
   fact that failed. The run's final stop dwell is the rule-derived Complete Stop
   (rule 8.p); every other value is `Provisional` and stays visible as such.
+  Two checks are about provenance rather than arithmetic. `MeasuredValuesCiteEvidence`
+  is false for as long as a promoted (non-placeholder) value names no evidence, so
+  the edit that lets a value authorize motion is also the edit that has to point at
+  the measurement (`Sourced::citesEvidence()`). `DriverFaultPolarityVerified` is
+  false until the driver's fault line has been measured - see the raw-inputs
+  contract above.
 - **The operator interface is a consumer of the same chain, and only a consumer.**
   `serviceSerial()` runs in the loop's low-priority section, after the watchdog
   checkpoint: it moves staged bytes out, reads received bytes, applies at most one
@@ -801,6 +837,15 @@ is the implementation of the wiring obligations sections 12-14 recorded
   `ev::resetMotionChainForNewRun()`). No command commands an effort, a mode or a
   direction, and none starts a run: the start trigger is a physical input. Section
   16 fixes the contract.
+  The one exception is a separate image, not a command: bench instrument B2
+  (`src/bench/`, `lib/evcore/src/BenchDrive.h`) can apply a bounded, latched effort
+  for the bring-up protocols that must measure what the vehicle does before a run
+  exists. It is excluded from the production image by the build graph, it may write
+  the driver only where `ev::benchApplyVerdict()` permits (no latched fault, no
+  violated tick order, no armed run, no run under way - and *not* merely
+  `!armed`), its output reaches the driver through a separate adapter call that
+  takes a type no production module can construct, and it expires on its own. See
+  section 17 and `docs/bringup/README.md`.
 - **The run boundary is the operator's deliberate decision, and the checks are what
   refuse it.** `announce` consumes the held configuration through the single
   rule-validation entry point, and `arm` reads the configuration-build report
@@ -902,3 +947,76 @@ the operator's, and `disarm` is the command for that.
   is a schema change (section 10), not a refactor. No command for a diagnostic
   motion mode exists and none is implied: `AGENTS.md` section 17 lists such modes
   as examples, and the ones with any control authority would be a new contract.
+
+## 17. Bench instrumentation contract
+
+Some bring-up measurements need the firmware to report or do something the
+vehicle image deliberately cannot: a raw tick count, a raw input level, the loop
+and watchdog counters, a bounded way to command effort outside a run, and a way to
+stall the loop on purpose (H0W Step 3). Those are bench instruments **B1-B4** plus
+the deliberate-hang hook (`docs/bringup/README.md`), and they are a separate build,
+not a mode of the vehicle image.
+
+- **Exclusion is a property of the build graph, not of a macro.** The bench tree
+  lives in `src/bench/`, and the two environments partition it: `env:nano_r4`
+  compiles `src/` without `bench/`, and `env:bench` compiles `src/` without the
+  vehicle image's `main.cpp` and adds the bench entry point. A source file the
+  production environment does not compile cannot run, and a macro that is merely
+  absent cannot be relied on the same way. The partition is verifiable without
+  running anything: a symbol search over the two images finds the bench console's
+  symbols in the bench image and none in the vehicle image.
+- **The line grammar is pure and host-tested too.** Splitting a line, recognizing
+  the verb and parsing `bench drive`'s arguments are
+  `lib/evcore/src/BenchCommand.h` (`test_bench_command`), not the console: the
+  console owns the port, the dispatch and the text, and the parts that can be wrong
+  without a bench session noticing are the parts that can be tested without one. A
+  line with more tokens than the grammar allows is refused rather than acted on in
+  part.
+- **The three readouts are read-only.** B1 reports the watchdog checkpoint's
+  counters, the measured boot-to-first-refresh gap and the scheduler's cadence
+  numbers (which H0 and H0W record); B3 reports the decoder's raw signed ticks and
+  its progress counters (H2, H3, H4, H5); B4 reports the raw trigger and fault
+  levels and the two ADC counts (H1B). None of them writes anything, and none is a
+  control input.
+- **The one motion-capable instrument is bounded, latched, armed and limited, and
+  it is `lib/evcore` pure logic.** `ev::BenchDrive`
+  (`lib/evcore/src/BenchDrive.h`) decides what may be applied: a command does
+  nothing before a deliberate arm, every command carries its own bounded duration
+  and expires on its own, effort, duration and direction are checked against hard
+  ceilings before anything is applied, a per-arm command budget bounds a confused
+  console, and an operator abort or an encoder that stops changing while driving
+  de-energizes the motor and latches until a deliberate reset. All of it is host
+  tested (`test_bench_drive`).
+- **It cannot act while anything outranks it, and the test is not `!armed`.**
+  `ev::benchApplyVerdict()` (`lib/evcore/src/MotorArbitration.h`, pure and
+  host-tested by `test_bench_arbitration`) is asked once per pass, **before** the
+  control tick, and it refuses the bench when a fault is latched, when the
+  control-tick order guard has recorded a violation, when a run is armed, or when
+  a run is under way. It deliberately does **not** ask `!armed`: a latched fault
+  clears arming (`SafetyAuthority::authorize()`) and a violated tick order calls
+  the driver's fail-safe write and then disarms, so the two states that most need
+  the motor off are exactly the states `!armed` cannot distinguish from a free
+  motor. A refusal aborts the instrument (latched), rather than disarming it.
+- **One writer per pass.** While the verdict permits it, the bench takes ownership
+  of the three motor pins before the tick (`motorDriver::setMotorPinsOwned()`), so
+  the tick's own write yields and the pins see one writer's intent rather than a
+  sleep/wake edge once per control period - a 50 Hz `nSLEEP` toggle is a pin state
+  neither writer intends, and no measurement bounds what the driver does with it.
+  The bench's write happens after the tick; ownership is released on the next pass,
+  or immediately if the pass's tick ran out of order, so the tick is still the
+  backstop: if the bench layer stops running, the next tick de-energizes the
+  driver, and a fail-safe write is never overwritten by a bench command. It writes
+  through a separate adapter entry point that takes a type no production module can
+  construct.
+- **The physical kill switch remains the primary stop.** No bench instrument
+  replaces the motor-supply disconnect, and no protocol may use one with the
+  switch out of reach.
+- **A bench instrument is not evidence.** Bench output is not a vehicle behavior,
+  and nothing it reports may be recorded in `VERIFIED_STATE.md` until the protocol
+  that uses it has run and its raw capture is committed
+  (`docs/bringup/README.md`).
+- **Not decided here.** The bench line format (`BENCH,...`) is not the telemetry
+  schema and is not versioned with it: it is read by a person during a bench
+  session, and the analyzer treats a line that is not a telemetry record as an
+  ignored line. No bench verb is a control input, and adding one that could change
+  run behavior would be a new contract, not a new verb.

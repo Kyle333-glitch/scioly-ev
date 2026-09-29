@@ -52,17 +52,30 @@ ev::Sourced<double> provisional(double value) {
     return ev::Sourced<double>(value, ev::ValueSource::Provisional);
 }
 
+// Fixture update-gap limit for the stop verifiers. Wide enough that these tests
+// stay about phases and bounds; the gap rule has its own tests in
+// `test_near_zero_verifier`.
+inline ev::Sourced<uint32_t> fixtureStopGap() {
+    return ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured);
+}
+
+// The stop-verification policy the fixtures use: threshold, dwell and the fixture
+// gap limit, so a new configuration field cannot be forgotten at one call site.
+ev::NearZeroConfig stopConfig(ev::Sourced<double> threshold, ev::Sourced<double> dwell) {
+    return ev::NearZeroConfig(threshold, dwell, fixtureStopGap());
+}
+
 // Fixture policy: a 0.2 s stop verification, a 3 s reversal bound, and phase
 // bounds long enough that only the test that starves a phase sees them.
 ev::RunPhaseConfig phaseConfig(double optionalDelayS) {
     return ev::RunPhaseConfig(measured(optionalDelayS), measured(5.0), measured(1.0),
                               measured(5.0), measured(5.0), measured(5.0), measured(5.0),
                               measured(1.0),
-                              ev::NearZeroConfig(measured(0.05), measured(0.2)));
+                              stopConfig(measured(0.05), measured(0.2)));
 }
 
 ev::ReversalConfig reversalConfig() {
-    return ev::ReversalConfig(ev::NearZeroConfig(measured(0.05), measured(0.2)), measured(3.0));
+    return ev::ReversalConfig(stopConfig(measured(0.05), measured(0.2)), measured(3.0));
 }
 
 // A rule-valid announced run: Regional level, 5.00 m, 10.0 s, 1.00 m bottle line,
@@ -382,7 +395,7 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     // This machine's own bounds are placeholders, so it may not sequence a run.
     const ev::RunPhaseConfig placeholderDelay = ev::RunPhaseConfig(
         provisional(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), ev::NearZeroConfig(measured(0.05), measured(0.2)));
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)));
     Harness harness(placeholderDelay, reversalConfig(), 1000U);
     TEST_ASSERT_FALSE(harness.machine.configUsable());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
@@ -393,7 +406,7 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     // The reversal policy is part of the same machine, and a placeholder there is
     // just as unacceptable.
     const ev::ReversalConfig placeholderReversal(
-        ev::NearZeroConfig(provisional(0.05), measured(0.2)), measured(3.0));
+        stopConfig(provisional(0.05), measured(0.2)), measured(3.0));
     Harness reversalHarness(phaseConfig(0.0), placeholderReversal, 1000U);
     TEST_ASSERT_FALSE(reversalHarness.machine.configUsable());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
@@ -605,7 +618,7 @@ void test_a_bound_below_a_millisecond_expires_rather_than_never(void) {
     const ev::RunPhaseConfig shortBounds =
         ev::RunPhaseConfig(measured(0.0), measured(0.0005), measured(1.0), measured(5.0),
                            measured(5.0), measured(5.0), measured(5.0), measured(1.0),
-                           ev::NearZeroConfig(measured(0.05), measured(0.2)));
+                           stopConfig(measured(0.05), measured(0.2)));
     Harness harness(shortBounds, reversalConfig(), 1000U);
     announceValidRun(harness);
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));

@@ -178,17 +178,23 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // This cycle's health: the configuration-build verdicts the boundary's
     // readiness comes from, and any fault this layer can name.
     //
-    // The evaluated fault is `None`, and that is a statement about the fault
-    // identities the project has, not about the vehicle being healthy: a raw
-    // nFAULT level has no identity to map onto yet, because the pin, its polarity
-    // and the driver's truth table are all UNVERIFIED (`VERIFIED_STATE.md` #1,
-    // #2). The level is sampled, counted and reported instead of being invented
-    // into a fault. Nothing rides on that today: no drive can be authorized while
-    // the configuration is provisional, so an uninterpreted input cannot cause
-    // motion. The pending bring-up work is recorded in `DEVELOPMENT_LOG.md`.
+    // The driver fault line is interpreted by `ev::observedDriverFault()`, which
+    // refuses to claim a fault while the line's polarity is unverified
+    // (`VERIFIED_STATE.md` #1, #2). With the shipped configuration that is what
+    // happens: the level is sampled, counted and reported as a raw level, and no
+    // fault is invented from it. The refusal is not a gap in the tick - it is the
+    // one honest answer available, because an assumed polarity would either turn a
+    // healthy driver into a latched fault or turn a real fault into a log entry
+    // nobody acts on. Once H1B has measured the polarity, promoting
+    // `kPlannedDriverFaultPolarity` gives this line an identity, and the authority
+    // latches it exactly as it latches any other fault. The
+    // `DriverFaultPolarityVerified` check is what keeps the vehicle unarmable until
+    // then, so "the fault input is invisible" can never be the state of an armed
+    // vehicle.
     orderGuard_.enter(ControlTickStage::FaultEvaluation);
     configurationChecks_ = vehicleConfig::configurationBuildChecks(announcedConfigValid_, run_);
-    const ev::FaultCode observedFault = ev::FaultCode::None;
+    const ev::FaultCode observedFault =
+        ev::observedDriverFault(rawInputs_.driverFaultBarLow, vehicleConfig::plannedDriverFaultPolarity());
 
     // ---------------------------------------------------------------- stage 5
     // The run policy, fed only this cycle's evidence. The distance it consumes is
@@ -320,6 +326,7 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.driverFaultBarLow = rawInputs_.driverFaultBarLow;
     snapshot.startTriggerActive = rawInputs_.startTriggerActive;
     snapshot.driverFaultLowCycles = cyclesWithDriverFaultLow_;
+    snapshot.driverFaultPolarityVerified = configurationChecks_.driverFaultPolarityVerified;
     snapshot.phase = status.phase;
     snapshot.runCommand = status.intention.command;
     snapshot.intentionCurrent = intentionCurrent;
@@ -735,6 +742,10 @@ void VehicleRuntime::applyArm() {
     // before an announcement (its geometry is zero), so this is the first reading
     // that can serve as an origin.
     runOriginTicks_ = encoderInput::snapshotTicks().ticks;
+    // The driver-fault-low cycle counter is evidence about this run, not
+    // since-boot: arming is where a run starts, so it starts counting again here
+    // (H1B Part 3 and H9 read it, and a since-boot total would mix sessions).
+    cyclesWithDriverFaultLow_ = 0U;
     respondLine(ev::formatOperatorAck(ev::OperatorCommandId::Arm,
                                      serialTransport::port().workingBuffer(),
                                      ev::kSerialLineCapacity));
@@ -759,6 +770,7 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     axisGeometry_ = ev::RunAxisGeometry(0.0, 0.0, 0.0);
     legForward_ = true;
     runOriginTicks_ = encoderInput::snapshotTicks().ticks;
+    cyclesWithDriverFaultLow_ = 0U;
 
     const char* clearedFault = report.clearedFault == ev::FaultCode::None
                                    ? ev::kTelemetryMissingField
@@ -826,8 +838,7 @@ ev::OperatorSystemState VehicleRuntime::systemState() const {
     state.armed = authority_.isArmed();
     // Either fault of record blocks everything but `reset`: the run policy's and
     // the authority's are separate latches, and `reset` clears both.
-    state.faultLatched = run_.faultCode() != ev::FaultCode::None ||
-                         authority_.latchedFault().code != ev::FaultCode::None;
+    state.faultLatched = faultLatched();
     state.checks = configurationChecks_;
     return state;
 }

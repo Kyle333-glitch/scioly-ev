@@ -5,7 +5,8 @@
 **Answers:** the feed-forward effort per velocity (#8, first half), and a PI gain
 set that meets a pre-registered closed-loop criterion on recorded data (#8,
 second half).
-**Bench instrumentation required:** B2 for the repeatable command profile.
+**Bench instrumentation required:** B2 (`bench drive`) for the repeatable command
+profile.
 
 **No gain value is prescribed here, and none may be adopted from this document.**
 The placeholder gains in `src/VehicleConfig.h` are not starting guesses to keep;

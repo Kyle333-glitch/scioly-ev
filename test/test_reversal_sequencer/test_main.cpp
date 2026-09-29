@@ -46,10 +46,16 @@ ev::Sourced<double> provisional(double value) {
     return ev::Sourced<double>(value, ev::ValueSource::Provisional);
 }
 
+// The stop-verification policy the fixtures use: threshold, dwell and a fixture
+// update-gap limit wide enough that these tests stay about the reversal sequence.
+ev::NearZeroConfig stopConfig(ev::Sourced<double> threshold, ev::Sourced<double> dwell) {
+    return ev::NearZeroConfig(threshold, dwell,
+                              ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured));
+}
+
 // Fixture policy: within 0.05 m/s held for 0.2 s, whole sequence bounded at 3 s.
 ev::ReversalConfig fixtureConfig() {
-    return ev::ReversalConfig(ev::NearZeroConfig(measured(0.05), measured(0.2)),
-                              measured(3.0));
+    return ev::ReversalConfig(stopConfig(measured(0.05), measured(0.2)), measured(3.0));
 }
 
 // A fresh, usable measurement of a vehicle still moving.
@@ -110,23 +116,23 @@ void test_config_refuses_placeholders_and_degenerate_values(void) {
     TEST_ASSERT_TRUE(ev::validateReversalConfig(fixtureConfig()).ok);
 
     const ev::ReversalConfig provisionalVerification(
-        ev::NearZeroConfig(provisional(0.05), measured(0.2)), measured(3.0));
+        stopConfig(provisional(0.05), measured(0.2)), measured(3.0));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalConfigError::VerificationNotUsable),
                           static_cast<int>(
                               ev::validateReversalConfig(provisionalVerification).error));
 
     const ev::ReversalConfig provisionalTimeout(
-        ev::NearZeroConfig(measured(0.05), measured(0.2)), provisional(3.0));
+        stopConfig(measured(0.05), measured(0.2)), provisional(3.0));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalConfigError::TimeoutNotMeasured),
                           static_cast<int>(ev::validateReversalConfig(provisionalTimeout).error));
 
-    const ev::ReversalConfig zeroTimeout(ev::NearZeroConfig(measured(0.05), measured(0.2)),
+    const ev::ReversalConfig zeroTimeout(stopConfig(measured(0.05), measured(0.2)),
                                          measured(0.0));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalConfigError::NonPositiveTimeout),
                           static_cast<int>(ev::validateReversalConfig(zeroTimeout).error));
 
     const double infinity = std::numeric_limits<double>::infinity();
-    const ev::ReversalConfig infiniteTimeout(ev::NearZeroConfig(measured(0.05), measured(0.2)),
+    const ev::ReversalConfig infiniteTimeout(stopConfig(measured(0.05), measured(0.2)),
                                              measured(infinity));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalConfigError::NonFiniteTimeout),
                           static_cast<int>(ev::validateReversalConfig(infiniteTimeout).error));
@@ -165,7 +171,7 @@ void test_a_reversal_to_the_same_direction_is_not_sequenced(void) {
 
 void test_an_unusable_configuration_refuses_immediately_and_latches(void) {
     ev::ReversalSequencer sequencer(ev::ReversalConfig(
-        ev::NearZeroConfig(provisional(0.05), measured(0.2)), measured(3.0)));
+        stopConfig(provisional(0.05), measured(0.2)), measured(3.0)));
     TEST_ASSERT_FALSE(sequencer.configUsable());
 
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalBeginStatus::ConfigIsNotUsable),
@@ -456,7 +462,7 @@ void test_a_refusal_keeps_reporting_the_time_it_was_given(void) {
     // A refusal raised before any sequence began reports no elapsed time,
     // because there is none to report.
     ev::ReversalSequencer unusable(
-        ev::ReversalConfig(ev::NearZeroConfig(provisional(0.05), measured(0.2)), measured(3.0)));
+        ev::ReversalConfig(stopConfig(provisional(0.05), measured(0.2)), measured(3.0)));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalBeginStatus::ConfigIsNotUsable),
                           static_cast<int>(unusable.beginReversal(
                               ev::MotionDirection::Forward, ev::MotionDirection::Reverse, 1000U)));

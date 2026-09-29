@@ -4,7 +4,7 @@
 **Order:** after H2 and H3.
 **Answers:** what ground distance one encoder tick corresponds to (#6); how much
 the motor encoder disagrees with hand-rolled travel (#10, first evidence).
-**Bench instrumentation required:** B3 (raw signed tick readout).
+**Bench instrumentation required:** B3 (`bench ticks`, raw signed tick readout).
 
 This protocol deliberately separates two measurements that are easy to conflate:
 

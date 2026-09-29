@@ -9,14 +9,32 @@ on the surface, travelling under the real run path.
 the vehicle stops at a target distance; whether the reversal sequence actually
 stops before reversing; and whether the unloaded H6 gains still track once the
 vehicle is carrying its own mass.
-**Bench instrumentation required:** B2 for the bench characterization in parts
-A0, B and L; the biddable run path for part A and the end-to-end accuracy check.
+**Bench instrumentation required:** B2 (`bench drive`, `bench stop`, `bench reset`)
+for the bench characterization in parts A0, B and L; the run path itself for part A
+and the end-to-end accuracy check.
 
 ## Prerequisites
 
 - H4 passed (measured rollout) and H6 passed (tuned, unloaded). If H6's gains
   were tuned unloaded, expect the loaded response to differ - measure it (part
   L), do not assume it.
+- **H1A bench test 3 recorded, and the `Brake` question answered.** The run's
+  deliberate stop (`RunMotionCommand::BrakeForward`/`BrakeReverse`) is
+  `MotorMode::Brake`, whose planned pin combination is `nSLEEP` high with `PH` and
+  `EN` low - and whether that is a shorted bridge (braking) or a high-Z output
+  (coasting) is **unmeasured** (`docs/hardware/motor-driver-drv8874.md`, H1A test
+  3). Until that row is recorded and the plan updated, `Brake` **must not be
+  credited as a hold**: do not pre-assume this protocol's stop dwell slows the
+  vehicle, do not assume `FaultStopPolicy::Brake` stops it, and treat a
+  stop-verification dwell that "passed" as evidence that the *verifier* ran, not
+  that the vehicle was held. If the measurement says high-Z, this protocol's
+  braking numbers are measuring a coast and the plan needs a distinct brake level
+  (or a different stop policy) before they mean what their names say.
+- The stop-verification dwell's credibility is bounded by the measured control-loop
+  stall, not by the timeout: `kPlannedMaxDwellGapMs` and the near-zero verifier's
+  `maxUpdateGapMs` are `Provisional` until H0W records the maximum stall (see
+  `P-H0W-watchdog-qualification.md`). A dwell credited across an unmeasured stall
+  is not evidence.
 - A straight course with a marked start, target point and a **clear runout**
   beyond the target; no person in the path.
 - Tape and stopwatch, or a measured course with position marks; record the

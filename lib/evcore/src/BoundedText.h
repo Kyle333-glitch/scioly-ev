@@ -210,9 +210,15 @@ inline uint16_t finishBoundedLine(const BoundedText& text, char* buffer) {
 // The longest line either consumer may produce, in characters, excluding the
 // terminator, so the transport's one buffer holds `kSerialLineBufferBytes`
 // bytes. The bound sits above the worst case each module derives from its own
-// tables - 418 characters for a telemetry sample, 384 for the full
-// configuration-check report - with room to spare, so a table entry that grows
-// has to grow a long way before a line stops fitting.
+// tables - 418 characters for a telemetry sample, 443 for the full
+// configuration-check report - so a table entry that grows has to grow a long
+// way before a line stops fitting.
+//
+// The check report is the tight one now, and it is tight for a structural
+// reason rather than an accident: the report has one field per check, the
+// failure mask is a `uint16_t` and holds exactly sixteen, and the check list is
+// full. The next check added needs a wider mask *and* a wider line bound, and
+// updating this comment is the cheapest place to notice that.
 constexpr uint16_t kSerialLineCapacity = 448U;
 constexpr uint16_t kSerialLineBufferBytes = kSerialLineCapacity + 1U;
 

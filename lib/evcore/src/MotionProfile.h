@@ -438,7 +438,10 @@ struct MotionProfileInputs {
     double currentTargetVelocityMps;
 
     // Elapsed time since the previous call, milliseconds. 0 means no time
-    // passed and the target is held unchanged.
+    // passed and the target is held unchanged, with one exception
+    // (`TimeDidNotAdvance`): when the requested direction contradicts the
+    // current target's sign, the hold collapses to exactly zero instead of
+    // handing back a target in the direction the run has just left.
     uint32_t dtMs;
 };
 
@@ -451,7 +454,7 @@ enum class MotionProfileStatus : uint8_t {
     LimitsAreNotUsable,     // not Measured, or malformed limits: no target is shaped
     InvalidDistance,        // non-finite or negative remaining distance
     InvalidTarget,          // non-finite current target
-    TimeDidNotAdvance,      // dtMs == 0: the previous target is held exactly
+    TimeDidNotAdvance,      // dtMs == 0: the previous target is held, or dropped to zero when the requested direction contradicts its sign
 };
 
 // Whether the target magnitude is rising, falling or unchanged this cycle.
@@ -624,13 +627,22 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
         // ceilings are still reported so the log shows what the geometry says.
         // With no elapsed time the rate brackets collapse onto the current
         // magnitude, which is exactly why the hold is the only legal answer.
-        return MotionProfileCommand{inputs.currentTargetVelocityMps,
+        //
+        // The one exception is a requested direction that contradicts the
+        // target's own sign: holding that value would hand the caller a fully
+        // signed target in the direction the run has just stopped travelling in,
+        // which is the exact step the one-way reversal street exists to forbid.
+        // The dt > 0 path refuses it through `directionChange`; this branch is
+        // the one input combination that guard never sees, so the same refusal
+        // has to live here. Zero is the value that street converges to anyway,
+        // and a zero target asks for no powered effort.
+        const bool directionChange = currentSign != 0 && currentSign != requestedSign;
+        const double heldMagnitudeMps = directionChange ? 0.0 : currentMagnitudeMps;
+        return MotionProfileCommand{directionChange ? 0.0 : inputs.currentTargetVelocityMps,
                                     MotionProfileStatus::TimeDidNotAdvance,
-                                    profilePhaseForMagnitude(currentMagnitudeMps,
-                                                             currentMagnitudeMps),
+                                    profilePhaseForMagnitude(heldMagnitudeMps, currentMagnitudeMps),
                                     MotionProfileLimit::None, cruiseCeilingMps,
-                                    cappedTaperCeilingMps, currentMagnitudeMps,
-                                    currentMagnitudeMps};
+                                    cappedTaperCeilingMps, heldMagnitudeMps, heldMagnitudeMps};
     }
 
     const double dtS = static_cast<double>(inputs.dtMs) / 1000.0;

@@ -2988,3 +2988,596 @@ P-H1A and P-H1B. The first four protocols need no motion and can run as soon as
 a board exists; H3 is the first powered step and every direction, speed and
 distance result depends on it.
 
+---
+
+## D17 - 2026-09-27 - P9A - Pre-hardware readiness validation
+
+**Entry gate**
+
+P0-P8 are implemented and reconciled (D0-D16). No vehicle hardware is available
+and none was used. Nothing was committed.
+
+**The question this stage answers**
+
+Is the repository waiting on hardware, or on unfinished deterministic software?
+It is waiting on hardware. Every check that can be run without a board passes
+from a fresh build, and the only outstanding items are the physical measurements
+`VERIFIED_STATE.md` already lists plus the bench-only instruments D16 named.
+
+**What was run (all from the repository root, no hardware)**
+
+- `pio run -t clean` then `pio run` (nano_r4) - SUCCESS, RAM **17.8%**
+  (5848 / 32768 bytes), Flash **24.8%** (65028 / 262144 bytes), and **no
+  compiler warning or error** anywhere in the clean build at the project's
+  `-Wall -Wextra`. The figures are identical to D15/D16, which is the expected
+  result: this stage changed no firmware source.
+- `pio test -e native` - **456 test cases, 456 succeeded** (unchanged from D14).
+  The whole-run and fault harness is part of it: `test_scenario` drives the
+  nominal run through the real chain to `Done`, replays that trace
+  byte-identically, latches every fault identity in every phase, exercises the
+  stale-odometry / stale-stop-evidence / stalled-clock / rewound-clock cases,
+  a mid-run disarm, an illegal direct reverse, and a reset followed by a second
+  run; `test_serial_independence` pins that a stalled or abusing host cannot
+  change what the chain decides.
+- ARM cross-check over the pure core: `arm-none-eabi-g++ -std=gnu++11 -Wall
+  -Wextra -fsyntax-only` on every `lib/evcore/src/*.h` - no diagnostic except the
+  expected `#pragma once in main file` artifacts (one per header). The same
+  check D1 recorded.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -
+  **111 test cases, OK** (see the correction below).
+- `python tools/telemetry/analyze.py synth --force` then `analyze` over the
+  three committed fixtures - exit 0, report tree written, and the regenerated
+  fixtures are byte-identical to the committed ones (`git status` clean), so the
+  generator and the fixtures still agree.
+
+**Static audit of the tree**
+
+- **Debug leftovers:** no `TODO`/`FIXME`/`XXX`/`HACK`/`TEMP` marker in `src/`,
+  `lib/`, `test/` or `tools/`.
+- **Motor-output access:** a search for the three planned pin names matches only
+  their definitions (`src/PinMap.h`) and the single adapter (`src/MotorDriver.h`)
+  that writes them. No other file writes them, and `lib/` cannot - it contains no
+  Arduino header at all.
+- **Blocking:** no `delay()`/`delayMicroseconds` in `src/` or `lib/`. The only
+  unbounded-looking loops are the bounded 2000 ms boot wait in `setup()` (the one
+  initialization wait the nonblocking contract allows) and bounded per-pass
+  cursors; every serial write is gated on `availableForWrite()` in
+  `SerialTransport.h`, and `Serial` is referenced only from `main.cpp` and that
+  transport.
+- **Allocation:** no `new`/`malloc`/`calloc`/`realloc`/`std::vector`/`std::string`
+  in `src/` or `lib/`.
+- **Duplicated state:** `RunPhase` is the one phase vocabulary (`VehicleState.h`
+  keeps no second list); the run policy's fault latch and the authority's are two
+  deliberate latches, both read by `systemState()`; the watchdog's counters live
+  only in `WatchdogCheckpoint.h`.
+- **Provisional constants:** no `ValueSource::Measured` appears in `src/` or
+  `lib/` outside comments and the enum itself. Every calibration value, safety
+  limit, gain, threshold, dwell, timeout and polarity encoding in
+  `src/VehicleConfig.h` is `Provisional`; the one rule-derived value (the
+  Complete Stop dwell) is `RuleDerived`. No physical constant is spelled inline
+  in firmware logic.
+- **Watchdog:** `kWatchdogEnablementRequested` is `false`, the adapter compiles
+  and links, and nothing claims it starts, refreshes or resets. Correct and
+  unchanged pending H0W.
+- **Tool/protocol correspondence:** the schema mirror is not a free-standing
+  copy - `test_schema_mirror` re-reads the firmware's `TelemetryRecord.h`,
+  `TelemetryFormat.h`, `ConfigurationChecks.h` and `BoundedText.h` and fails on
+  any drift; and the `docs/bringup/` protocols use the interfaces the firmware
+  actually implements (`version`/`status`/`checks`/`config show`/`config set`/
+  `announce`/`arm`, `EVS1`/`EVE1`, `BOOT,`).
+
+**Correction to a recorded evidence figure (append-only, per this file's rule)**
+
+D15 recorded "91 test cases, 91 succeeded" for `tools/telemetry/` and D16
+carried that figure forward. The reproducible count is **111**:
+`test_schema_mirror` 9, `test_parse` 34, `test_cli` 25, `test_metrics` 23,
+`test_distribution` 20. D15's own breakdown (9 + 34 + 23 + 25 = 91) shows the
+omission: the `test_distribution` suite was never counted. Nothing failed and
+nothing is skipped; the tooling is correct and only the tally was wrong. D15 and
+D16 are left unedited, as this file requires.
+
+**What was fixed**
+
+No firmware or tooling defect was found, so no source was changed. The one
+concrete defect this stage found was the stale evidence tally above, corrected
+by recording it here rather than by rewriting D15/D16; `README.md` now lists P9A
+as the current stage. No feature was added, no tuning value was chosen and no
+hardware status was promoted.
+
+**Not verified**
+
+Everything about the vehicle, and the bench paths the protocols need. No
+hardware was powered, `VERIFIED_STATE.md` #1-#12 all remain UNVERIFIED and no row
+was added or modified, and the watchdog's on-target behavior remains unobserved.
+A clean build, a passing host test and a passing analysis run prove logic and
+tooling only; they are never evidence about the vehicle.
+
+**Hard stop honored**
+
+The stage stops before the independent P9 audits, and no external model was used.
+
+**Pending physical work**
+
+Unchanged: build the bench instrumentation (B1-B4) several protocols require,
+then run the `docs/bringup/` protocols in order from P-H0. H3 remains the first
+powered step, and every direction, speed and distance result depends on it.
+
+---
+
+## D18 - 2026-09-27 - P9A audit fixes - One-way street on the zero-step path, and one owner for the refused estimate
+
+**Why**
+
+A follow-up audit of P9A (D17) returned two findings (F1, F2) and one recorded
+observation with no fix. F1 was a latent correctness hole in the distance-aware
+target shaper; F2 was a maintainability hazard in how the vehicle layer declares
+the absent-`VelocityEstimate` value. The observation concerned how much near-zero
+dwell can be credited across a control-loop stall. The scope was deliberately
+limited to those three: no behavior outside the shaper's zero-elapsed-time path
+changed, no safety contract moved, no hardware fact was invented, and nothing in
+`VERIFIED_STATE.md` was touched.
+
+**The findings and their fixes**
+
+1. **F1 - the `dtMs == 0` early return could hand back the previous direction.**
+   `ev::nextTargetVelocity()` holds the previous target when no time has passed,
+   and the one-way reversal street (decelerate to zero before the sign may
+   change) was enforced only on the `dt > 0` path. A caller that re-entered the
+   profile with a zero step after a requested direction change therefore received
+   a fully signed target of the old direction - the exact step the rate limits
+   exist to forbid, admitted through the one input combination the guard never
+   saw. It is not reachable from `ControlScheduler` today (a frozen clock makes
+   the tick not-due, and a rewound one is refused) and the vehicle layer's
+   `targetVelocityPointsAlongLeg()` gate would refuse the leaked sign anyway, but
+   it becomes reachable as soon as bench tooling hand-builds profile inputs. The
+   fix is the three-line guard the audit asked for: when the current target's
+   sign is non-zero and contradicts the requested sign, the hold collapses to
+   exactly `0.0` (`MotionProfileStatus::TimeDidNotAdvance` unchanged, the
+   ceilings still reported, and both rate brackets reported as the held
+   magnitude). Zero asks for no powered effort and is the value the reversal
+   street converges to anyway. The `MotionProfileInputs::dtMs` comment and the
+   `TimeDidNotAdvance` status comment now state the exception.
+2. **F2 - the zero-value shape of `VelocityEstimate` was spelled by hand.**
+   `VelocityEstimator.h` pins `Valid == 0` but left `WarmingUp` (value 6)
+   unpinned, and the vehicle layer's held members wrote the refusal shape out
+   field by field. A new field or a reordered enumerator would have compiled
+   cleanly and left a garbage-looking default estimate in the one place no test
+   inspects. The fix is the audit's alternative and the stronger of the two: the
+   shape now has one owner, `ev::refusedVelocityEstimate(status)`, which
+   `VelocityEstimator::refuse()` also uses, so the estimator and the held
+   defaults cannot drift apart. `WarmingUp == 6` is pinned by a `static_assert`
+   in `VelocityEstimator.h` (mirrored in `test_velocity_estimator`), so a
+   reorder fails the build. Both hand-written initializers in
+   `src/VehicleRuntime.h`, and the two mirrored copies in
+   `test/test_scenario/ScenarioHarness.h`, now call the factory.
+3. **The recorded observation (no fix, by design) - dwell credit across a
+   control-loop stall.** `NearZeroVerifier` credits a gap between two advancing
+   stamps as continuous near-zero evidence, because two stamps cannot say whether
+   the loop ran in between. That is bounded for a reversal (the sequence
+   evaluates its own timeout before each verification step), but the final stop
+   has no such owner, so the bound there is how long the control loop can stall.
+   This is not a defect in the frozen architecture - the documented owner of a
+   stalled loop is the command-timeout/watchdog path - so no code was changed.
+   Instead the missing number was made owed rather than assumed: the H0W protocol
+   now requires the **maximum control-loop stall** to be recorded per load
+   condition (Steps 2 and 5), with a section stating why it matters, and
+   `NearZeroVerifier.h` and the B1 instrumentation entry cross-reference it.
+   Until that measurement exists, the bound on dwell credited without
+   observation is an open fact and is recorded as one.
+
+**Evidence (software verification; no physical test is applicable)**
+
+- `pio test -e native` - **458 test cases, 458 succeeded** (was 456). The two new
+  cases are `test_no_elapsed_time_never_hands_back_the_previous_direction`
+  (`test_motion_profile`) and
+  `test_the_refused_estimate_shape_is_owned_in_one_place`
+  (`test_velocity_estimator`).
+- The F1 proving test was verified to **fail before the fix**: with the guard
+  temporarily removed, the case reported
+  `test_no_elapsed_time_never_hands_back_the_previous_direction: Expected TRUE
+  Was FALSE` and `test_motion_profile` ran 1 failed / 28 succeeded. The guard was
+  then restored and the target passes. The property sweep in `test_motion_profile`
+  now includes a `0U` step in its cross product, so "no direction flip inside one
+  step" is exercised on the zero-elapsed-time path too rather than only by the
+  one case.
+- `pio run` - nano_r4 **SUCCESS**, RAM **17.8%** (5848 / 32768 bytes), Flash
+  **24.8%** (65044 / 262144 bytes; +16 bytes from D17, from the guard and the
+  shared factory). No compiler warning or error at `-Wall -Wextra`.
+- ARM cross-check over the pure core: `arm-none-eabi-g++ -std=gnu++11 -Wall
+  -Wextra -fsyntax-only -Ilib/evcore/src` on every `lib/evcore/src/*.h` - no
+  diagnostic other than the expected `#pragma once in main file` artifacts, one
+  per header. This is what pins that the new `constexpr` factory compiles for the
+  target and not only for the host.
+- `git diff` reviewed: `MotionProfile.h`, `VelocityEstimator.h`,
+  `NearZeroVerifier.h`, `src/VehicleRuntime.h`,
+  `test/test_motion_profile/test_main.cpp`,
+  `test/test_velocity_estimator/test_main.cpp`,
+  `test/test_scenario/ScenarioHarness.h`,
+  `docs/bringup/P-H0W-watchdog-qualification.md`, `docs/bringup/README.md`,
+  `README.md` and this file. No unrelated cleanup, no reformatting, and no change
+  to a frozen safety contract or to `src/VehicleConfig.h`.
+
+**Not verified**
+
+Nothing about the vehicle. The F1 path is a pure-logic branch and the F2 change
+is compile-time plumbing; both are proven by the native suite and the ARM
+cross-check, which say nothing about whether a real vehicle follows the shaped
+target, brakes, or stops. Every `VERIFIED_STATE.md` row (#1-#12) stays UNVERIFIED
+and no row was added or modified. The two new tests are not evidence about
+hardware, and the maximum control-loop stall remains unmeasured - it is a
+required H0W output, not a number.
+
+**Next stage**
+
+Unchanged from D17: build the bench instrumentation (B1-B4) several protocols
+require, then run the `docs/bringup/` protocols in order from P-H0. H3 remains
+the first powered step, and every direction, speed and distance result depends on
+it.
+
+## D19 - 2026-09-28 - P9D - Adversarial first-power review fixes, and the bench instrumentation B1-B4
+
+**Why**
+
+P9D was an independent, read-only review of the live tree, aimed at the ways this
+software could make the first powered test unsafe, misleading or unnecessarily
+slow. It found one latent firmware defect, closed the two instrument gaps the
+bring-up protocols had been written around, and turned recorded-but-open
+observations into enforced configuration facts. Production behavior that reaches
+the driver was not loosened anywhere: the vehicle image still cannot arm, command
+an effort or start a run, and every new capability that can apply effort lives in
+a separate image that the production build does not compile.
+
+**The findings and their fixes**
+
+1. **M1 - the watchdog could expire during boot.** `WatchdogCheckpoint::begin()`
+   opened the timer inside `setup()`, and the only refresh point is the end of a
+   main-loop pass, so an enabled build's first refresh sat behind the rest of
+   `setup()` including the bounded (up to 2 s) wait for a serial host. With the
+   requested 250 ms placeholder that is a board that reset-loops before it ever
+   boots, and the rule H0W used - "exceed the worst interval between consecutive
+   refreshes" - cannot see it, because the first refresh has no predecessor. The
+   fix is chronological and then mechanical: `begin()` now only records the boot
+   instant, a separate `openIfRequested()` opens the timer at the **end** of
+   `setup()` after the bounded wait, the measured gap is exposed
+   (`timeToFirstRefreshMs()`) for H0W, and the rule itself became pure logic
+   (`lib/evcore/src/WatchdogPlan.h`) that the requested constants are asserted
+   against at compile time - a build that requests enablement with a timeout that
+   cannot cover both gaps no longer compiles. H0W's prerequisites, Step 1, Step 2
+   and Step 6 were updated to the new entry point, the boot-gap measurement and the
+   rule, and to require a build-graph and symbol check that the bench tree is
+   absent from the production image rather than a macro check.
+2. **M2/M3 - the instrumentation the protocols depend on did not exist.** H3 could
+   not run as written (its motion comes from B2), H0W had no B1 readout, H1B had no
+   raw input readout and H2/H3/H4/H5 had no raw tick readout. All four now exist:
+   `src/bench/BenchConsole.h` (the `bench` verb set and the readouts),
+   `src/bench/BenchMain.cpp` (the bench entry point, keeping the production boot
+   order and pass order), and `lib/evcore/src/BenchDrive.h` (the bench drive's
+   safety model as pure, host-tested logic). Exclusion is a property of the build
+   graph: `env:nano_r4` compiles `src/` without `bench/` and `env:bench` compiles
+   `src/` without the production `main.cpp`. B2's model: a deliberate arm, a
+   bounded duration that expires on its own, effort/duration/direction ceilings, a
+   per-arm command budget, a latched fault on an operator abort or on an encoder
+   that stops changing while driving, and no output at all while the production run
+   is armed. Its output is a type no production module can construct, it is written
+   through a separate adapter entry (`motorDriver::applyBench()`), and it is applied
+   after the tick - so the tick's own de-energized write is the backstop if the
+   bench layer stops running. A refusal that never energized anything (an
+   over-ceiling or zero command) is a named refusal and latches nothing, which keeps
+   "latched fault" meaning "something was applied and had to be aborted".
+3. **S1 - the driver's fault output was sampled and never interpreted.** It is now
+   interpreted by one pure module, `lib/evcore/src/DriverFault.h`, from a configured
+   polarity, and the shipped polarity is `Unverified`: no level becomes a
+   `FaultCode`, the raw level is still reported and counted, and the new
+   `DriverFaultPolarityVerified` configuration check keeps the vehicle unarmable
+   until H1B measures the line. Promoting the polarity gives the line the identity
+   `FaultCode::DriverFaultBar` (added to the fault vocabulary, mirrored in
+   `tools/telemetry/evtelemetry/schema.py`), which the authority latches exactly as
+   it latches any other fault.
+4. **S2 - the final stop's dwell could be credited across a loop stall.** The D18
+   observation is now enforced rather than owed: `NearZeroConfig` carries
+   `maxUpdateGapMs`, a gap wider than it restarts the observed interval and reports
+   `NearZeroStatus::UpdateGapExceeded` instead of being credited as continued
+   evidence, and the limit is a `Sourced` value whose measured source is the H0W
+   maximum control-loop stall. An unmeasured limit is refused by
+   `validateNearZeroConfig()`, so no stop can be verified until the stall has been
+   measured - the safe direction, and it fails loudly rather than silently
+   crediting.
+5. **S5 - a promoted value could authorize motion without naming its evidence.**
+   `Sourced` now carries an evidence pointer, `citesEvidence()` requires a
+   non-placeholder value to name one, and the new `MeasuredValuesCiteEvidence`
+   configuration-build check reports the verdict (it passes while everything is
+   provisional and bites on the first promotion that cites nothing).
+   `VERIFIED_STATE.md`'s promotion steps and `docs/bringup/README.md`'s record
+   procedure now require the citation.
+6. **S3/S4/S6 (documentation).** `kStopEvidenceMaxAgeMs` now states that its honest
+   value comes from the H5 trace and the H7 characterization, and why it is not
+   derived from the cadence. H3's provoked fault is now a **fixture** on the output
+   shaft rather than a hand on it, with the kill switch in reach, and H3 records the
+   bench ceilings in force before it starts. H0's host-not-reading load case
+   (already present) is now named as one of the loads the watchdog margin depends
+   on; H0W's Step 5 already covers it.
+
+**Evidence (software verification; no physical test applies or was performed)**
+
+- `pio test -e native` - **497 test cases, 497 succeeded** (was 458). The new
+  targets are `test_watchdog_plan` (9 cases: the qualification arithmetic,
+  including that a timeout covering only the refresh interval is refused),
+  `test_bench_drive` (15 cases: bounded expiry and its wraparound, the latched
+  abort, the encoder-stall fault, every limit refusal, the per-arm budget and the
+  output shape) and `test_bench_command` (13 cases: the tokenizer, verb
+  recognition and the `bench drive` argument grammar). `test_near_zero_verifier`
+  gained three gap cases and lost the case that pinned the old
+  credit-across-a-gap behavior, which is the behavior this stage deliberately
+  changed.
+- **Two defects the console's own tests caught, which is why the grammar moved
+  out of the console.** The first version parsed the tokens inside
+  `src/bench/BenchConsole.h`, where nothing host-side could reach it: it indexed
+  `tokens[1]` as the drive direction (it is the verb, `drive`), so every well-formed
+  `bench drive` would have been refused as a bad direction; and its
+  overflow check for an unsigned decimal was off by one digit, so `4294967296`
+  parsed as a wrapped `0`. Both are pure-logic bugs, both are now impossible to
+  ship unnoticed: the grammar is `lib/evcore/src/BenchCommand.h` and
+  `test_bench_command` pins the indexing, the exact token count, over-long lines
+  and the overflow boundary.
+- `pio run -e nano_r4` - **SUCCESS**, RAM **18.2%** (5948 / 32768 bytes), Flash
+  **25.2%** (66020 / 262144 bytes). `pio run -e bench` - **SUCCESS**, RAM **18.7%**
+  (6132 bytes), Flash **26.7%** (70016 bytes). No compiler warning or error at
+  `-Wall -Wextra` in either image. The vehicle image's size is unchanged by the
+  bench work, which is the point: `BenchCommand.h` and the console are not compiled
+  into it at all.
+- Bench exclusion, checked against the linked images rather than asserted:
+  `arm-none-eabi-nm` over `.pio/build/nano_r4/firmware.elf` matches **0** symbols
+  for `benchConsole|BenchDrive|BenchCommand|BenchTokens`, and over
+  `.pio/build/bench/firmware.elf` matches **24** (including
+  `evhw::benchConsole::healthLine`). The build graph is the guarantee; this is the
+  check that it holds, and the two numbers are the ones a later reader can re-run.
+- Static checks re-run: `grep -rn "WDT" src/` matches only
+  `src/WatchdogCheckpoint.h`; the three planned motor-pin names appear only in
+  `src/PinMap.h` (definitions) and `src/MotorDriver.h` (writes), with the bench tree
+  reaching them through `applyBench()`; `digitalWrite`/`analogWrite` appear in
+  `src/` only in `MotorDriver.h`, `main.cpp` and `bench/BenchMain.cpp`, the last for
+  the status LED.
+- ARM cross-check over the pure core: `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra
+  -fsyntax-only` on every `lib/evcore/src/*.h`, including the three new headers - no
+  diagnostic other than the expected `#pragma once in main file` artifacts, one per
+  header.
+- `python -m unittest discover` in `tools/telemetry` - **111 tests, OK**. The schema
+  mirror passes with the added fault name, the two added configuration checks in
+  their report order, and the widened check-report bound.
+- `git diff` reviewed. Files: `platformio.ini`; `src/main.cpp`,
+  `src/WatchdogCheckpoint.h`, `src/MotorDriver.h`, `src/SensorInputs.h`,
+  `src/VehicleConfig.h`, `src/VehicleRuntime.h`, `src/VehicleRuntime.cpp`;
+  `src/bench/BenchConsole.h`, `src/bench/BenchMain.cpp`;
+  `lib/evcore/src/WatchdogPlan.h`, `DriverFault.h`, `BenchDrive.h`,
+  `BenchCommand.h`, `Units.h`,
+  `ConfigurationChecks.h`, `NearZeroVerifier.h`, `MotorDriverPlan.h`,
+  `VehicleState.h`, `TelemetryRecord.h`, `OperatorResponse.h`, `BoundedText.h`;
+  `test/test_watchdog_plan/`, `test/test_bench_drive/`, `test/test_bench_command/`,
+  `test/test_near_zero_verifier/test_main.cpp`,
+  `test/test_operator_response/test_main.cpp`,
+  `test/test_competition_state/test_main.cpp`,
+  `test/test_motion_chain/test_main.cpp`,
+  `test/test_reversal_sequencer/test_main.cpp`,
+  `test/test_scenario/ScenarioHarness.h`, `test/test_scenario/test_main.cpp`;
+  `tools/telemetry/evtelemetry/schema.py`; `docs/bringup/` (the index, H0, H0W,
+  H1B, H2, H3, H4, H5, H6, H7, H9); `SOFTWARE_ARCHITECTURE.md` (sections 14, 15, 16
+  and a new section 17), `README.md`, `VERIFIED_STATE.md` and this file. No
+  unrelated cleanup and no reformatting.
+
+**Not verified**
+
+Everything about the vehicle. The bench readouts, the bench drive and every
+ceiling in it are **built and never run**: no instrument has been flashed, no
+command has been sent, no motor has been powered, and no watchdog behavior has
+been observed. The `env:bench` and compile-time-rule rows added to
+`VERIFIED_STATE.md` are build-and-source facts and say nothing about the board.
+Both watchdog placeholder numbers (the boot budget and the worst refresh interval)
+are still guesses, as is the near-zero gap limit they will inform; H0W replaces
+them with measurements and is now the only path to them. Every hardware row
+(#1-#12) stays UNVERIFIED, and the bench image's existence does not change that:
+it is a way to measure, not a measurement. In particular the review's own
+observation stands: the dwell-credit bound is now enforced, but its *value* is
+still an unmeasured placeholder, so a stop cannot be verified until H0W has run.
+
+**Next stage**
+
+Execute the protocols in `docs/bringup/` in order, starting with P-H0 against the
+vehicle image. H0W (bench image) follows, and its Step 6 is now the only place the
+watchdog timeout and the near-zero gap limit may be chosen from. H3 remains the
+first powered step and its Step 0 must pass before any powered command, in a bench
+build whose ceilings are recorded.
+## D20 - 2026-09-28 - P9D (second pass) - the bench/production composition: one writer, one arbitration, one hang hook, one environment
+
+**Why**
+
+A second independent review of the same post-D19 tree - targeting the newest,
+still-uncommitted layer, the seam between the bench instrument and the
+production chain - reported four MUST-FIX and five SHOULD-FIX items. Every one
+was checked against the live tree by symbol rather than by line number (the
+report predates the move of the bench grammar into `BenchCommand.h`, so its line
+numbers are approximate). Seven were real and are fixed here; two did not hold up
+as written and are recorded as such below. Production reach to the driver is not
+loosened anywhere: the production image still cannot arm, command an effort or
+start a run, and the new arbitration only ever *removes* the bench layer's access
+to the pins.
+
+**Validation of the report**
+
+Real, fixed here:
+
+- **MF-1 (the serious one).** Two writers commanded the motor pins in every bench
+  pass: the tick's stage 9 wrote the authority's de-energized command
+  (`nSLEEP` low) and, microseconds later, `applyOutput` wrote the bench command
+  (`nSLEEP` high + PH + duty), so a bench command put a sleep/wake edge on
+  `nSLEEP` once per 20 ms control period. Worse, the gate was
+  `instrument.output().isDriving() && !runtime.armed()`, and `!armed()` is true
+  precisely in the states that need the motor off - a latched fault clears arming
+  (`SafetyAuthority::authorize()`) and a violated tick order calls
+  `motorDriver::failSafe()` then disarms - so the bench could write a powered
+  command over a fail-safe write. `VehicleRuntime` had no way to express the
+  correct test.
+- **MF-2.** H0W Step 3 requires a deliberate hang, and no hook existed.
+- **MF-3.** Watchdog enablement was one literal in a header compiled by **both**
+  images, so enabling it for the H0W bench qualification would have silently
+  changed the vehicle build's decision too.
+- **MF-4, SF-1, SF-2, SF-4.** All four as described (details below).
+
+Not as written:
+
+- **SF-3's citation.** The claim that `src/PinMap.h:66` "records an unresolved
+  D9/D10 shared-timer conflict" is wrong: no such note exists anywhere in
+  `src/PinMap.h`. The underlying concern is real and is now documented there (a
+  core-wide `analogWriteResolution()` plus an unrecorded timer assignment means a
+  second PWM consumer can silently change the frequency at `EN`), but the fix is
+  new text, not a follow-through on text that was there.
+- **MF-4's premise needed a qualifier.** H3 already requires H1B to have passed,
+  and H1B is what promotes the polarity to `Measured` - so "the firmware ignores
+  the driver fault" is the state *before* that promotion, not the state H3 runs
+  in. What was genuinely missing is that H3 never told the operator how to tell
+  which state they are in, or that the firmware's fault response cannot be the
+  stop authority for the first overcurrent event either way. That is what was
+  added.
+- **The report's own retraction is correct and worth recording**: the 2000 ms
+  `while (!Serial)` wait does not race the watchdog, because `openIfRequested()`
+  runs after it (`src/main.cpp`). That ordering is D19's M1 fix and it holds.
+
+**The findings and their fixes**
+
+1. **MF-1/SF-4 - one writer per pass, and a host-tested arbitration that is not
+   `!armed`.** The decision was extracted into pure logic,
+   `lib/evcore/src/MotorArbitration.h`: `ev::benchApplyVerdict(benchDriving,
+   runArmed, faultLatched, runUnderway, orderViolationDetected)` refuses (with a
+   named reason, most severe first) on a latched fault, a violated tick order, a
+   run under way or an armed run, and permits a write only when the instrument is
+   driving and nothing outranks it. `VehicleRuntime` gained exactly the three
+   facts it could not previously express - `faultLatched()` (either latch; the
+   same fact `status` reports, now with one definition), `runUnderway()`
+   (`ev::isRunPhaseUnderway`) and `orderViolationDetected()` (the order guard's
+   since-boot violation/abandonment counters).
+   The single-writer half: `MotorDriver` gained a pins-ownership flag
+   (`motorPinsOwned()` / `setMotorPinsOwned()`, neutral names on purpose so the
+   vehicle image contains no bench-named symbol). The bench layer now decides
+   ownership **before** the tick (`benchConsole::beginPass()`) and writes **after**
+   it (`benchConsole::applyOutput()`), so a bench pass has exactly one writer and
+   the pins see one intent. `motorDriver::apply()` yields while the flag is set;
+   `failSafe()` deliberately does **not** yield, so a de-energize always reaches
+   the pins. `applyOutput()` also refuses to write when the pass's tick ran out of
+   order - it aborts the instrument instead - so a fail-safe write can never be
+   overwritten by a bench command in the same pass.
+   A refusal while driving now **aborts and latches** the instrument rather than
+   leaving it silently disarmed, so the bench cannot resume applying effort when
+   the blocking condition clears. `test_bench_arbitration` (9 tests) covers the
+   predicate, including the two regression cases the old gate got wrong (a
+   fault-latched vehicle and an order-violated tick are both `!armed` while the
+   motor is not free) and an exhaustive 32-combination invariant check.
+2. **MF-2 - the hang hook H0W Step 3 requires.**
+   `kDeliberateHangAfterPasses` in `src/bench/BenchMain.cpp`: a compile-time pass
+   count after which the loop hangs inside a pass, staging one
+   `BENCH,hang=1,image=bench,after_passes=<n>` line first. It is a constant and
+   **not** a console verb, deliberately - no serial input can hang the board - and
+   it lives in the bench tree, so the vehicle image cannot contain it. H0W's
+   instrumentation list, prerequisites and Step 3 now name it, and the protocol
+   states that the hook must never be set with the motor supply on, because B2's
+   bounded expiry is evaluated by the same loop.
+3. **MF-3 - enablement is per-environment, and production refuses the define.**
+   `kWatchdogEnablementRequested` is now
+   `EV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED != 0`, defaulted off in
+   `src/WatchdogCheckpoint.h`. The new `[env:bench-watchdog]` sets the define
+   (`pio run -e bench-watchdog`), so enabling the watchdog for H0W cannot touch
+   what `pio run` or `pio run -e bench` decides, and `src/main.cpp` carries a
+   `static_assert` that refuses to compile the vehicle image if the define is ever
+   present - which keeps the production flip a separate, deliberate change. H0W's
+   Step 0/1/Setup/held-constant text now names the two environments and forbids
+   editing the header to enable it.
+4. **MF-4 - H3 says who stops the motor.** H3 gained an explicit prerequisite:
+   while the polarity is `Unverified` the firmware interprets no level as a fault
+   (the level is sampled, counted and reported, but nothing is latched and no
+   automatic stop happens), `checks`'
+   `DriverFaultPolarityVerified=…` is how the operator tells whether the firmware
+   is watching the line, and the stop authority for the protocol is the bench
+   supply's current limit and the physical kill switch. The Safe-stop section says
+   the same in one sentence, so an operator does not wait for a fault report that
+   cannot come.
+5. **SF-1 - `Brake` is not a brake until it is measured.** The plan has only two
+   distinct level combinations for four mode names (`Coast` and `Disabled` are
+   pin-identical; `Brake` is a drive with zero duty), and whether the `Brake`
+   combination shorts the bridge or leaves it high-Z is unmeasured. Both candidate
+   mappings are now pre-registered as a table in
+   `docs/hardware/motor-driver-drv8874.md` with the consequence of each, and
+   `P-H7` gained a prerequisite forbidding `Brake` (which is what
+   `RunMotionCommand::BrakeForward`/`BrakeReverse` request, and therefore the
+   run's deliberate stop dwell) from being credited as a hold until H1A test 3 is
+   recorded. `P-H7` also gained the dwell-credibility bound from H0W's stall
+   measurement.
+6. **SF-2 - the driver-fault-low counter is per run.**
+   `cyclesWithDriverFaultLow_` is cleared on a successful `arm` and by `reset`, so
+   H1B Part 3 and H9 read their own test's activity rather than a since-boot
+   total.
+7. **SF-3 - the PWM reservation is written down.** `src/PinMap.h` and
+   `docs/hardware/motor-driver-drv8874.md` now state that `analogWriteResolution()`
+   is core-wide, that the EN pin's timer assignment is unrecorded, and that **no
+   second PWM consumer or resolution change may be added until H1A test 6 records
+   the switching frequency at `EN`**.
+
+**SF-5 (process) - not actioned here.** The report is right that `P9A` and the
+bench work are uncommitted and that `git rev-parse HEAD` therefore does not
+describe the tree H1A/H3 would flash. `AGENTS.md` section 23 forbids committing
+without being asked, so this is surfaced for a decision rather than done.
+
+**Files changed**
+
+New: `lib/evcore/src/MotorArbitration.h`,
+`test/test_bench_arbitration/test_main.cpp`.
+Changed: `src/VehicleRuntime.h`, `src/VehicleRuntime.cpp` (three accessors, one
+definition for `status`'s fault flag, the counter reset), `src/MotorDriver.h`
+(ownership flag, `apply()` yield, comments), `src/bench/BenchConsole.h`
+(`beginPass`/`applyOutput`, the pass verdict, the hang report line),
+`src/bench/BenchMain.cpp` (pass order, the hang hook), `src/WatchdogCheckpoint.h`
+(per-environment enablement), `src/main.cpp` (production guard), `src/PinMap.h`,
+`platformio.ini` (`env:bench-watchdog`), `docs/bringup/README.md`,
+`docs/bringup/P-H0W-watchdog-qualification.md`,
+`docs/bringup/P-H3-first-low-duty-drive.md`,
+`docs/bringup/P-H7-distance-braking-reversal.md`,
+`docs/hardware/motor-driver-drv8874.md`, `SOFTWARE_ARCHITECTURE.md` (sections 15,
+16, 17), `VERIFIED_STATE.md` and this file. No unrelated cleanup.
+
+**Verification**
+
+- `pio test -e native`: **506/506** (was 497; +9 from `test_bench_arbitration`).
+- `pio run -e nano_r4`: SUCCESS, RAM 18.2% (5956 B), flash 25.2% (65964 B).
+- `pio run -e bench`: SUCCESS, RAM 18.7% (6140 B), flash 26.8% (70316 B).
+- `pio run -e bench-watchdog`: SUCCESS, same RAM, flash 26.9% (70644 B) - the
+  define changes one constant and links the timer calls.
+- No compiler warnings in any of the three builds.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry`: 111
+  tests, OK.
+- `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only` over every
+  `lib/evcore/src/*.h`: clean apart from the expected
+  `#pragma once in main file` artifacts.
+- `arm-none-eabi-nm` symbol isolation: `.pio/build/nano_r4/firmware.elf` filtered
+  for `bench|hang` matches **nothing**; `.pio/build/bench/firmware.elf` matches 26
+  symbols. (The first cut of the ownership accessor was named
+  `benchOwnership()` and *did* put one bench-named symbol in the vehicle image;
+  renaming it `motorPinsOwned()` - which is what the production tick legitimately
+  reads - restored the isolation, and the docs' symbol-search check should use the
+  `bench|hang` filter.)
+
+**Not verified**
+
+Everything about the vehicle, unchanged from D19. The bench instruments, the hang
+hook, the arbitration and every ceiling are **built and never run**: no image has
+been flashed in this change, no command has been sent, no motor has been powered,
+and no watchdog behavior has been observed. The three new `VERIFIED_STATE.md` rows
+are build-and-source facts. Every hardware row (#1-#12) stays UNVERIFIED, and MF-1
+in particular is a defect that was found by reading, not by measuring: that one
+writer now commands the pins per pass is a source fact, and whether the DRV8874
+does what the planned levels intend (including whether a wake delay is required at
+all) remains H1A's measurement.
+
+**Next stage**
+
+Unchanged, with one ordering constraint now explicit: H0 (vehicle image), then
+H0W in **both** bench environments - `env:bench` for its Step 0 baseline, then
+`env:bench-watchdog` for Steps 1-7 and the hang hook - then H1A, H1B, H2, then H3
+as the first powered step. Nothing may be flashed from a tree that is not a
+recorded checkpoint (SF-5).

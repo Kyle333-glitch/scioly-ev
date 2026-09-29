@@ -69,6 +69,13 @@ ev::Sourced<ev::MotionDirection> measuredDirection(ev::MotionDirection direction
 // Fixture scale: 0.0001 m per tick, the same fixture used by the module targets.
 ev::Sourced<double> fixtureScale() { return measuredValue(0.0001); }
 
+// The stop-verification policy the fixtures use: threshold, dwell and the fixture
+// update-gap limit, so a new configuration field cannot be forgotten here.
+ev::NearZeroConfig stopConfig(ev::Sourced<double> threshold, ev::Sourced<double> dwell) {
+    return ev::NearZeroConfig(threshold, dwell,
+                              ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured));
+}
+
 ev::MotionProfileLimits profileLimits(ev::MotionDirection positiveCommandDirection) {
     return ev::MotionProfileLimits(measuredValue(2.0), measuredValue(2.5), measuredValue(0.5),
                                    measuredValue(1.0), measuredValue(0.05),
@@ -107,11 +114,11 @@ ev::RunPhaseConfig chainPhaseConfig() {
     return ev::RunPhaseConfig(
         measuredValue(0.0), measuredValue(5.0), measuredValue(1.0), measuredValue(5.0),
         measuredValue(5.0), measuredValue(5.0), measuredValue(5.0), measuredValue(1.0),
-        ev::NearZeroConfig(measuredValue(0.05), measuredValue(0.2)));
+        stopConfig(measuredValue(0.05), measuredValue(0.2)));
 }
 
 ev::ReversalConfig chainReversalConfig() {
-    return ev::ReversalConfig(ev::NearZeroConfig(measuredValue(0.05), measuredValue(0.2)),
+    return ev::ReversalConfig(stopConfig(measuredValue(0.05), measuredValue(0.2)),
                               measuredValue(3.0));
 }
 

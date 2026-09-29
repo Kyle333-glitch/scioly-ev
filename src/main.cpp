@@ -6,6 +6,18 @@
 #include "VehicleRuntime.h"
 #include "WatchdogCheckpoint.h"
 
+// The production image must never receive the bench-only watchdog-enablement
+// define. `kWatchdogEnablementRequested` is shared by both images
+// (`WatchdogCheckpoint.h`), so a build that set
+// `EV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED` while compiling *this* entry point
+// would change the vehicle's watchdog decision from what looks like a bench
+// build option. H0W decides whether production enablement is warranted, and
+// carrying that decision into the vehicle image is a separate, deliberate change
+// to this file - which is why the guard is here and not a comment.
+static_assert(!evhw::kWatchdogEnablementRequested,
+              "the production image must not request watchdog enablement; build "
+              "env:bench-watchdog for the H0W qualification (P-H0W)");
+
 // ---------------------------------------------------------------------------
 // Firmware entry point: the cooperative shell
 // ---------------------------------------------------------------------------
@@ -19,6 +31,11 @@
 //      It refreshes only when the pass finished and, if a tick ran, that tick
 //      completed in order. No interrupt, no module and nothing else in this
 //      firmware refreshes the watchdog.
+//
+// The watchdog itself, when enablement requests it, is opened once at the very
+// end of `setup()` - after the bounded initialization work, not before it - so
+// the boot-to-first-refresh gap cannot exceed the timeout. See
+// `WatchdogCheckpoint.h`.
 //   3. Low-priority work, outside the control tick: the operator interface
 //      (`runtime.serviceSerial`) and the status LED. Keeping it after the
 //      checkpoint means a slow job costs cadence (reported as scheduler lateness)
@@ -81,8 +98,10 @@ void setup() {
     //    de-energized before anything else exists to ask for motion.
     runtime.begin(millis());
 
-    // 2. The central watchdog checkpoint. With enablement off it opens nothing;
-    //    it still counts the passes the loop completes.
+    // 2. The central watchdog checkpoint. It records the boot instant here but
+    //    opens nothing yet: opening happens at the end of this function, after
+    //    the bounded wait below, so a requested timeout can never expire during
+    //    initialization (see `WatchdogCheckpoint.h`).
     watchdog.begin(millis());
 
     // 3. The serial port, last and after the hardware is already safe. The wait
@@ -93,6 +112,15 @@ void setup() {
     const unsigned long startMs = millis();
     while (!Serial && millis() - startMs < kSerialWaitTimeoutMs) {
     }
+
+    // 4. The watchdog, opened last and only when enablement requests it. This is
+    //    the one place the timer is started: everything that could wait during
+    //    initialization is already behind us, so the gap until the first pass's
+    //    refresh is small and bounded, and the interval the watchdog actually
+    //    covers is the loop's own cadence from that first pass onwards. With
+    //    enablement off - the shipped setting - this call does nothing at all;
+    //    the checkpoint still counts passes for the bench.
+    watchdog.openIfRequested(millis());
 }
 
 void loop() {
