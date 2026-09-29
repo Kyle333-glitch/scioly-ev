@@ -1,0 +1,15 @@
+   0.000	#	capture begin; port=COM3 hold=18.0s
+   0.000	#	connected (attempt 1)
+   0.000	>>>	bench resetsrc
+   0.094	LINE	BENCH,resetsrc=1,source=register_read,rstsr0=1,rstsr1=6,porf=1,dpsrstf=0,wdtrf=1,iwdtrf=0,swrf=1,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+   0.094	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+   0.094	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+   4.047	>>>	bench health
+   4.250	LINE	BENCH,health=1,image=bench,enable=1,open_attempted=1,opened=1,open_refused=0,timeout_ms=114,wdt_realized_ms=174,passes=316151,refreshes=316151,withheld=0,last_refresh_ms=8667,first_refresh_ms=0,worst_refresh_gap_ms=15,control_ticks=334,dt_ms=20,late_ms=0,dropped=0,worst_late_ms=1980,worst_stall_ms=24,dropped_total=99,violations=0,armed=0,lines_accepted=0,lines_refused=0,responses_lost=0
+   6.141	>>>	bench resetsrc
+   6.344	LINE	BENCH,resetsrc=1,source=register_read,rstsr0=1,rstsr1=6,porf=1,dpsrstf=0,wdtrf=1,iwdtrf=0,swrf=1,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+   8.016	>>>	bench pins
+   8.219	LINE	BENCH,pins=1,source=pin_read,nsleep_high=0,phase_high=0,enable_high=0,duty_permille_written=0,deenergized=1
+  10.078	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  12.141	>>>	bench resetsrc
+  12.344	LINE	BENCH,resetsrc=1,source=register_read,rstsr0=1,rstsr1=6,porf=1,dpsrstf=0,wdtrf=1,iwdtrf=0,swrf=1,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0

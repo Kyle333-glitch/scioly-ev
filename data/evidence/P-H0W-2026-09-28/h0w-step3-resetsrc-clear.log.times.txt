@@ -1,0 +1,14 @@
+   0.000	#	capture begin; port=COM3 hold=20.0s
+   0.015	#	connected (attempt 1)
+   0.015	>>>	bench resetsrc
+   0.218	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+   0.218	LINE	BENCH,resetsrc=1,source=register_read,cleared=0,rstsr0=1,rstsr1=6,porf=1,dpsrstf=0,wdtrf=1,iwdtrf=0,swrf=1,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+   0.218	LINE	EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,detail=-,fault=None,drop_s=0,drop_e=0
+   4.125	>>>	bench resetsrc
+   4.328	LINE	BENCH,resetsrc=1,source=register_read,cleared=0,rstsr0=1,rstsr1=6,porf=1,dpsrstf=0,wdtrf=1,iwdtrf=0,swrf=1,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+   8.046	>>>	bench resetsrc clear
+   8.250	LINE	BENCH,resetsrc=1,source=register_read,cleared=1,rstsr0=0,rstsr1=0,porf=0,dpsrstf=0,wdtrf=0,iwdtrf=0,swrf=0,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+  10.093	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1
+  13.171	>>>	bench resetsrc
+  13.390	LINE	BENCH,resetsrc=1,source=register_read,cleared=0,rstsr0=0,rstsr1=0,porf=0,dpsrstf=0,wdtrf=0,iwdtrf=0,swrf=0,rperf=0,reerf=0,busmrf=0,bussrf=0,sperf=0
+  20.187	BOOT	BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,watchdog=1,checks_all=0,regulator=0,armed=0,telemetry=1,stride=1,ready=1

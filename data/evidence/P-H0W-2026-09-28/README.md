@@ -60,6 +60,11 @@ reset latencies - the raw file itself stays verbatim.
 | `h0w-step8-stall-unread.log` | D28: `worst_stall_ms` with nobody reading (one reading) |
 | `h0w-step7-final-soak.log` | D28: 45 s healthy on the final source, hook `0U` |
 | `h0w-step7-final-hang.log` (+`.times.txt`) | D28: 3 hangs, 3 resets and a pin readout after each, on the final source |
+| `h0w-step3-resetsrc-baseline.log` (+`.times.txt`) | D30: the reset-status registers read on an ordinary post-upload boot, twice, before anything was cleared - `rstsr0=1, rstsr1=6` |
+| `h0w-step3-resetsrc-clear.log` (+`.times.txt`) | D30: read -> `bench resetsrc clear` -> read; the clear lands (`rstsr0=0, rstsr1=0`) and two consecutive plain reads agree |
+| `h0w-step3-resetsrc-hang.log` (+`.times.txt`) | D30: the decisive run - clear, then 70 s of deliberate hangs: **5 hangs, 5 resets, every post-reset read `rstsr1=2`** |
+| `h0w-step3-resetsrc-powercycle.log` (+`.times.txt`) | D30: the power-on control - the operator unplugged and replugged the board: `porf=1, rstsr1=0` |
+| `h0w-step7-wdt-registers.log` (+`.times.txt`) | D30: `bench wdt` reads the hardware's own watchdog configuration (`WDTCR.TOPS=3`, `CKS=5`, `pclkb_hz=24000000`, live `cntval`) |
 
 **A naming note.** The D28 captures are named `h0w-step8-*` for the step they were
 *preparing* - they close Step 3's post-restart pin clause and Step 2/5's stall
@@ -224,9 +229,13 @@ drift away from the rule that chose it (D27).
 
 The latency difference between the two campaigns is the attribution evidence H0W
 asks for: **171-344 ms at a 250 ms request against 0-141 ms at a 114 ms request**,
-with the loop healthy and refreshing in between. The measured latency also
-includes the host noticing the device is gone (bounded by the capture's ~0.2 s read
-window), so it tracks the realized period without clocking it.
+with the loop healthy and refreshing in between. **What this measurement can and
+cannot do (corrected in D30):** the capture helper reads 4096 bytes or times out, so
+the latency is quantized by its ~0.2 s read window - the same order as the period
+being measured. It shows that the latency *scales with the request*; it cannot
+clock the period, and a hang marker read late makes the gap look short (D30 saw a
+62 ms gap against a 174 ms realized period). The period is measured from the
+hardware and the library in D30, below, not from this latency.
 
 **A unit correction worth recording:** the pre-registration said the hook should be
 left "non-zero" with `kDeliberateHangAfterPasses = 500` ("about 10 s after boot").
@@ -280,6 +289,78 @@ the measurement behind `kMaxDwellGapMs = 28` - the bound on how much near-zero
 dwell may be credited without fresh evidence, replacing the 40 ms placeholder. It
 is a **bench** measurement: a loaded run adds work to the same loop (Step 8).
 
+## Reset cause and the realized period (D30)
+
+Step 3 asks for the restart to be attributed, and adds: *"If a reset-cause register
+is readable on this core, record it; do not assume one exists."* Two instruments
+were added for that clause and for Step 7's realized period, and both were then
+measured.
+
+**`bench resetsrc` - the reset-status registers.** It reads `R_SYSTEM->RSTSR0` and
+`RSTSR1` and decodes the masks the vendor device header defines
+(`src/bench/ResetCause.h` cites them), reporting the raw values alongside the flags.
+`bench resetsrc clear` clears both - write 0, which is how these flags are cleared -
+and reports what they read afterwards. Two things had to be established before any
+reading could mean anything, and neither was assumed:
+
+- **the flags latch.** The first baseline boot read `rstsr0=1, rstsr1=6` (`porf`,
+  `wdtrf` and `swrf` all set) after nothing but an upload - a leftover from the
+  D27/D28 hang campaign that had survived every later upload, including a different
+  image. Two consecutive `bench resetsrc` calls returned identical values (the read
+  is passive), and `bench resetsrc clear` returned `rstsr0=0, rstsr1=0`, which the
+  next read confirmed. **Without the clear, no reading can attribute a *new*
+  reset**, which is why the instrument has one and why the campaign reads, clears,
+  then reads.
+- **each reset source has its own signature**, and on this board they are mutually
+  exclusive:
+
+  | reset source | `rstsr0` | `rstsr1` | decoded |
+  |---|---|---|---|
+  | power-on (the operator unplugged and replugged the USB) | 1 | 0 | `porf=1`, nothing else |
+  | upload / DFU (a software reset) | 0 | 4 | `swrf=1`, nothing else |
+  | deliberate hang (the watchdog) | 0 | 2 | `wdtrf=1`, nothing else |
+
+  A power-on reset **clears** RSTSR1; a software reset clears nothing. That is why
+  the first reading still carried a watchdog flag from the previous session, and why
+  the clear is part of the method rather than a convenience.
+
+**The attributable reset.** `h0w-step3-resetsrc-hang.log` cleared the registers and
+then let the hook hang the loop five times in 70 s: **5/5 resets reported
+`rstsr1=2`** - the WDT flag alone, with `porf=0`, `swrf=0`, `iwdtrf=0` and no bus,
+parity or security flag - with the device vanishing and re-enumerating each time.
+Before this capture the attribution rested on the latency scaling with the request
+and on there being no other refresh path. The register states which reset happened.
+
+**`bench wdt` and the realized period.** Step 6 and Step 7 both turn on the same
+distinction - the requested timeout is not the period the timer programs - and
+Step 7 asks for the realized period to be recorded. `bench wdt` reads the hardware's
+own configuration; `wdt_realized_ms`, already on the health line, is the library's
+computation:
+
+```
+BENCH,wdt=1,source=register_read,wdtcr=13139,tops=3,cks=5,rpes=3,rpss=3,
+     wdtsr=16371,cntval=16371,underflow=0,refresh_error=0,
+     pclkb_hz=24000000,wdt_realized_ms=174
+```
+
+- `tops=3` -> 16384 cycles and `cks=5` -> /256, per the vendor's `wdt_timeout_t` and
+  `wdt_clock_division_t` (which the library's lookup tables match index for index,
+  checked rather than assumed); `pclkb_hz=24000000` -> **16384 x 256 / 24 MHz =
+  174.76 ms**.
+- the live down-counter reads `cntval=16370-16371` against that 16384 reload, in two
+  separate boots and after a power cycle - so the reload is the hardware's own
+  number, not an inference from the request.
+- the request was **114 ms**; the realized period is **174 ms**. The rule's margin
+  (100 ms over the worst 14 ms refresh gap) was applied to the *request*, so the
+  realized margin is **160 ms**. The timeout value is unchanged - the rule chooses
+  it and this rounding only lengthens the period.
+
+**What this does not establish.** Whether 174 ms is a credible stop for the vehicle
+is a loaded-run question (Step 8), and every reset observed here followed a
+**drive-free** hang, so a reset taken while an effort is commanded remains
+unobserved. Neither instrument says anything about the driver outputs, which is
+H1A's.
+
 ## H0W's acceptance rule, clause by clause
 
 | Clause | Result |
@@ -287,10 +368,10 @@ is a **bench** measurement: a loaded run adds work to the same loop (Step 8).
 | `opened()` true at the chosen timeout | **met** - 114 ms accepted, `open_refused=0` |
 | zero resets while healthy, every load condition | **met** - telemetry off, 50 Hz read, 50 Hz unread, and a 63 s soak at the chosen timeout, one boot each, `violations=0` |
 | a hung loop reliably resets, within 3x the realized timeout | **met** - 8/8 cycles at 250 ms and 6/6 at 114 ms, the longest observed latency 344 ms (3x 250 ms = 750 ms) |
-| the restart is attributable to the timeout | **met** - latency scales with the request (171-344 ms at 250 ms vs 0-141 ms at 114 ms), the hang hook is the only difference, one refresh path (`grep -rn "WDT" src/` matches only `WatchdogCheckpoint.h`), and the healthy soaks never reset |
+| the restart is attributable to the timeout | **met, and since D30 by the MCU's own registers** - latency scales with the request (171-344 ms at 250 ms vs 0-141 ms at 114 ms), the hang hook is the only difference, one refresh path (`grep -rn "WDT" src/` matches only `WatchdogCheckpoint.h`), and the healthy soaks never reset; **and 5/5 hang resets read `wdtrf=1` with every other reset-status flag clear** (`porf=0`, `swrf=0`, `iwdtrf=0`, no bus/parity/security flag), against `swrf`-only for an upload and `porf`-only for a power-on. See "Reset cause and the realized period (D30)" |
 | **the pin levels after restart are the de-energized combination** | **met, at the MCU level (D28)** - the pins to check are the ones `src/PinMap.h` names, read at rest after a watchdog reset. `bench pins` after each of 6 resets reported `nsleep_high=0,phase_high=0,enable_high=0,duty_permille_written=0,deenergized=1`, 6/6, plus 3 more in the final hang campaign; the readings before any hang are identical. This is the MCU's own `digitalRead()` of the three pins it drives - the "levels only" the protocol asks for (its own scope limit hands the electrical statement to H1A), not an independent measurement at the header. Every observed reset followed a **drive-free** hang, so a reset taken while an effort is commanded is not covered |
 | a reset board re-uploads without manual intervention, at the pre-registered rate | **met** - 5/5 recovery uploads into a looping board, plus the Step 7a/7b/7c uploads |
-| native tests and the Nano build still pass | **met** - `pio run`, `-e bench`, `-e bench-watchdog` all SUCCESS (re-confirmed at D28 with the same three hashes); `pio test -e native` 517/517 at D27 and **518/518** after D28's added stall test |
+| native tests and the Nano build still pass | **met** - `pio run`, `-e bench`, `-e bench-watchdog` all SUCCESS (re-confirmed at D28 with the same three hashes); `pio test -e native` 517/517 at D27, **518/518** after D28's added stall test, and **519/519** after D30's added verb test |
 
 **H0W is recorded as passed for the bench load (D28)**: every clause above is met
 with recorded evidence, including the pin clause, which the protocol asks for at the
@@ -298,7 +379,10 @@ MCU level. **Step 8's loaded-run re-validation is still owed** - but the protoco
 pre-registers it as "owed, not done here" rather than as an acceptance clause, so
 it does not block the pass. The chosen timeout is therefore a **bench-qualified**
 number: justified for the bench load, and provisional for the loaded run path until
-Step 8.
+Step 8. D30 closed the two clauses whose instruments did not exist (the reset cause,
+by the MCU's own registers, and the realized period, by `bench wdt`), and Step 8's
+criteria are now written down rather than only owed:
+`data/prereg/P-H0W-step8-2026-09-29.md`.
 
 ## What this does NOT establish
 

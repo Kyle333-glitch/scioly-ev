@@ -903,3 +903,35 @@ hook was then set back to 0U in src/bench/BenchMain.cpp and the rebuilt image
 is ddba3b9d... The vehicle-image upload that followed is unaffected (the
 vehicle image cannot contain the hook - src/main.cpp asserts it and the bench
 tree is not compiled there). Recorded in DEVELOPMENT_LOG.md D28.
+
+=== D30 (2026-09-29): the reset-cause and realized-period instruments ===
+Source hook value checked by reading the file before every build
+(`grep -n "kDeliberateHangAfterPasses = " src/bench/BenchMain.cpp`), because D28's
+slip was a source edit that never got made.
+
+1. hook 0U, + src/bench/ResetCause.h and the read-only `bench resetsrc`:
+   bench-watchdog  SUCCESS
+   upload exit=0
+   b01833214c4916bd4332bff8c74826d3f7f99f358d846cedeeb3cc23dd9ac21a *.pio/build/bench-watchdog/firmware.bin
+2. hook 0U, + `bench resetsrc clear` (the write-0 clear, self-verifying):
+   bench-watchdog  SUCCESS
+   upload exit=0
+   5d9b492295f4e7019e4b658c0bb1a154c05cae8a645c9b87e77f02f282cd3899 *.pio/build/bench-watchdog/firmware.bin
+3. hook 460000U - the hang run (source verified at line 99 before the build):
+   bench-watchdog  SUCCESS
+   upload exit=0
+   1b1f724992f0028fad3f31fc5b4489367d464762024c0fb85246c6ad9ea3e8ee *.pio/build/bench-watchdog/firmware.bin
+4. hook back to 0U, + src/bench/WatchdogRegisters.h and `bench wdt`:
+   bench-watchdog  SUCCESS
+   upload exit=0
+   9e1281b5b9dbd20d40a6d69a33931b543752f9ad1ebe60d332f137cdc551cdad *.pio/build/bench-watchdog/firmware.bin
+5. the vehicle image, to leave the board in its shipped state (watchdog disabled):
+   nano_r4  SUCCESS
+   upload exit=0
+   eb440b319a8a09aeb4ee82f0aa37f24a80f3f4a011b49d14639d895bc5d88d50 *.pio/build/nano_r4/firmware.bin
+
+Left at hook 0U. All three image hashes are identical to their pre-D30 values
+after D30's WatchdogCheckpoint.h edit, which is how that edit (comments only) is
+shown to have changed no code: vehicle eb440b31... unchanged, and the two bench
+images unchanged by the comment edit as well (bench d627ab9f..., bench-watchdog
+9e1281b5...).
