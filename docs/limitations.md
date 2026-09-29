@@ -295,11 +295,25 @@ or what remains provisional about the numbers it justified.
   first uploads, so its counts were not fixed in advance
   (`data/prereg/P-H0-2026-09-28.md`; kept, labelled). The repeat has a real one
   (`data/prereg/P-H0-repeat-2026-09-28.md`, written before its first upload).
-- **The whole H0/D22-D25 record is uncommitted.** `HEAD` is `8e42d13`; the log
-  entries, the `VERIFIED_STATE.md` rows, both evidence directories, both
-  pre-registrations, the touch script, the limitations register and the D23 source
-  changes are all working tree only. A lost checkout loses the evidence, and the
-  tree is not a reproducible checkpoint.
+- **The record is committed; the images it describes are not reproducible from
+  it.** As of 2026-09-29 the D21-D28 span is committed on `main` in four scoped
+  commits above `8e42d13`, so the log entries, the `VERIFIED_STATE.md` rows, the
+  evidence directories, the pre-registrations, the touch script, this register
+  and the source changes all have a home. What that does **not** buy is a
+  rebuild: the flashed images were built from intermediate working trees that
+  were never committed (placeholder watchdog budgets, the deliberate-hang hook at
+  `460000U`), so no commit reproduces the D22-D27 images. Where a record names
+  `8e42d13` as its build identity, that is the last commit *below* the tree that
+  was actually flashed; the uncommitted delta is the D22-D28 work, now committed
+  above it.
+- **The captures are stored line-ending normalized.** `core.autocrlf=true` and
+  there is no `.gitattributes`, so every text blob is stored with LF however it
+  arrived - including the serial captures, which arrive CRLF (`git ls-files --eol`
+  reports `i/lf w/crlf` for them). A fresh checkout restores CRLF on Windows and
+  not elsewhere, and `git show` always yields LF, so a byte-exact comparison
+  against the original capture needs the worktree rather than the blob. Keeping
+  the evidence verbatim would take `data/** -text` plus a re-add; that is a
+  repository-wide decision and it has not been made.
 - **Host tests prove logic, never hardware.** `pio test -e native` covers pure
   modules because `src/` cannot compile on a host toolchain
   (`test_build_src = no`); it cannot reach the Arduino layer that talks to the

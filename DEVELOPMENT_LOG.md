@@ -4718,3 +4718,89 @@ consistency pass in `docs/bringup/P-H0W-watchdog-qualification.md`,
   device.
 - H1A and any powered protocol are untouched: no driver, encoder or motor was
   connected at any point in this entry.
+
+---
+
+## D29 - 2026-09-29 - Repository - The D21-D28 span is committed and pushed, as four scoped commits
+
+**Objective**
+
+Leave the tree recoverable. Everything from D21 to D28 - the five H0 fixes, the
+H0 repeat, the whole H0W campaign, the new instruments and the records that
+describe them - was working tree only, and `docs/limitations.md` listed that as a
+limit: a lost checkout would have taken the evidence with it. Commit it, and get
+it onto `origin/main`.
+
+**What was done**
+
+The span was first committed as a single commit (`7a928dc`) with the subject
+`feat: H0` and pushed. That subject named one of the eight days the commit
+carried, so it was rewritten as four, split by what a reader would come looking
+for:
+
+- `002b215` - `fix: enter the Nano R4 bootloader before upload (H0 finding F-1)`:
+  `platformio.ini` and `scripts/nano_upload_touch.py`.
+- `354d8b1` - `feat: watchdog qualification, bench diagnostics and the H0 operator
+  fixes (D22-D28)`: `src/`, `lib/evcore/src/`, `test/`.
+- `eb41d8e` - `docs: record H0 and H0W, and add the limitations register
+  (D21-D28)`: this file, `VERIFIED_STATE.md`, `SOFTWARE_ARCHITECTURE.md`,
+  `README.md`, `docs/`.
+- `b70cd56` - `data: H0/H0W captures and their pre-registrations (D21-D28)`:
+  `data/evidence/`, `data/prereg/`.
+
+**The rewrite changed no content**, and that is checkable rather than asserted.
+The commit was unwound with `git reset --soft 8e42d13` plus an unstage - which
+touches HEAD and the index and never the worktree - and the index was then
+compared against `7a928dc` (`git add -A`, then
+`git diff --cached 7a928dc --stat`), which was empty: all 86 files byte-identical
+to the tree the campaign was validated against. After the four commits
+`git diff 7a928dc HEAD` was empty again. Same tree, different scissors.
+
+**Nothing recorded depended on the discarded hash.** Every record that names a
+build identity names `8e42d13` - the commit *below* the work - not `7a928dc`; a
+grep for `7a928dc` across the tree returns nothing. The rewrite therefore
+invalidated no caption in the evidence, which is why the records are left as they
+are.
+
+**Push.** The remote was at `a595118` (P5), so the first push fast-forwarded it
+over P7, P8, `8e42d13` and `feat: H0`. Rewriting an already-pushed commit then
+needs a force, which was done as `--force-with-lease` against `7a928dc` - so the
+push would have been refused if any other push had landed in the meantime.
+`7a928dc` no longer exists on `main`.
+
+**One thing found on the way.** `core.autocrlf=true` and there is no
+`.gitattributes`, so every text blob is stored with LF however it arrived -
+including the serial captures, which arrive CRLF (`git ls-files --eol` reports
+`i/lf w/crlf` for them, while the worktree files are still the originals). It is
+recorded in `docs/limitations.md` section G rather than fixed, because
+`data/** -text` plus a re-add is a repository-wide decision.
+
+**Files changed**
+
+`docs/limitations.md` - the "uncommitted" bullet is replaced by what the commit
+does and does not buy, and the line-ending bullet is added - and this entry.
+Markdown only; no source, test, configuration or evidence file was touched.
+
+**Verification**
+
+- `git diff 7a928dc HEAD`: empty. `git status --short`: empty.
+- `pio run`, `pio run -e bench`, `pio run -e bench-watchdog`: SUCCESS. Images on
+  disk hash exactly as D28 left them - vehicle `eb440b31...`, bench `1f775f89...`,
+  bench-watchdog `ddba3b9d...` - which is the evidence that this entry's edits
+  are markdown only.
+- `pio test -e native`: **518/518**.
+- `git ls-remote origin refs/heads/main` equals local `HEAD`.
+
+**What this supersedes**
+
+The `Nothing committed` footer and the "uncommitted, as they were" notes inside
+D21-D28 describe those sessions accurately and are left alone; from this entry
+on, the D21-D28 span is committed. The one claim that had gone stale - the
+`docs/limitations.md` bullet above - is updated here.
+
+**Not verified / next stage**
+
+- **H0W Step 8** is still owed and still blocked: it needs a loaded run path.
+- **H1A** is the next stage, and it was not started.
+- The board was not touched in this entry: no upload, no serial session, no motor
+  supply, and no hardware connected.
