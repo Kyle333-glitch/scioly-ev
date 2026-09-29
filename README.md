@@ -82,9 +82,9 @@ reports `image=bench`, and the analyzer treats a `BENCH` line as an ignored line
 not as telemetry.
 
 The verbs are `bench help`, `bench arm`, `bench drive <fwd|rev> <permille> <ms>`,
-`bench stop`, `bench reset`, `bench health`, `bench drive-status`, `bench ticks`
-and `bench inputs`. Nothing is applied before a deliberate `bench arm`; every
-command expires on its own; an abort or an encoder that stops changing while
+`bench stop`, `bench reset`, `bench health`, `bench drive-status`, `bench ticks`,
+`bench inputs` and `bench pins`. Nothing is applied before a deliberate `bench arm`;
+every command expires on its own; an abort or an encoder that stops changing while
 driving latches until `bench reset`; and the physical kill switch is still the
 primary stop in every powered step. No protocol may use the bench drive until its
 bounded expiration and its latched fault have been demonstrated (that is H3's
@@ -138,8 +138,9 @@ recorded in `DEVELOPMENT_LOG.md`.
   encoder counting, the first powered drive, rollout and slip, the velocity
   trace, tuning, distance/braking/reversal, the bottle, fault injection, and
   full-run repeatability. Each protocol isolates one unknown and names what it
-  may record. None of it is evidence and none of it has been run.
-- **P9A (current)** - pre-hardware readiness validation: every native test, the
+  may record. None of it is evidence as written; H0 and H0W have since been run
+  and recorded (D25, D28).
+- **P9A** - pre-hardware readiness validation: every native test, the
   Nano R4 build and the ARM cross-check over `lib/` re-run clean from a fresh
   build, the P8 tool suite re-run, and a static audit of the tree (no debug
   leftovers, no writer of the motor pins outside the adapter, no blocking call,
@@ -182,7 +183,8 @@ recorded in `DEVELOPMENT_LOG.md`.
   kill switch are the stop authority. See `DEVELOPMENT_LOG.md` D20.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
-  electrical checks P-H1A and P-H1B.
+  electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are now done, so what
+  remains of the bring-up is the powered and electrical part, starting with P-H1A.
 
 Do not build later-stage vehicle behavior before the earlier stage has been
 validated.
@@ -203,7 +205,8 @@ interface can report `status`, `checks`, `version` and the held configuration,
 and can ask to `announce` or `arm` - but with the placeholder configuration every
 arming intent is refused, and the refusal names the check that failed. No command
 commands an effort or a direction, and none starts a run. The watchdog is
-deliberately disabled pending its own on-target check.
+deliberately disabled in the vehicle image; its bench qualification passed
+(H0W, D28), and enabling it in production is a separate, deliberate change.
 
 The one way to apply effort is the bench image (`pio run -e bench`), which is not
 the vehicle image: it contains the bench console and the bounded, latched bench
@@ -213,6 +216,8 @@ and its latched fault have been demonstrated at the bench. H0W additionally need
 the watchdog enabled, which is a separate bench environment - `pio run -e
 bench-watchdog` - rather than an edit to a header both images compile.
 
-The vehicle still has no measured behavior: no motor, encoder, sensor, trigger,
-watchdog, serial timing or bottle mechanism behavior has been observed on
-hardware. See `VERIFIED_STATE.md`.
+The vehicle still has no measured behavior of its own: no motor, encoder, sensor,
+trigger, battery or bottle mechanism behavior has been observed on hardware. Upload,
+boot, greeting, the serial link and the watchdog path *have* been observed on target,
+USB only with the motor supply off (H0, D25; H0W, D26-D28); see `VERIFIED_STATE.md`
+for which rows exist and what they are worth.

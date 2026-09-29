@@ -11,10 +11,12 @@ recover and re-flash reliably; what timeout is justified by the observed healthy
 margin and the observed reset behaviour; what is the worst observed control-loop
 stall (see "Why the maximum control-loop stall is recorded here" below), which
 bounds how much near-zero dwell could be credited without observation.
-**Bench instrumentation required:** B1 (loop and watchdog counters), and a
-bench-only hang hook the production image cannot contain - both supplied by the
-separate PlatformIO `bench` environment (see the index), not by a flag inside the
-production build. The hook is `kDeliberateHangAfterPasses` in
+**Bench instrumentation required:** B1 (loop and watchdog counters), a driver-pin
+readout (`bench pins`, which reports the three driver inputs as the MCU itself
+holds them and pairs them with the duty the adapter last wrote - a PWM duty cannot
+be read back from a pin), and a bench-only hang hook the production image cannot
+contain - all supplied by the separate PlatformIO `bench` environment (see the
+index), not by a flag inside the production build. The hook is `kDeliberateHangAfterPasses` in
 `src/bench/BenchMain.cpp`; it is a compile-time constant, not a console verb, so
 no serial input can hang the board by accident. This protocol uses **two** bench
 environments: `env:bench` (watchdog disabled) for Step 0, and
@@ -149,7 +151,10 @@ observed pass the loop took, i.e. the largest gap between two consecutive
 control-loop stamps (the largest `millis()` delta between two completed passes),
 not merely the worst refresh interval. These are close but not the same number -
 the refresh happens once per pass while the loop also does transport work - and
-the stall is the one that bounds a dwell, so report both.
+the stall is the one that bounds a dwell, so report both. B1 reports the stall as
+`worst_stall_ms`, which excludes the first tick so the bounded boot wait cannot
+dominate the number (D28); it is deliberately **not** `worst_late_ms`, which is
+lateness measured against the deadline rather than the gap between two ticks.
 
 Record too the **boot-to-first-refresh gap**: the interval between the watchdog
 being opened (the end of `setup()`) and the first refresh (the end of the first
@@ -166,7 +171,7 @@ cannot silently complete a dwell. For a direction reversal there is also a
 sequence-level timeout, evaluated before each verification step.
 
 The value that bounds that credit is a **measured** one, and it is the maximum
-control-loop stall measured here (`kPlannedMaxDwellGapMs` in
+control-loop stall measured here (`kMaxDwellGapMs` in
 `src/VehicleConfig.h`, `Provisional` until this protocol passes). It is not the
 timeout: the timeout is chosen from the margin over the worst healthy refresh
 interval, while the stall is the longest single healthy pass itself. Record the
@@ -199,8 +204,10 @@ hang happened at rather than only the last earlier readout. Record:
   event recurs, the telemetry `t_ms` restarts near zero, and the counters restart
   from zero);
 - the MCU pin levels `nSLEEP`/`PH`/`EN` after the restart, which must be the
-  de-energized combination the firmware initializes to (levels only; H1A turns
-  this into a statement about the driver outputs);
+  de-energized combination the firmware initializes to (`bench pins` reads them:
+  levels only, the MCU's own view of the pins it drives, and it will not see a pin
+  driven low but held high at the header; H1A turns this into a statement about the
+  driver outputs);
 - whether the restart is attributable to the watchdog rather than to something
   else: the hang hook is the only difference from Step 2, the loop cannot refresh
   while hung, and the latency should match the realized timeout. If a reset-cause

@@ -3581,3 +3581,1140 @@ H0W in **both** bench environments - `env:bench` for its Step 0 baseline, then
 `env:bench-watchdog` for Steps 1-7 and the hang hook - then H1A, H1B, H2, then H3
 as the first powered step. Nothing may be flashed from a tree that is not a
 recorded checkpoint (SF-5).
+
+---
+
+## D21 - 2026-09-28 - H0 - First physical bring-up: Nano R4 upload, boot and serial link (not passed)
+
+**What was run**
+
+The Nano R4 was connected over USB for the first time and `P-H0` was executed.
+No firmware source was changed in this session: the tree is the committed
+`8e42d13` that D19/D20 left behind, and the point of the session was to find out
+what it does on the board rather than to adjust it.
+
+- detection: `pio device list` -> `COM3`, `USB VID:PID=2341:0074`,
+  `SER=350D331C5A333131021133354B573462`, `LOCATION=1-3:x.0`.
+- build: `pio run` SUCCESS, RAM 18.2% (5956 B), flash 25.2% (65964 B).
+- uploads: eight attempts in total, one of them the first (driverless) failure -
+  see the tally in `data/evidence/P-H0-2026-09-28/README.md`.
+- serial: seven boot captures, a command/refusal/ malformed-input capture, a
+  telemetry-rate capture, two `bench health` (B1) readouts, and one physical
+  power cycle.
+- tests: `pio test -e native` 506/506 (the acceptance gate's regression check;
+  unchanged because nothing was changed).
+
+Raw captures are in `data/evidence/P-H0-2026-09-28/` (copied unchanged from
+`data/raw/`); the counts this session was judged against are in
+`data/prereg/P-H0-2026-09-28.md`, which is **labelled retrospective** because it
+was written after the first uploads rather than before.
+
+**What was observed**
+
+Everything below is firmware or host output, not an inference.
+
+- The board enumerates in application mode as `USB VID:PID=2341:0074` and, in
+  bootloader mode, as `USB\VID_2341&PID_0374&REV_0100` (`Nano R4 DFU`).
+- Seven boots were observed. Each printed exactly one
+  `EVE1,ver=1,t_ms=0,phase=Idle,armed=0,event=Boot,...` and answered
+  `VERSION,fw=ev-nano-r4-p7b,telemetry_schema=1`.
+- The control period on the board is 20 ms. Telemetry is **enabled at boot** at
+  stride 1 (50 Hz): `telemetry status` reported `enabled=1,stride=1,rate_hz=50.0000`
+  before any command was typed, which is `TelemetrySession`'s documented default
+  and means P-H0's "leave telemetry off for the boot step" is an operator action
+  rather than a default.
+- `telemetry rate 10` was accepted (`stride=5,rate_hz=10.0000`) and the log then
+  shows 90 consecutive samples exactly 100 ms apart, i.e. a whole number of
+  control ticks; `telemetry rate 100` -> `ERR,...,reason=AboveControlCadence`
+  and `telemetry rate 0.5` -> `ERR,...,reason=BelowMinimum`, each with an
+  `EVE1,...,event=CommandRejected` record.
+- With no host reading the port, records are dropped rather than waited on: the
+  first capture opens with `drop_s=1790` accumulated over ~37 s of no host, and
+  reconnecting flushed only the queue's own 8-record capacity of stale samples
+  (the oldest: `t_ms=2000..2140`) before current ones.
+- The command set answered in the shapes `help` documents. Refusals observed
+  verbatim: with no held configuration `announce` ->
+  `ERR,cmd=announce,reason=ConfigIncomplete,error=-,first_fail=-`; with a
+  complete, rules-valid configuration
+  (`config set level=state distance=7.50 time=15.0 bottle_line=2.00` ->
+  `complete=1,rules=1`, `bottle_start_m=3.0000`) it becomes
+  `ERR,cmd=announce,reason=PolicyNotUsable,error=-,first_fail=RunPolicyUsable`,
+  which is what `announceVerdictFor()` deliberately names; `arm` ->
+  `ERR,cmd=arm,reason=NoRunAnnounced`. `checks` reported
+  `all=0,count=11,first=ConfigurationValid,mask=63427` - 11 of the 16 checks
+  failing, the mask equal to the set of those 11 bits, and
+  `ConfigurationValid` first because it means "an announced RunConfig passed rule
+  validation" and nothing had been announced.
+- Malformed input: `config set distance=abc` -> `InvalidValue`, `config se` ->
+  `UnknownSubcommand`, `syntax junk here` -> `UnknownCommand`, `status extra
+  tokens` -> `WrongTokenCount`, `config set distance=999999999999999999999` ->
+  `ValueOutOfRange`, `config set level=galactic ...` -> `UnknownLevel`. Each was
+  a named `ERR` with no `OK`, each carried `cmd=none` (a parse failure has no
+  command id), and `status` stayed `phase=Idle` through all of them.
+- `bench health` (B1) on the `env:bench` image reported `image=bench`,
+  `enable=0,open_attempted=1,opened=0,open_refused=0,timeout_ms=250`,
+  `dt_ms=20,late_ms=0,dropped=0,violations=0` at ~10 s and again at ~35 s
+  (`control_ticks` 503 -> 1880, `passes` 468874 -> 1747855).
+- The physical power cycle returned COM3 with the same VID/PID/serial and a
+  single fresh boot record whose first sample is at `t_ms=2000`: with no host
+  attached, `setup()`'s bounded wait runs its full 2000 ms before the loop's
+  first pass.
+
+**Findings**
+
+F-1. **`pio run -t upload` cannot enter the bootloader on this board, by
+  itself.** `builder/main.py` in platform `renesas-ra` 1.9.0 wires its
+  `BeforeUpload` (which is what performs a `use_1200bps_touch`) only into the
+  `sam-ba` branch; the `dfu` branch runs `dfu-util` with nothing before it. The
+  core does implement the touch (`CheckSerialReset()` -> `goBootloader()` on
+  `bps == 1200 && !dtr`), so a host-issued touch works: it was used for seven of
+  the eight attempts. Consequence: `AGENTS.md`'s `pio run -t upload` is not a
+  complete instruction for this board. The operator deferred the choice between
+  a pre-upload hook in this repository and a documented touch-then-upload
+  procedure until after the first successful upload, then left it open - it is
+  still open.
+
+F-2. **The bootloader needs a Windows driver that PlatformIO does not install.**
+  With the board in bootloader mode Windows reported `Nano R4 DFU`,
+  problem code **28**, and `dfu-util` failed with `LIBUSB_ERROR_NOT_SUPPORTED`.
+  Arduino's own signed package was already on disk inside the framework package
+  (`framework-arduinorenesas-uno/drivers/renesas.inf`, whose
+  `DeviceIDNanoR4DFU` is exactly the `USB\VID_2341&PID_0374&REV_0100` this board
+  presents), and the operator approved an elevated run of that package's own
+  `dpinst-amd64.exe`, after which `dfu-util -l` listed `@CodeFlash`/`@DataFlash`
+  and the download succeeded. This is a machine setup fact, not a defect in this
+  repository, but it is why the first attempt failed and it belongs in the next
+  person's instructions.
+
+F-3. **One upload left the board on the bus but not enumerating.** After attempt
+  7 (`pio run -e bench -t upload`), Windows showed
+  `Unknown USB Device (Device Descriptor Request Failed)` on
+  `USB\VID_0000&PID_0002\5&28FFA4CE&0&3`, no `VID_2341` device was present, and
+  `pio device list` was empty. No software path could reach it; a physical USB
+  power cycle was the only recovery, and it worked. The immediate cause is **not
+  determined**. In `AGENTS.md` section 31 order the untested suspects are: the
+  host link itself (a USB enumeration race between the CDC device leaving and
+  the DFU device arriving, or a marginal cable/port - both held constant this
+  session), then the bootloader's own USB initialisation, and only then a
+  firmware defect. The retry of the same command immediately afterwards
+  succeeded, so it is not deterministic. H0's decision rule makes this the
+  reason the stage did not pass.
+
+F-4. **The `BOOT,...` line never appeared.** `VehicleRuntime::serviceStagedText()`
+  stages exactly one `BOOT` line per boot (`bootLinePending_`, set in `begin()`),
+  `src/main.cpp`'s comment and `P-H0` Step 1 both expect it, and it did not
+  appear in any of the seven boots - while the `EVE1,...,event=Boot` record did,
+  and would have been sent *after* the staged line had the transport still been
+  holding it. Read-and-reason says the staged line cannot be lost: the body is
+  ~120 chars against `kSerialLineCapacity = 448`, `stage()` only fails when a
+  line is already staged, and `pump()` leaves the line staged while
+  `write()` returns 0 (which it does when DTR is not asserted, since
+  `connected()` is `tud_cdc_connected() || ignore_dtr` and `ignore_dtr` is false
+  in this firmware). That reasoning did not survive contact with the board, so
+  the cause is **not determined**. The consequence is concrete: the operator loses
+  the boot-time view the protocol asks for (`checks_all`, `regulator`, cadence,
+  telemetry state), because the `EVE1` boot record carries none of those fields.
+  Next diagnostic: expose the transport's own counters
+  (`linesStaged_`/`linesSent_`/`linesAbandoned_`/`responsesLost_` are already
+  reachable through `linesSent()` and `telemetryLinesSent()`), then capture a
+  boot with a host attached from before the reset.
+
+F-5. **An out-of-range `config set` changes the held state.** `P-H0` Step 3 asks
+  that an out-of-range field be "refused with a named error, never silently
+  clamped", and its acceptance rule asks for "every malformed input named and
+  rejected with no state change". Observed: `config set distance=9.50` (the rule
+  range is 5.00-9.00, `RunConfig.h`) answered **`OK,cmd=config set`** with the
+  value held (`target_m=9.5000`, echoed by `config show`), `complete=1`,
+  `rules=0`, `error=TargetDistanceOutOfRange`. It is named, not clamped, and the
+  vehicle stays unarmable (`ConfigurationValid=0` and `RunPolicyUsable=0` keep
+  both `announce` and `arm` refused), so the safety boundary holds; but the state
+  *did* change, which is what the protocol's wording does not allow. Either the
+  firmware should refuse an out-of-range value outright or P-H0 should say what
+  it actually means here - that is a decision, not a fix to make silently.
+
+F-6. **B1 cannot answer P-H0 Step 7 as written.** `bench health`'s `late_ms` and
+  `dropped` come from `telemetry_.lateByMs`/`droppedDeadlines`, which
+  `VehicleRuntime::runPass` copies from the current `ControlTickDecision`, so they
+  describe the **last** control tick; the scheduler's cumulative worst case
+  (`ControlScheduler::droppedDeadlines()`) is not reported. P-H0 Step 7 asks for
+  "the worst case ... never the average", and `first_refresh_ms` is 0 while
+  enablement is off, so the boot-to-first-refresh gap is not obtainable from
+  `env:bench` either. This session therefore reports two samples 25 s apart
+  (both clean), not a worst case, and leaves the boot gap to H0W.
+
+**Files changed**
+
+New: `data/prereg/P-H0-2026-09-28.md` (labelled retrospective),
+`data/evidence/P-H0-2026-09-28/` (README plus twelve captures and one tool
+transcript). Changed: `VERIFIED_STATE.md` (an on-target section and the
+availability paragraph) and this file. **No firmware or tooling source was
+changed**, no `platformio.ini` change, and nothing under `data/raw/` was added to
+the repository (`data/raw/` is scratch and gitignored).
+
+**Verification**
+
+- `pio test -e native`: **506/506 succeeded** in 00:02:13 (the H0 acceptance
+  gate's regression check).
+- `pio run` (vehicle image): SUCCESS, RAM 18.2% (5956 B), flash 25.2%
+  (65964 B); `pio run -e bench`: SUCCESS, RAM 18.7% (6140 B), flash 26.8%
+  (70316 B). No warnings.
+- Uploads: 7 successes, 1 failure (F-3) out of 8 attempts. After the restore
+  upload the board is running the **vehicle** image and `h0-cycle-7.log` shows no
+  `BENCH` line in it.
+- The `env:bench` image left on the board mid-session was replaced; the last
+  state of the board is the vehicle image, booted and answering.
+
+**Not verified**
+
+- **H0 did not pass.** Its own decision rule says a failed upload blocks the
+  stage, and one did (F-3); the pre-registered counts were not met either
+  (`data/prereg/P-H0-2026-09-28.md`). The honest reading: the upload/boot/serial
+  path demonstrably works, and it is not yet reliable enough to be called
+  verified.
+- Nothing about the vehicle. No motor supply was connected; the motor, driver,
+  encoder, drivetrain, battery and every rule-#1-#12 row are exactly as
+  unverified as they were at D20. `bench drive` (B2) was not touched, and the
+  deliberate-hang hook was left at its inert shipped value (`0U`).
+- The two rows this session could have added - host-drain behaviour and observed
+  cadence - are added only in the scoped form the captures support, and the
+  boot-to-first-refresh gap is not among them.
+
+**Next stage**
+
+H0W stays blocked until H0 passes. Before repeating H0: decide F-5 and F-6 (fix
+or reword), decide F-1 (pre-upload hook versus a documented touch), and write the
+repeat's pre-registration **before** its first upload. The repeat should run the
+upload series P-H0 asks for (at least 10) with the touch and cable/port held
+constant, and it should try to reproduce F-3 and F-4 - a second occurrence of
+F-3 with the same cable/port, and a capture with a host attached across the
+reset, are what turn either from an anomaly into a diagnosis.
+
+---
+
+## D22 - 2026-09-28 - Post-H0 fixes - The five H0 findings, as changes
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13` ("feat: pre-hardware stuff"). The D21 session was
+  uncommitted: `DEVELOPMENT_LOG.md` and `VERIFIED_STATE.md` modified,
+  `data/evidence/P-H0-2026-09-28/` and `data/prereg/P-H0-2026-09-28.md` untracked.
+  Nothing was committed and no unrelated work was touched.
+- The five findings are D21's F-1, F-3, F-4, F-5 and F-6. Their code sites were
+  read before editing (`platformio.ini`, `src/VehicleRuntime.cpp`/`.h`,
+  `src/SerialTransport.h`, `src/bench/BenchConsole.h`, `lib/evcore/src/`
+  `ControlScheduler.h`, `OperatorPolicy.h`, `OperatorResponse.h`, `RunConfig.h`)
+  and the installed `renesas-ra` builder and Arduino core were inspected for the
+  uploader and USB facts the fixes depend on.
+
+**What changed**
+
+1. **F-1 - the pre-upload touch is now part of the upload.** New
+   `scripts/nano_upload_touch.py`, registered as `extra_scripts = post:` in
+   `[env:nano_r4]` (inherited by `env:bench` and `env:bench-watchdog`, never by
+   `env:native`). `post:` is load-bearing rather than stylistic: attaching an
+   action to the `upload` target only works once that target exists, and a `pre:`
+   script runs before the platform's builder creates it - SCons then binds the
+   action to a same-named filesystem node that is never built, and the touch
+   would silently never run. That was found by measuring, not by reading: a
+   standalone SCons probe with the same ordering (`data/raw/scons_alias_probe/`,
+   scratch and gitignored) shows the `pre:` ordering returning an `Entry` whose
+   pre-action never fired and the `post:` ordering returning an `Alias` that did.
+   The script therefore re-checks the node type at load time and prints a warning
+   naming the cause if it ever stops being an `Alias`. Because it is attached to
+   the `upload` target, it runs after a successful build and before `dfu-util`, so
+   a failed build never touches the board. It finds the board's application-mode
+   port (the board's own `build.hwids` cover `2341:0074` and
+   `2341:0374`), opens it at 1200 bps with DTR and RTS low and closes it - the
+   touch the core watches for (`CheckSerialReset()` -> `goBootloader()` on
+   `bps == 1200 && !dtr`) - then waits up to 10 s for `dfu-util -l` to report
+   `Found DFU`, retrying the touch once. It is a no-op when the bootloader is
+   already present, when no port exists, and for any protocol other than `dfu`
+   (so a `sam-ba` upload keeps the platform's own touch). `pio run -t upload` is
+   therefore a complete instruction on this machine, as `AGENTS.md` says.
+2. **F-3 - robustness at the upload boundary, and an honest record.** The cause
+   is still **not determined** and no root cause is claimed. What the hook adds is
+   a *classification* and a *race removal*: it distinguishes "no `VID_2341`
+   device at all" (the F-3 state, with the exact remedy - a physical USB power
+   cycle) from "a `VID_2341&PID_0374` device that `dfu-util` cannot use" (the F-2
+   driver state, with the driver-package remedy), and the upload no longer starts
+   `dfu-util` until the bootloader is actually enumerating, which removes the
+   "touch, then race the enumeration" ordering from the sequence. Neither is
+   evidence of a fix: F-3 may recur, and only a repeat session can say. The hook
+   never fails the upload - `dfu-util` stays the authority on whether the device
+   is there.
+3. **F-4 - the boot line is now owed to a host that is actually reading.**
+   `SerialTransport.h` gains `hostAttached()`, the core's own `connected()`
+   predicate (the one `write()` gates on) - deliberately *not* `Serial.dtr()`,
+   which flips the core's `ignore_dtr` and would make `write()` succeed into a
+   void. `VehicleRuntime::serviceStagedText()` samples it at a bounded rate
+   (`kHostPollPasses = 32`) and (a) re-arms `bootLinePending_` every time a host
+   attaches, (b) stages the boot line only while a host is attached, so it cannot
+   be committed to a port nothing is holding. `drainTelemetry()` also refuses to
+   pop a record while no host is attached, so a staged-but-undeliverable record
+   can no longer be mistaken for a record the queue still holds. The observable
+   consequence: a host that attaches after a boot nobody was reading sees
+   `BOOT,...` first, which is what the on-target captures below show. That is a
+   behavioural change to what the H0 capture expects, so P-H0's Step 1 wording is
+   updated to match. Note the deliberate limitation, established by those same
+   captures: the attach signal is the CDC `connected()` predicate, and a detach is
+   not always observed, so the greeting is guaranteed for the first attaching host
+   only; a later attach may or may not be greeted. **Superseded in part by D23**,
+   below, which stops the re-greeting from depending on an observed detach at all.
+4. **F-5 - an out-of-range `config set` is refused, and stores nothing.** New
+   `ev::validateSuppliedConfigFields()` (`OperatorPolicy.h`) checks only what one
+   field can fail alone: a non-finite number, the rule ranges (rules 8.h, 8.i,
+   8.j) and a real tournament level index. `VehicleRuntime::handleCommandLine()`
+   runs it for `ConfigSet` before the command is counted as accepted, answers with
+   the new `formatConfigSetRefusal()` - `ERR,cmd=config set,reason=ValueOutOfRange,
+   error=<rule error>`, with no configuration echo, because an echo of the
+   unchanged held state next to an error reads as "held" - and pushes a
+   `CommandRejected` event carrying the rule error name. The announced grid and
+   the cross-field geometry checks (Bottle Start before Target, Bottle Start fixed
+   by the level) deliberately stay with `heldRunConfigVerdict()` at `config show`
+   and `announce`: they need the level and the whole configuration.
+5. **F-6 - the cadence readouts can answer "worst case".**
+   `ControlScheduler` now keeps the session's extremes (`worstLateByMs()`, and
+   `droppedDeadlines()` already accumulated) and `TelemetrySnapshot` carries them
+   as `worstLateByMs`/`droppedDeadlinesTotal` alongside the last tick's own
+   values. B1's `bench health` line reports them as `worst_late_ms` and
+   `dropped_total`, next to the unchanged `late_ms`/`dropped`, which is what P-H0
+   Step 7 asks for. The telemetry sample schema (`EVS1`) is deliberately
+   unchanged: it is versioned, and this is a diagnostic readout.
+
+**Files changed**
+
+New: `scripts/nano_upload_touch.py`, plus two on-target captures in
+`data/evidence/P-H0-2026-09-28/` (`d22-f1-upload-verify.log`,
+`d22-f4-attach-observations.txt`; the third attach's raw output is
+`d22-f4-attach3.txt`). Changed: `platformio.ini`,
+`src/SerialTransport.h`, `src/VehicleRuntime.cpp`, `src/VehicleRuntime.h`,
+`src/bench/BenchConsole.h`, `lib/evcore/src/ControlScheduler.h`,
+`lib/evcore/src/OperatorPolicy.h`, `lib/evcore/src/OperatorResponse.h`,
+`test/test_control_scheduler/test_main.cpp`, `test/test_operator_policy/test_main.cpp`,
+`test/test_operator_response/test_main.cpp`,
+`docs/bringup/P-H0-nano-upload-serial.md`, `docs/bringup/README.md` and this file.
+No hardware fact was invented, no provisional value was promoted, no rule value
+changed, and nothing was committed.
+
+**Verification (code only - no board was touched in this entry)**
+
+- `pio run`: SUCCESS, RAM 18.2% (5964 B), flash 25.4% (66612 B). No warnings.
+- `pio run -e bench`: SUCCESS; `pio run -e bench-watchdog`: SUCCESS.
+- `pio test -e native`: **510 cases, 510 succeeded** (four new cases: one
+  scheduler, two policy, one response; the previous baseline was 506).
+- `pio project config` shows `extra_scripts = post:scripts/nano_upload_touch.py`
+  resolved for `env:nano_r4`, `env:bench` and `env:bench-watchdog`, and only
+  `post:scripts/native_toolchain.py` for `env:native`.
+- The attachment was confirmed **in this project's own environment graph**, not
+  only in the probe: `NANO_TOUCH_REPORT=1 pio run` and
+  `NANO_TOUCH_REPORT=1 pio run -e bench` each print
+  `nano_touch: attached the touch to a Alias target` (the script's opt-in
+  diagnostic line; unset, it prints nothing). No upload was attempted.
+- The touch script's own control flow was exercised on the host without touching
+  the board (`data/raw/nano_upload_touch_harness.py`, scratch and gitignored):
+  the non-dfu protocol path is a no-op, a missing port prints guidance and does
+  not raise, an already-present bootloader short-circuits the touch, and a
+  registration that did not land on the `upload` alias is reported rather than
+  swallowed. That run also confirmed the detection predicate against this
+  machine's real state - with the board in application mode, `dfu-util -l` lists
+  only the DFU *runtime* interface, so `Found DFU` is correctly absent.
+- The `pre:` versus `post:` attachment question was settled by measurement, not
+  by reading SCons: `data/raw/scons_alias_probe/` (scratch, gitignored) runs the
+  same ordering with both forms and shows the `pre:`-ordered action attaching to
+  an `Entry` and never firing, and the `post:`-ordered action attaching to an
+  `Alias` and firing.
+
+**On-target verification (same day, after the fixes - USB only, no motor supply)**
+
+The board was connected in application mode (`COM3`, `USB VID:PID=2341:0074`,
+`dfu-util -l` listing only the DFU runtime interface). Three uploads and three
+late-attach captures were made with the fixed firmware. No other hardware was
+connected and nothing was armed.
+
+- **F-1: verified.** `pio run -t upload` was run three times. Each run's hook
+  touched `COM3` at 1200 bps, detected the bootloader, and `dfu-util` flashed
+  66612 bytes to `Download done.` / `Done!` with exit status 0 - **three of three,
+  with no manual touch**, which is the thing this repository's documented upload
+  instruction could not do before. Evidence: `d22-f1-upload-verify.log` (the last
+  of the three; the two before it behaved identically). The observed detail worth
+  keeping: the port tears down while the touch is being applied, so pyserial
+  reports `OSError(22, 'A device which does not exist was specified.')` at that
+  moment - the hook prints it and continues, and the board is in its bootloader
+  immediately afterwards. Nothing in this repository should be read as claiming
+  that message means the touch failed.
+- **Image identity.** The flashed image is byte-identical to this tree's build:
+  `sha256 .pio/build/nano_r4/firmware.bin` = `6cfc65dcebbe555304d65b9f18f4e6bd8e58efac45a89c5b275809369f082af2`
+  before and after the last (comment-only) source edits, so the verified upload
+  behaviour belongs to exactly this source.
+- **F-4: verified for the case that failed, with one honest caveat.** Three
+  captures attached to a board that had booted with **nobody reading** (each
+  capture's first sample is `t_ms=2000, dt_ms=2000`, proving `setup()`'s bounded
+  wait ran to its full 2000 ms). Attach 1 and attach 3 opened with
+  `BOOT,fw=ev-nano-r4-p7b,schema=1,cadence_ms=20,...` as the **first line** -
+  the loss D21 recorded is gone. Attach 2 did **not** receive one: the stream
+  resumed mid-flight with current records, i.e. no attach transition was observed,
+  so no greeting was re-armed. Why the detach between attach 1 and attach 2 was
+  not seen is **not determined** (the port was closed by the capturing process;
+  whether and when the host deasserted DTR was not measured). The claim is
+  therefore stated narrowly in code, in `VERIFIED_STATE.md`, in the H0 protocol
+  and here: the boot line is sent **once per boot, to the first host that
+  attaches, whenever it attaches**; a greeting for every later attach is the
+  code's intent and is not demonstrated. All three captures are recorded verbatim
+  in `d22-f4-attach-observations.txt`, including the one that did not behave.
+
+**Not verified (needs the board)**
+
+- F-5: the logic is host-tested, but no board has echoed the new refusal yet. The
+  repeat must record `config set distance=9.50` verbatim and then `config show` to
+  show the held configuration did not change.
+- F-6: the arithmetic is host-tested, but `worst_late_ms`/`dropped_total` have
+  not been read from a board (B1 needs the bench image, which was not flashed in
+  this session).
+- F-3: unchanged - one occurrence, no root cause, one recovery (a physical power
+  cycle). This session's three uploads all succeeded, which is a second data
+  point but not a reproduction and not a fix.
+- The boot-line re-greeting on a later attach (attach 2 above).
+- Nothing about the vehicle: still no motor supply, no drivetrain, and no
+  motion-related row changes.
+
+**Next stage**
+
+H0W stays blocked until H0 passes. The H0 repeat should be pre-registered (as
+D21's "Next stage" requires), and it now has one extra thing to check: that a
+plain `pio run -e bench -t upload` reaches the bootloader with no manual touch,
+and that a reader attaching after boot is greeted with `BOOT,...`.
+
+---
+
+## D23 - 2026-09-28 - F-4 follow-up - The greeting no longer depends on an attach edge
+
+**Baseline inspected before any edit**
+
+- Branch `main`. The D21 and D22 work was uncommitted, as it still is; nothing was
+  committed and no unrelated work was touched.
+- The F-4 decision was read from the sources that own it before editing:
+  `src/VehicleRuntime.cpp`/`.h` (`serviceStagedText()`, `drainTelemetry()`),
+  `src/SerialTransport.h`, and the installed Arduino core's `usb/SerialUSB.cpp` and
+  `tinyusb/class/cdc/cdc_device.{h,c}`. None of this is inference about the core:
+  `tud_cdc_n_connected(0)` is `tud_ready() && (line_state & 1)` (`cdc_device.c`),
+  i.e. **the DTR bit**, stored by `tud_cdc_line_state_cb` from the
+  `SET_CONTROL_LINE_STATE` handler (`cdc_device.c`), which runs under
+  `tud_task()` in the USB interrupt (`usb/USB.cpp`, `_usbfs_interrupt_handler`).
+  `SerialUSB::connected()` is `tud_cdc_connected() || ignore_dtr`, and no file in
+  `src/` calls `Serial.dtr()`, so `ignore_dtr` is never set and `connected()` is
+  exactly DTR. `SerialUSB::write()` returns 0 when disconnected and otherwise
+  loops until every byte is accepted - which is why the transport stages and
+  pumps instead.
+
+**The finding this addresses**
+
+D22 re-armed the greeting on a host-attach **transition**, and recorded honestly
+that one of three attaches showed no transition at all: the presence flag stayed
+true, nothing was re-armed, and no greeting was sent. D23 states the cause as far
+as the evidence supports: the only presence signal the firmware can see is the USB
+CDC line state, and a detach is not guaranteed to appear in it - a host that
+closes a port and reopens it for another reader process does not always deassert
+DTR. The remedy therefore cannot be "notice the detach better"; the greeting has
+to be re-owed on evidence that does not require one.
+
+**What changed**
+
+1. **The presence signal is both control lines, read without side effects.**
+   `SerialTransport.h` replaces `hostAttached()` with `hostLineState()` ->
+   `{dtr, rts}`. `dtr` is still the core's own `connected()`, the predicate
+   `Serial.write()` gates on, so it keeps its exact meaning - "a staged line can
+   move now". `rts` is read through `Serial.rts()`, a plain read of the value the
+   line-state callback stored. `Serial.dtr()` is still never called, because
+   reading it sets `ignore_dtr` and would make `write()` succeed into a void.
+2. **`ev::HostGreetPolicy` - the greeting decision, host-tested.** New
+   `lib/evcore/src/HostGreetPolicy.h`: pure logic over `(dtr, rts, nowMs)` that
+   answers whether a greeting is owed. Three observations owe it - a control line
+   that newly goes high (**either** bit), any byte from the host (which also
+   restarts the interval, so a typed session is greeted once rather than once per
+   command), and host silence at or past `kSilenceMs = 10000` (which repeats every
+   interval, so the one attach no edge can report is bounded instead of removed).
+   `VehicleRuntime` supplies the two inputs it cannot see - the sampled control
+   lines and `nowMs` - and stages the line only while `dtr` is high.
+3. **The greeting is callable: `boot`.** A new `boot` operator command re-sends the
+   boot line on demand - parser, `operatorCommandName()`, the help table, and the
+   inspection policy, so it is admissible in every state including mid-run. The
+   answer *is* the boot line: `VehicleRuntime::stageBootLine()` is now shared by
+   the automatic greeting and the command, so the two cannot drift apart.
+   `serviceStagedText()` takes `nowMs` (the bench console passes its own).
+4. **Nothing on the control path changed.** The greeting is still outside the
+   control tick, still non-blocking, and still staged only when a write can
+   actually leave; `drainTelemetry()`'s refusal to pop a record without a host is
+   unchanged, and the `EVS1`/`EVE1` schema is untouched.
+
+**Verified here**
+
+- `pio run` succeeds: 5972 B RAM (18.2%), 66836 B flash (25.5%), no warnings.
+  `pio run -e bench` and `-e bench-watchdog` succeed as well (6156 B RAM;
+  71252 B and 71580 B flash). `pio test -e native`: **517/517** - the D22
+  baseline's 510 plus 7 new cases in `test_host_greet_policy`.
+- The image for this source:
+  `sha256 .pio/build/nano_r4/firmware.bin` =
+  `cfd288d455c2cf6c4d15f4b236827ee3e217f40ffe623b71ef301c265b38b788` (two
+  clean rebuilds of the final source agree, so the hash identifies it).
+
+**Not verified (needs the board)**
+
+- **Nothing here was flashed.** The D22 upload was `6cfc65dc...` / 66612 bytes,
+  which is no longer this tree's image, so D22's on-target F-4 observations belong
+  to the D22 source. The new image's greeting behaviour on a late attach is
+  **unobserved**.
+- Specifically unobserved: the silence rule firing for a host that presents no
+  attach edge, and `boot` typed at a board. The D22 captures were 4-6 s long,
+  which is shorter than `kSilenceMs`, so a repeat has to capture for **longer than
+  10 s** and record whether a `BOOT,...` line appears mid-capture. A capture whose
+  first line is `BOOT,...` shows the attach edge, not the beacon, and the two must
+  be recorded separately.
+- The residual limit is unchanged and is now bounded rather than hidden: a host
+  that presents no control-line edge **and** never writes cannot be told apart
+  from the previous reader. The silence rule is what puts a number on that case.
+
+**Next stage**
+
+The H0 repeat keeps its D22 additions and gains two: a late-attach capture longer
+than `kSilenceMs`, and `boot` typed verbatim alongside the other inspection
+commands. Everything else about H0 - the pre-registered upload count, F-3, and
+H0W behind it - is unchanged.
+
+---
+
+## D24 - 2026-09-28 - Documentation - The limitations register, and one claim worded stronger than the code
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13`. The D21-D23 work is uncommitted, as it was; no
+  unrelated work was touched and nothing was committed.
+- The limitations existed but were scattered: D21's findings F-1..F-6, D22's and
+  D23's "Not verified" blocks, the caveats inside `VERIFIED_STATE.md` rows, the
+  H0 session README's "What this session does NOT establish", and
+  `SOFTWARE_ARCHITECTURE.md` sections 7 and 10. There was no single place to read
+  what the project cannot yet claim.
+- The greeting decision was re-read before writing it down, and that read is what
+  produced the correction below: `lib/evcore/src/HostGreetPolicy.h`,
+  `src/VehicleRuntime.cpp` (`serviceStagedText()`, the byte loop in
+  `serviceSerial()`), and `test/test_host_greet_policy/test_main.cpp`.
+
+**What changed**
+
+1. **New `docs/limitations.md` - the limitations register.** One file, grouped:
+   (A) nothing about the vehicle itself (rows #1-#12, plus the placeholder pin
+   map, the uninterpreted driver fault line, the unknown encoder mechanics, the
+   placeholder encoder pull-up, and the absent bottle mechanism); (B) implemented
+   and host-tested but never observed on the board (F-5's refusal, F-6's B1
+   extremes, the current image's greeting, the silence rule, `boot`); (C) known
+   defects and unexplained behavior (F-3 with no root cause; the byte-rule wording
+   corrected below; the greeting a typing no-edge reader postpones; the
+   `Serial.dtr()` trap; Unity's disabled double assertions); (D) upload and
+   toolchain limits on this machine (physical power cycle as the only F-3
+   recovery, the `renesas.inf` install, the monitor must be closed, the expected
+   `OSError(22)`, the hook deliberately never failing the upload, the single USB
+   port and the single board); (E) the watchdog being completely unqualified;
+   (F) placeholders and unbuilt enforcement points; (G) evidence and process
+   limits. Every entry carries where the limit is evidenced and what would remove
+   it, and the file states that it is a reading list, not evidence, and changes no
+   `VERIFIED_STATE.md` row.
+2. **Three records corrected, no code changed.** Three places said a byte from
+   the host *owes* the greeting: the header comment in `HostGreetPolicy.h`, D23,
+   and the `VERIFIED_STATE.md` boot-line row. The implemented and pinned behavior
+   is that `observeHostByte()` only **restarts the silence interval**
+   (`test_a_host_byte_restarts_the_silence_interval`, and the method's own
+   comment), which is also the only reading consistent with D23's own next clause
+   ("a typed session is greeted once rather than once per command" - owing on
+   every byte would greet before every command). The header comment and the
+   `VERIFIED_STATE.md` row were reworded to match the code and its test; D23 is
+   append-only and is corrected here instead. The behavioral consequence is now
+   recorded as a limitation rather than a property: a reader that presents no
+   control-line edge **and** types continuously postpones the greeting by
+   `kSilenceMs` per byte and may see no `BOOT,...` line at all while it types,
+   with `boot` (or stopping for ten seconds) as the manual remedy.
+3. **Pointers added so the register is not a dead end.** `VERIFIED_STATE.md`
+   gains a paragraph naming `docs/limitations.md` beside its own rule, and its
+   "How to promote a fact" list gains a step that narrows or deletes the matching
+   limitation in the same change; `docs/bringup/README.md` gains the same step in
+   "How a result is recorded".
+
+**H0W's entry gate, adjudicated**
+
+The H0W protocol's entry gate reads "H0 passed with reliable baseline upload,
+reboot, and serial behavior", and this repository records the opposite (D21: H0
+not passed, F-3 unexplained, 7/8 uploads; D22's "Next stage": H0W stays blocked
+until H0 passes). The gate is not re-interpreted here: **the gate stands, and the
+way to close it is the H0 repeat**, whose pre-registration must exist before its
+first upload (D21's "Next stage", `data/prereg/README.md`). The repeat runs the
+pre-registered upload series with the cable and port held constant, and it
+carries the additions D22 and D23 asked for (a late-attach capture longer than
+`kSilenceMs`, `boot` typed verbatim, F-5's refusal echoed by a board, B1's
+`worst_late_ms`/`dropped_total`). Only if it passes is H0W started, at its own
+Step 0.
+
+**Files changed**
+
+New: `docs/limitations.md`. Changed: `DEVELOPMENT_LOG.md`,
+`VERIFIED_STATE.md`, `docs/bringup/README.md`, `lib/evcore/src/HostGreetPolicy.h`
+(comments only), and the D23 note in `data/evidence/P-H0-2026-09-28/README.md`.
+No behavior change, no configuration change, no provisional value promoted, no
+`VERIFIED_STATE.md` row status changed, and nothing committed.
+
+**Verification (code only - no board was touched in this entry)**
+
+- `pio run`: SUCCESS, RAM 18.2% (5972 B), flash 25.5% (66836 B), no warnings.
+- `sha256 .pio/build/nano_r4/firmware.bin` =
+  `cfd288d455c2cf6c4d15f4b236827ee3e217f40ffe623b71ef301c265b38b788` - **the same
+  hash D23 recorded**, which is the check that the `HostGreetPolicy.h` edit is
+  comment-only: the image D23's statements belong to is still this source's image.
+- `pio test -e native`: **517/517 succeeded**.
+
+**Not verified (needs the board)**
+
+- Everything in section B of `docs/limitations.md`, and every limitation whose
+  owner is a later stage. This entry adds no hardware fact and removes none.
+- The greeting limitation in item 2 above is **unobserved**: whether a typing
+  reader actually misses the greeting on this board has never been measured, and
+  it is on the H0 repeat's list rather than fixed.
+
+---
+
+## D25 - 2026-09-28 - H0 repeat - Upload, boot and serial link, pre-registered (passed)
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13`; the D21-D24 work is uncommitted, as it was. No
+  firmware source and no configuration changed in this session: it is a
+  measurement session, and its only new files are records and evidence.
+- The pre-registration was written **before the first upload**
+  (`data/prereg/P-H0-repeat-2026-09-28.md`, recorded at `2026-09-28T22:07:04-07:00`),
+  which is the gap D21's retrospective file left open. 13 uploads were fixed in
+  advance (10 vehicle, 3 bench), with a failed upload ending the series, plus the
+  greeting/beacon capture rules, the F-5 refusal, the F-6 extremes read twice, and
+  a >= 1500-tick soak.
+- Why this session existed: H0W's entry gate requires a passed H0 and H0 was
+  recorded as not passed (D21 F-3, 7/8 uploads). The operator chose to close the
+  gate with the repeat rather than waive it.
+
+**What was run**
+
+USB only, no motor supply, wheels unloaded, board on `COM3`
+(`USB VID:PID=2341:0074`, `SER=350D331C5A333131021133354B573462`). Vehicle image
+`sha256=cfd288d4...` (66836 B), bench image `sha256=71f42e40...`. All captures were
+written verbatim by `data/raw/h0repeat_serial.py` (scratch, gitignored), which
+records when each `BOOT,...` line arrived and the observed telemetry spacing.
+
+**What was observed**
+
+- **14 uploads, 14 successes, no manual touch**: 10x `pio run -t upload`, 3x
+  `pio run -e bench -t upload`, 1 restoring upload. Each showed
+  `nano_touch: touching COM3 at 1200 bps (attempt 1/2)` -> `bootloader present;
+  uploading` -> `Download done.`/`Done!` with exit status 0; the hook never needed
+  its second attempt, and `COM3` re-enumerated with the same VID/PID/serial after
+  every one. The expected `OSError(22, ...)` appeared on each touch. **F-3 did not
+  recur**, and no attempt left the board non-enumerating.
+- **The greeting is verified on the current source.** A host attaching to a board
+  that had booted with nobody reading saw `BOOT,...` as its **first line in 7 of 7
+  attaches** (six vehicle captures, one bench capture), and the **silence rule
+  fired and repeated** at ~10.0 s cadence in every capture long enough to contain
+  a beacon - the D23 behavior that had never been seen on hardware. The **byte
+  rule is restart-only**: with commands at 1.55-10.02 s in one 26 s capture, no
+  beacon appeared near the 10.06 s deadline the attach alone would have produced,
+  and the next beacon arrived 10 s after the last host byte - which is the
+  behavior D24 corrected the prose to, now observed. **`boot` was answered by the
+  same line the greeting sends, verbatim.**
+- **The boot line is a live status line**: beacons later in the same boot reported
+  `stride=5` after `telemetry rate 10` was accepted, while the boot record at
+  `t_ms=0` had reported `stride=1`.
+- **F-5 is verified on target**: three identical rounds of `config set
+  distance=9.50` answered
+  `ERR,cmd=config set,reason=ValueOutOfRange,error=TargetDistanceOutOfRange`, and
+  each following `config show` still reported `target_m=7.5000,...,rules=1`. The
+  held configuration did not change - the opposite of D21's observation.
+- **F-6 is answered**: two `bench health` readings 25.5 s apart both reported
+  `worst_late_ms=1980,dropped_total=99` with `late_ms=0,dropped=0,violations=0`,
+  so the extremes were readable **and flat** during 25.5 s of healthy 50 Hz
+  telemetry with the host reading (`control_ticks` 773 -> 2046). They are the
+  boot's bounded wait: every unhosted boot's first sample is `dt_ms=2000`,
+  `t_ms=2000`.
+- **The whole documented command set answered in shape**, and the malformed set
+  (three identical rounds) was named 3/3 with `status` still `phase=Idle`,
+  `motor=Disabled`, `authz=AuthorizedStop`; each rejection carried its `EVE1`
+  `CommandRejected` event. The remaining verbs (`config clear`, `disarm`,
+  `reset`, `status`, `config check`) were exercised in a second capture, so every
+  verb in `help` has now been answered on a board.
+- **Host stops reading**: after 20 s unhosted, reattaching opened with `BOOT,...`,
+  flushed exactly 8 stale records (the lane capacity), then jumped 19.7 s to
+  current records; `drop_s=365` and rising only while nobody read, `drop_e=0`.
+- **Telemetry spacing**: 2305 consecutive 20 ms intervals at the default rate and
+  180 intervals of exactly 100 ms after `rate 10`, `dt_ms=20` on all 2488 samples;
+  `rate 100`/`rate 0.5` refused by name.
+- **A bench-image finding**: on `env:bench` the greeting's byte input never fires.
+  `src/bench/BenchMain.cpp` runs the console's read loop and the console forwards
+  non-bench lines to `runtime.handleCommandLine(...)`
+  (`src/bench/BenchConsole.h`) instead of running `VehicleRuntime::serviceSerial()`,
+  where `observeHostByte()` is called. Observed as timing: a `bench health` typed
+  at t=27.02 was followed by a beacon at 30.03, exactly 10.0 s after the previous
+  one. Operator verbs still work in that image (the console forwards them). H0W
+  runs the bench image, so a beacon there is evidence about the silence rule only.
+
+**H0's decision rule**
+
+Every pre-registered criterion was met. Two notes are recorded rather than
+smoothed: the "attaching while the firmware already believed a host was attached"
+condition was **not observed** this session (the protocol counts it neither way,
+and D21 saw it once), and the cadence clause's extremes are **non-zero**, all of
+it the bounded boot wait before the loop starts. **H0 passes**; F-3 stays an open
+limitation (one occurrence ever, unreproduced in 14 uploads, cause undetermined).
+
+**Files changed**
+
+New: `data/prereg/P-H0-repeat-2026-09-28.md`,
+`data/evidence/P-H0-repeat-2026-09-28/` (README plus eight captures). Changed:
+`DEVELOPMENT_LOG.md`, `VERIFIED_STATE.md` (the upload row, the F-5 and F-6 rows,
+and a new on-target section for this session), and `docs/limitations.md`. No
+firmware source, no `platformio.ini`, no configuration value, and nothing
+committed.
+
+**Verification**
+
+- `pio run` (before the session) SUCCESS, 5972 B RAM / 66836 B flash, no warnings;
+  `sha256 .pio/build/nano_r4/firmware.bin` = `cfd288d4...` - the image the
+  session's on-target claims belong to.
+- `pio test -e native`: **517/517** (run in D24 on this same source; this session
+  changed no source, and no test was skipped).
+- The session's own gates: 10/10 and 3/3 uploads, 7/7 attaches greeted,
+  beacons in five vehicle captures, F-5 refusal three times, extremes read twice.
+
+**Not verified**
+
+- **Nothing about the vehicle**: no motor supply, no driver, no encoder, no
+  battery, no drivetrain. Rows #1-#12 are untouched, and no motor-output safety
+  statement follows from a reset or from anything here (H1A owns that).
+- **No root cause for F-3**, and the greeting's one counted-neither-way condition.
+- **The watchdog**: the vehicle image ships it disabled and the bench capture is
+  the disabled build. Nothing here says the watchdog starts, counts, refreshes or
+  resets - that is H0W, which this session unblocks.
+
+**Next stage**
+
+H0W, per `docs/bringup/P-H0W-watchdog-qualification.md`, starting at its Step 0
+with the now-closed gate. What this session hands it: the boot gap is ~1980 ms of
+lateness and ~99 dropped deadlines (so a timeout opened before `setup()`'s wait
+could not survive a boot), `first_refresh_ms` is still 0 in the disabled build so
+the boot-to-first-refresh gap is Step 1's measurement, and B1's extremes must be
+read from the bench image where the greeting's byte input does not fire.
+
+---
+
+## D26 - 2026-09-28 - H0W (Steps 0 and 1) - The prepared watchdog path opens and runs without a false reset
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13`. The entry gate was checked first and is
+  satisfied: H0 passed in its pre-registered repeat (D25). The protocol's other
+  prerequisites were checked before the first upload - `grep -rn "WDT" src/`
+  matches only `src/WatchdogCheckpoint.h` (so there is exactly one refresh path),
+  `arm-none-eabi-nm` over `.pio/build/nano_r4/firmware.elf` filters for
+  `bench|hang` to **0** matches against **25** in the bench image (the vehicle
+  image cannot contain the hook), and `kDeliberateHangAfterPasses` is at its
+  shipped inert `0U`.
+- `data/prereg/P-H0W-2026-09-28.md` was written before the Step 0 upload, fixing
+  the margin (100 ms), the soak (60 s per load condition), the hang cycles (5),
+  the recovery cycles (5), the hook value (500 passes) and the timeout rule
+  (never the 250 ms placeholder).
+
+**What was run**
+
+USB only, **motor supply off and disconnected**. Two uploads, 60 s soaks, host
+reading at the default rate, `bench health` at each end. `env:bench`
+`sha256=71f42e40...` (watchdog disabled, Step 0) and `env:bench-watchdog`
+`sha256=dc5a1bcb...` (enablement requested, Step 1). No header was edited to
+enable anything: the define is `[env:bench-watchdog]`'s.
+
+**What was observed**
+
+- **Step 0 (disabled)**: `enable=0,open_attempted=1,opened=0,open_refused=0`,
+  `refreshes=0`, `control_ticks` +2799 in 56 s (50.0/s), telemetry `t_ms`
+  monotonic 2000 -> 65042, one boot, no resets, and the extremes
+  `worst_late_ms=1980`/`dropped_total=99` identical at both ends.
+- **Step 1 (enabled)**: **`opened=1`, `open_refused=0`** - the requested 250 ms was
+  accepted - and **`refreshes == passes` exactly** (+2576103 each, `withheld=0`),
+  i.e. one refresh per completed loop pass and no second refresh path. Zero
+  unexplained resets over 60 s, `violations=0`, `late_ms=0`/`dropped=0` at both
+  readings, and the extremes unchanged from the disabled baseline: enablement did
+  not change the loop's health.
+- **`first_refresh_ms=0`**: the boot-to-first-refresh gap is below a millisecond at
+  `millis()` resolution, because the open is at the end of `setup()` after the
+  bounded wait. The 50 ms placeholder is at least 50x too large.
+- **The main loop is free-running**: ~46,000-47,600 iterations per second against
+  exactly 50 control ticks per second, so `passes` counts iterations and the
+  healthy refresh interval is one iteration (~21 us), not the 20 ms control
+  period. What a timeout must survive is the gap before the first pass and a stall
+  *inside* a pass. This is the measurement Step 6 needs, and it contradicts the
+  assumption the placeholders were written with.
+- **B1 has no worst-refresh-interval field**, as the pre-registration anticipated;
+  `worst_late_ms` is used as the proxy and the missing field is recorded.
+- **16 consecutive uploads with no manual touch** since F-3 (14 in D25, 2 here).
+
+**What this is not**
+
+Steps 2-5 (three load conditions, the deliberate hang, the recovery cycles), Step
+6 (choosing the timeout) and Step 7 (re-running at it) have **not** run, and Step 8
+(loaded-run re-validation) remains owed. H0W's acceptance rule has not been
+exercised: in particular no hang has been produced, so "a deliberate main-loop
+hang reliably causes a watchdog reset" is untested, the realized timeout period is
+unmeasured, and the post-reset pin levels have not been recorded. **No row is
+promoted from "partial".**
+
+**Files changed**
+
+New: `data/prereg/P-H0W-2026-09-28.md`,
+`data/evidence/P-H0W-2026-09-28/` (README plus three captures). Changed: this file,
+`VERIFIED_STATE.md` (one partial row) and `docs/limitations.md` (section E). No
+firmware source changed, no configuration value changed, no timeout changed, the
+hook was left at `0U`, and nothing was committed.
+
+**Verification**
+
+- Both uploads exit 0 with no manual touch (`h0w-uploads.log`).
+- Soak arithmetic is in the captures: 3007-3008 samples, all 20 ms apart except the
+  read-window jump; `control_ticks` deltas of 2799 over 56 s.
+- No source changed in this entry, so the D24 verification stands: `pio run`
+  SUCCESS with `sha256 cfd288d4...`, `pio test -e native` **517/517**.
+
+**Next stage**
+
+H0W Steps 2-5 at the enabled build, then the timeout choice, then a re-run at it -
+done in D27.
+
+---
+
+## D27 - 2026-09-28 - H0W Steps 2-7 - The timeout is measured, the hang resets the board, and the numbers replace the placeholders
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13`; D21-D26 uncommitted, as they were. No motor
+  supply, wheels unloaded, motor driver/encoder/battery disconnected throughout.
+- Two gaps in the instruments were identified before the campaign, from the
+  protocol's own wording: (a) H0W Step 2 asks for "the worst observed interval
+  between consecutive refreshes" and B1 had no such field; (b) the hang hook's
+  pass count had been sized in D26's pre-registration against the 20 ms control
+  period, and D26 had just measured the loop at ~46,000 passes/s.
+
+**What changed in the source (four edits, none of them behavioural)**
+
+1. **`src/WatchdogCheckpoint.h` - `worstRefreshGapMs()`.** The longest interval
+   between two consecutive refreshes, computed from the `nowMs` `endOfPass()`
+   already receives: a comparison per pass, no added timer or peripheral read, and
+   no change to when or whether the watchdog is refreshed. The first refresh is
+   excluded (the boot gap has its own field, so the two numbers cannot hide each
+   other), and the value is reset in `begin()`. Millisecond resolution, because
+   the timeout is in hundreds of milliseconds and a sub-millisecond gap is
+   honestly 0 rather than invented.
+2. **`src/bench/BenchConsole.h` - the field is reported.** `worst_refresh_gap_ms`
+   joins the B1 `bench health` line, next to `first_refresh_ms`, and the readout's
+   header comment says which quantity it is and why it is not `worst_late_ms`.
+3. **`src/WatchdogCheckpoint.h` - the placeholders are the measurements.**
+   `kBootToFirstRefreshBudgetMs` 50 -> **0** (measured: `first_refresh_ms` reports
+   0, i.e. sub-millisecond), `kWorstRefreshIntervalBudgetMs` 40 -> **14**
+   (measured, identical across every load condition), `kWatchdogPlanMarginMs` 25 ->
+   **100** (pre-registered in `data/prereg/P-H0W-2026-09-28.md` before any
+   measurement existed), and `kWatchdogTimeoutMs` 250 -> **114**, which is
+   `ev::requiredWatchdogTimeoutMs()`'s own answer (14 + 100). The compile-time
+   assertion now applies the **whole** rule (`ev::timeoutIsQualified`, margin
+   included, where it previously asserted only the two coverage clauses), plus a
+   second assertion that the request equals the rule's requirement - so a
+   hand-edited timeout cannot leave the measured margin behind.
+4. **`src/bench/BenchMain.cpp` - the hang hook was set to 460000 for the campaign
+   and returned to `0U`.** The comment now records the unit trap: a "pass" is one
+   loop iteration at ~46,000/s, not a 20 ms control tick.
+
+**What was run and observed (13 uploads, all exit 0, no manual touch)**
+
+- **Step 2, three load conditions, 60 s each, enabled build:** telemetry off;
+  the highest admissible rate (`telemetry rate 50` accepted as `stride=1`, and
+  so identical to the default) with the host reading; the same rate with the host
+  deliberately not reading. **`worst_refresh_gap_ms = 14` in every reading of
+  every condition**, `late_ms=0`/`dropped=0`, `refreshes == passes`, `withheld=0`,
+  `violations=0`, and **no reset in any of them** - one boot each, `t_ms` monotonic.
+- **Step 3, the deliberate hang:** the hook's first campaign produced **8 hangs and
+  8 resets in 95 s**, each cycle being `BENCH,hang=1,...`, the USB device vanishing
+  171-344 ms later, a reconnect, `BOOT,...`, and ~10 s of healthy telemetry. The
+  first attempt's capture died with `ClearCommError failed (PermissionError(13, ...))`
+  - the reset seen from the host side - which is why the campaign uses a
+  disconnect-surviving capture (`data/raw/h0w_cyclic_capture.py`, scratch).
+- **Step 4, recovery:** **5/5 uploads into a board that was looping hang/reset**
+  succeeded with no manual intervention and no manual bootloader entry, 8-9 s each;
+  the 1200-bps touch reaches the board while the main loop is hung.
+- **Step 5, under load:** the hang behaves the same with telemetry off
+  (hangs at 1.36 s, 13.13 s, 24.80 s; device gone 235-297 ms later), and with the
+  host not reading at all - re-attaching after 40 s found a fresh `EVE1 event=Boot`
+  and `opened=1` with `refreshes == passes`, i.e. **the watchdog re-arms and resets
+  with nobody watching**.
+- **Step 6, the choice:** margin 100 (pre-registered), boot gap 0, worst refresh
+  interval 14 -> **114 ms**, the rule's answer, not the placeholder.
+- **Step 7, at 114 ms:** a 63 s healthy soak with `opened=1`, `open_refused=0`,
+  `worst_refresh_gap_ms=14`, `refreshes == passes` and **no reset**; then **6 hangs
+  and 6 resets** with hang -> device-gone latencies of **0-141 ms**, against
+  171-344 ms at the 250 ms request. The latency scaling with the request is the
+  attribution H0W asks for.
+- **The hook is back at `0U`** in the tree and on the board, and the board was left
+  running the vehicle image (`7fc8d3b5...`) with the watchdog disabled.
+
+**Acceptance: everything met except one clause, and Step 8 owed**
+
+No reset while healthy across four healthy conditions; a hung loop reset 8/8 times
+at one timeout and 6/6 at another, well inside 3x; recovery 5/5 without hands; the
+build and the 517 native tests pass. **The post-reset pin levels are NOT measured** -
+no meter or logic analyzer was on the header - so H0W is **not recorded as passed**,
+and Step 8's loaded-run re-validation remains owed. The chosen 114 ms is therefore
+bench-qualified and provisional for the loaded run path.
+
+**Files changed**
+
+Source: `src/WatchdogCheckpoint.h`, `src/bench/BenchConsole.h`,
+`src/bench/BenchMain.cpp` (hook value only). Records: this file,
+`data/prereg/P-H0W-2026-09-28.md` (deviations and result),
+`data/evidence/P-H0W-2026-09-28/` (README plus fourteen captures and their arrival
+indexes), `VERIFIED_STATE.md` and `docs/limitations.md`. Nothing committed.
+
+**Verification**
+
+- `pio run`, `pio run -e bench`, `pio run -e bench-watchdog`: all SUCCESS, no
+  warnings. Images: vehicle `7fc8d3b5...`, bench `14018e96...`, bench-watchdog
+  `ba50cfb4...` (114 ms, hook `0U`); the campaign's hang image at 250 ms was
+  `2566610c...` and at 114 ms `47813b0e...`.
+- `pio test -e native`: **517/517**. The `WatchdogPlan` rule is host-tested and
+  unchanged; the asserted constants are compile-time, so a build that violated the
+  rule would not have produced an image at all.
+- No test covers `worstRefreshGapMs()` directly (it lives in the Arduino layer,
+  which host tests cannot compile, `test_build_src = no`). Its evidence is the
+  on-target readout, which is recorded - and that absence is stated rather than
+  papered over.
+
+**Not verified / next stage**
+
+- The post-reset pin levels (needs an instrument) and Step 8 (needs a loaded run).
+- `kPlannedMaxDwellGapMs` stays `Provisional`: the capture gives `late_ms=0` for
+every healthy tick and `worst_late_ms=1980` for the boot gap, so the honest bound
+is still the boot gap and H0W did not produce a better one.
+- H1A and any powered protocol are untouched: no driver, encoder or motor was
+connected at any point in this entry.
+
+---
+
+## D28 - 2026-09-28 - H0W Steps 2/3 and 5 closed - the pins after a reset are read, the loop's worst stall is measured, and the dwell bound is promoted
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `8e42d13`; D21-D27 uncommitted, as they were. Motor supply
+  off and disconnected, drivetrain unloaded, nothing armed, nothing connected.
+- D27's closing line said the post-reset pin levels "need an instrument", which
+  left H0W's fifth acceptance clause open. Two gaps in the instruments were
+  identified before any edit, both from the protocol's own wording:
+  (a) Step 3 asks to record "the MCU pin levels `nSLEEP`/`PH`/`EN` after the
+  restart" and no readout existed - `bench health` reports counters, not pins;
+  (b) Step 2 and Step 5 ask for "the **maximum control-loop stall**", "the
+  largest gap between two consecutive control-loop stamps", and B1 reported only
+  `late_ms`/`worst_late_ms` - lateness against a deadline, which is a *different
+  quantity* from the gap between two ticks.
+
+**What changed in the source (four edits, none of them behavioural)**
+
+1. **`lib/evcore/src/ControlScheduler.h` - `worstStallMs()`.** The longest
+   interval between two *consecutive committed control ticks*, since `start()`.
+   The first tick is **excluded**, by definition - a stall needs two ticks, and
+   the interval before the first one is `dtMs`' own boot gap, which is a different
+   fact and a much larger number (1980 ms, D25) that would otherwise dominate the
+   field and make the real stall invisible. Reset in `start()` alongside the other
+   session extremes. Deliberately separate from `worstLateByMs()`: lateness is
+   measured against the deadline, a stall against the previous tick, and a passing
+   tick can be late without the loop stalling.
+2. **`src/VehicleRuntime.h`/`.cpp` and `src/bench/BenchConsole.h` - the value is
+   reported.** `TelemetrySnapshot::worstStallMs` is filled from the scheduler in
+   `runPass` and B1's line carries `worst_stall_ms`, next to `worst_late_ms`, with
+   the readout's header comment saying why the two are not the same number.
+3. **`src/MotorDriver.h` and `src/bench/BenchConsole.h` - `bench pins`.**
+   `motorDriver::pinLevels()` reads the three driver inputs with
+   `digitalRead()` -> `R_IOPORT_PinRead()` and pairs them with
+   `lastDutyPermilleWritten()`, the duty this adapter last applied
+   (`lastDutyPermilleWritten()` is set in `beginDisabled()`, `failSafe()`,
+   `apply()` and `applyBench()`). `bench pins` prints them with
+   `source=pin_read` and `deenergized=` from
+   `ev::drv8874InputsAreDeEnergized()` - the same pure predicate that judges a
+   command, applied to the pins instead of to the request. `lib/evcore/src/
+   BenchCommand.h` gains `BenchVerb::Pins = 11` and its parse branch, and the
+   `help` verb list gains `pins`.
+
+   **A PWM duty cannot be read back from a pin.** `digitalRead` on the EN pin
+   reports the level it is being held at, which at zero duty is LOW and above it
+   is toggling. So the readout separates the two kinds of fact in the line itself:
+   the levels are **observed**, the duty is **written**, and the header comment and
+   the `source=` field say so. That distinction is the whole reason this can be
+   recorded without claiming H1A's electrical measurement.
+4. **`src/VehicleConfig.h` - `kPlannedMaxDwellGapMs` (40 ms) is replaced by
+   `kMaxDwellGapMs = 28U`, with a citation.** The symbol's old comment said its
+   honest value was "the measured maximum control-loop stall from H0W", and
+   D27 could not supply one; `worst_stall_ms` can. A new `measuredGapMs(value,
+   citation)` builder marks it `Measured`, `kMaxDwellGapEvidence` names the capture
+   and the log entry, and both `NearZeroConfig` builders (`reversalStopVerification()`
+   and `finalStopVerification()`) use it. The citation is not decoration:
+   `Sourced::citesEvidence()` is what the `MeasuredValuesCiteEvidence`
+   configuration check reads. The old symbol is gone from the tree, and the two
+   bring-up documents that named it (`docs/bringup/P-H0W-watchdog-qualification.md`,
+   `docs/bringup/P-H7-distance-braking-reversal.md`) now name the new one.
+
+   **The promotion changed no verdict that matters, and nothing became armable.**
+   `MeasuredValuesCiteEvidence` (`allPromotedValuesCiteEvidence()`) passed vacuously
+   while every value was provisional and passes on the citation now - it bites only
+   when a promoted value cites nothing, which is exactly the edit this avoids.
+   `validateNearZeroConfig()` still refuses both near-zero configurations, because
+   it requires the threshold, the dwell **and** the gap to be `Measured` and only
+   the gap is, so `stopEvidenceLimitSpansDwell()` and the reversal/phase config
+   validations still fail. The in-flight telemetry agrees: the D28 captures still
+   report the first failing check as `check=ConfigurationValid`.
+
+**What was run and observed (6 uploads, all exit 0, no manual touch)**
+
+- **The pins, before and after a reset** (`env:bench-watchdog`, 114 ms, hook
+  set): a capture that issues `bench pins` on every reconnect shows, per cycle,
+  the hang, the device vanishing, the reconnect and the readout. In
+  `h0w-step8-pins-after-reset.log`: **6 hang -> reset cycles and 7 readings - the
+  first before any hang, then 6/6 after a reset** - and every one of them read
+  `nsleep_high=0,phase_high=0,enable_high=0,duty_permille_written=0,deenergized=1`.
+  The final hang campaign on the current source adds 3 further post-reset reads
+  with the same values (`h0w-step7-final-hang.log`), for **9 observed post-reset
+  reads, all the de-energized combination**.
+- **The stall, per load condition** (`h0w-step8-pins-baseline.log`,
+  `h0w-step8-stall-loads.log`, `h0w-step8-stall-unread.log`): telemetry off and
+  the highest admissible rate with the host reading both reported
+  **`worst_stall_ms=21`**, the host-not-reading condition **22**, and a 57 s
+  baseline soak **28** at both ends of the file. The value does not drift with the
+  load, and the worst of it stayed within 1.4x of the 20 ms period the loop is
+  asked for.
+- **The final soak on the current source** (`h0w-step7-final-soak.log`, hook
+  `0U`): 45 s, `opened=1`, `open_refused=0`, `refreshes == passes`,
+  **no reset**, `worst_refresh_gap_ms=15` (14 in the earlier campaigns - the
+  quantity is alive, not pinned at a constant) and `worst_stall_ms=27`.
+- **The final hang on the current source**: 3 hangs, 3 resets, the device gone
+  **47-78 ms** after each `BENCH,hang=1` line, each followed by a reconnect and a
+  de-energized pin readout.
+
+**The pin clause: met, and why this reverses D27's wording**
+
+The protocol is explicit about what the clause is, and D27 (and D26's record)
+read it more strictly than it is written:
+
+- the header lists the protocol's second class as "**E** observation of the MCU
+  pin levels (motor supply off; motor disconnected)";
+- Step 3 asks for "the MCU pin levels `nSLEEP`/`PH`/`EN` after the restart, which
+  must be the de-energized combination the firmware initializes to (**levels
+  only**; H1A turns this into a statement about the driver outputs)";
+- the scope limit says "the pin levels the firmware drives on reset are
+  observable here, but what those levels do at the driver outputs is a different
+  fact and is measured electrically in H1A".
+
+The clause is therefore about the levels the *firmware drives*, which is exactly
+what `bench pins` reads, and the electrical statement is H1A's by the protocol's
+own construction. D27's "no instrument was on the header" was stricter than the
+clause; this entry corrects it by appending rather than rewriting, as D24 did for
+D23's greeting wording. The statements this supersedes, each left in place as the
+record of what was believed before D28: D27's "Not verified / next stage" line
+("The post-reset pin levels (needs an instrument)") and its acceptance paragraph
+("H0W is **not recorded as passed**"), the same wording in the H0W evidence README's
+scope paragraph and clause table, the `VERIFIED_STATE.md` H0W row, and
+`docs/limitations.md` section E.
+
+**What the readout is, and what it is not.** It is `digitalRead()` of the same
+three pins the firmware drives, i.e. the MCU's own view. It establishes that the
+reset re-runs initialization to the de-energized combination; it says **nothing
+about the driver outputs**, which H1A owns. Two limits travel with it:
+
+1. it is the firmware's own instrument, not an independent one: a pin driven low
+   but shorted high at the header would still read as the MCU sees it;
+2. every observed reset followed a **drive-free** hang - the motor supply is off
+   in this protocol by design - so "a reset taken *while an effort is commanded*
+   returns to de-energized" is **not** established here and cannot be.
+
+**The hook slip, and its correction**
+
+The upload log's last block, labelled "final: hook back to `0U`", uploaded an
+image (`858a5a32...`) that **still contained `kDeliberateHangAfterPasses = 460000U`**:
+the source edit had not been made before the build, and the build cannot see that -
+it compiled exactly what it was given. It was found by reading the tree afterwards,
+not by the build or the tests. `src/bench/BenchMain.cpp` now genuinely says `0U`,
+the rebuild is `ddba3b9d...`, and an appended `!!! CORRECTION` block in
+`data/evidence/P-H0W-2026-09-28/h0w-uploads.log` records what was uploaded versus
+what the log claimed. The vehicle upload in that same block is unaffected: the
+vehicle image cannot contain the hook (`src/main.cpp` asserts the define is absent
+and the bench tree is not compiled there).
+
+**Acceptance: H0W's rule is met, as a bench qualification**
+
+All five clauses of the protocol's acceptance rule now have recorded evidence:
+`opened()` true at the chosen timeout; zero resets while healthy across four load
+conditions; a hung loop reset 8/8 times at 250 ms and 6/6 at 114 ms with the
+latency scaling with the request; **the pin levels after restart are the
+MCU-driven de-energized combination, 9/9 observations**; and 5/5 (plus the D28
+campaign's) uploads into a looping board with no hands. **Step 8 is not one of the
+acceptance clauses** - the protocol pre-registers it as "owed, not done here" - so
+H0W is recorded as **passed for the bench load**. The chosen **114 ms remains a
+bench number**, provisional for the loaded run path until Step 8 is repeated
+there, and `kMaxDwellGapMs = 28` is likewise a bench measurement to re-take then.
+
+**The cadence margin against the policy values**
+
+H0W's "if it passes" list asks for the measured cadence margin to be recorded as
+evidence for the cadence policy values, so it was checked against them. The
+observed interval between healthy ticks is the requested 20 ms (`dt_ms=20`,
+`late_ms=0`, `dropped=0` in every healthy reading) and the worst stall was 28 ms,
+which sits inside `kMaxSampleAgeMs = 60` - the longest age a control-path sample
+may have, three periods - with room to spare, and far inside
+`kStopEvidenceMaxAgeMs = 3200`. **No policy value was contradicted, so none was
+changed.** That is a consistency check, not a validation: the estimator window
+(`kEstimatorWindowMs = 20`) and the no-edge timeout (`kEstimatorNoEdgeTimeoutMs =
+100`) remain policy, because no window has been shown adequate for this encoder -
+that needs an encoder and H5/H10, not a bench soak with nothing attached.
+
+**Files changed**
+
+Source: `lib/evcore/src/ControlScheduler.h`, `lib/evcore/src/BenchCommand.h`,
+`src/VehicleRuntime.h`, `src/VehicleRuntime.cpp`, `src/MotorDriver.h`,
+`src/VehicleConfig.h`, `src/bench/BenchConsole.h`, `src/bench/BenchMain.cpp` (the
+hook back to `0U`). Tests: `test/test_control_scheduler/test_main.cpp` (one new
+case), `test/test_bench_command/test_main.cpp` (the `pins` verb). Records: this
+file, `data/evidence/P-H0W-2026-09-28/` (README, six captures and their arrival
+indexes), `data/prereg/P-H0W-2026-09-28.md` (two deviations and the result),
+`VERIFIED_STATE.md`, `docs/limitations.md`, and the symbol rename plus the
+consistency pass in `docs/bringup/P-H0W-watchdog-qualification.md`,
+`docs/bringup/P-H7-distance-braking-reversal.md`, `docs/bringup/README.md`,
+`SOFTWARE_ARCHITECTURE.md` and `README.md`. Nothing committed.
+
+**Verification**
+
+- `pio run`, `pio run -e bench`, `pio run -e bench-watchdog`: SUCCESS, no
+  warnings. Images on disk: vehicle `eb440b31...` (67020 B), bench `1f775f89...`,
+  bench-watchdog (114 ms, hook `0U`) `ddba3b9d...`.
+- `pio test -e native`: **518/518**, including the new
+  `test_the_stall_extreme_is_the_gap_between_consecutive_ticks`, which pins that a
+  later smaller stall does not lower the extreme and that the first tick is
+  excluded.
+- `worstStallMs()` is host-tested (the scheduler is pure); `pinLevels()` and
+  `worstRefreshGapMs()` are not - they live in the Arduino layer, which host tests
+  cannot compile (`test_build_src = no`) - so their evidence is the on-target
+  readouts above, and that absence is stated rather than papered over.
+
+**Not verified / next stage**
+
+- **Step 8** (loaded-run re-validation): needs a run path, which does not exist.
+  Until it exists the timeout and the dwell bound are bench numbers.
+- **The driver outputs**: whether the pins' levels de-energize the DRV8874 is
+  H1A's electrical measurement, and no statement about motor-output safety is
+  recorded here.
+- **A reset while driving**: never observed, and not observable with the motor
+  supply off (see above).
+- **The realized timeout period**: still bounded, not clocked - the timer rounds
+  the request up and the latency measured includes the host noticing a vanished
+  device.
+- H1A and any powered protocol are untouched: no driver, encoder or motor was
+  connected at any point in this entry.

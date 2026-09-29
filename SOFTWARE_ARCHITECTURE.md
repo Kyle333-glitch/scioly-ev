@@ -480,9 +480,12 @@ another's, and none is a run state machine.
   configured `NearZeroConfig::maxUpdateGapMs` restarts the interval and reports
   `NearZeroStatus::UpdateGapExceeded` instead of being credited as continued
   evidence. That limit is a `Sourced` value like the threshold and the dwell, and
-  its measured source is the maximum control-loop stall H0W records - so a stall
-  cannot silently earn the interval a stop is verified over. Reason recorded in
-  `DEVELOPMENT_LOG.md` D19; pinned by `test_near_zero_verifier`.
+  its measured source is the maximum control-loop stall H0W records - **28 ms,
+  measured in the D28 bench campaign** (`kMaxDwellGapMs`, `Measured` and cited,
+  `src/VehicleConfig.h`) - so a stall cannot silently earn the interval a stop is
+  verified over; a loaded run that stalls longer only restarts the verifier's
+  interval. Reason recorded in `DEVELOPMENT_LOG.md` D19 and D28; pinned by
+  `test_near_zero_verifier`.
 - **The two effort ceilings must be equal.**
   `VelocityControllerConfig::maxEffortPermille` is derived from
   `SafetyLimits::maxEffortPermille`, and `ev::effortCeilingsAgree()` is the
@@ -803,8 +806,9 @@ is the implementation of the wiring obligations sections 12-14 recorded
   cannot survive boot. The measured boot gap
   (`WatchdogCheckpoint::timeToFirstRefreshMs()`) is reported to the bench for
   H0W's timeout choice.
-  Enablement is one centralized expression and it is **off**: no watchdog behavior
-  has been observed on this target, and compiling and linking the adapter is not
+  Enablement is one centralized expression and it is **off** in the vehicle image;
+  what has been observed (`env:bench-watchdog`, D26-D28) belongs to the bench
+  qualification and not to this build, and compiling and linking the adapter is not
   validation of any of it. Its value comes from a build define that only the
   bench environment for H0W sets (`env:bench-watchdog`), rather than from a literal
   in a header both images compile - enabling the watchdog for a bench
@@ -888,9 +892,11 @@ held-configuration verdict (`heldRunConfigVerdict()`) and the telemetry rate to 
 whole-tick stride mapping (`telemetryStrideForRate()`). Nothing else may decide
 that a command is acceptable.
 - **The command vocabulary is frozen, and it is inspection plus intent.**
-  `help`, `version`, `status`, `checks`, `config show`, `config check`,
+  `help`, `version`, `status`, `checks`, `boot`, `config show`, `config check`,
   `config set`, `config clear`, `announce`, `arm`, `disarm`, `reset`,
   `telemetry on`, `telemetry off`, `telemetry status`, `telemetry rate <hz>`.
+  (`boot` re-sends the boot line; like the other inspection commands it changes
+  no run state, so it is admissible in every phase.)
   **No command commands an effort, a mode or a direction, and none starts a run.**
   The start trigger is a physical input; the closest any command comes to motion
   is the arming intent, which is still a decision the chain's own checks refuse

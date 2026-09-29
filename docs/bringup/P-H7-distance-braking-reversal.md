@@ -31,10 +31,13 @@ and the end-to-end accuracy check.
   braking numbers are measuring a coast and the plan needs a distinct brake level
   (or a different stop policy) before they mean what their names say.
 - The stop-verification dwell's credibility is bounded by the measured control-loop
-  stall, not by the timeout: `kPlannedMaxDwellGapMs` and the near-zero verifier's
-  `maxUpdateGapMs` are `Provisional` until H0W records the maximum stall (see
-  `P-H0W-watchdog-qualification.md`). A dwell credited across an unmeasured stall
-  is not evidence.
+  stall, not by the timeout: `kMaxDwellGapMs` is the value both `NearZeroConfig`
+  builders hand the verifier as `maxUpdateGapMs`, so a dwell is credited only across
+  gaps no longer than a stall H0W actually observed. That value is now
+  **`Measured`** - 28 ms from the D28 bench campaign (`src/VehicleConfig.h`) - but it
+  is a **bench** measurement, so H0W **Step 8** must re-take it once a loaded run
+  adds work to the same loop, and a dwell credited across a longer stall than the
+  recorded one is not evidence (see `P-H0W-watchdog-qualification.md`).
 - A straight course with a marked start, target point and a **clear runout**
   beyond the target; no person in the path.
 - Tape and stopwatch, or a measured course with position marks; record the

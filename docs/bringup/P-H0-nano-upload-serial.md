@@ -27,9 +27,17 @@ H1A. There is no motor supply connected here.
 
 ## Setup
 
-Connect only USB. Open the port at 115200 (`pio device monitor` with logging to a
-file). Leave telemetry off for the boot and refusal steps; turn it on only for
-the cadence and host-load steps.
+Connect only USB. `pio run -t upload` (and `pio run -e bench -t upload`) perform
+the 1200-bps touch themselves: `scripts/nano_upload_touch.py` is a pre-upload
+action in `platformio.ini`, because this platform's own DFU uploader does not
+touch the port (D21 F-1). A manual touch is no longer part of the procedure - but
+a witnessed upload whose hook report says the bootloader was never found is
+itself a finding to record, not something to work around silently. If the hook
+cannot touch at all, record that and touch by hand, and say so in the log.
+
+Open the port at 115200 (`pio device monitor` with logging to a file). Leave
+telemetry off for the boot and refusal steps; turn it on only for the cadence and
+host-load steps.
 
 ## Held constant
 
@@ -47,14 +55,28 @@ each step, operator.
 
 1. **Upload and boot.** Run the pre-registered number of uploads and power
    cycles. Record the upload output, the count of successes, the time from reset
-   to the first `BOOT,...` line, and whether that line appears exactly once per
-   boot and never without one. Record `BOOT,...` verbatim: it reports the firmware
+   to the first `BOOT,...` line, and whether that line is the first line a host
+   sees when it attaches - including a host that attaches *well after* boot, which
+   is the case that failed on the first session (D21 F-4). The boot line is owed
+   to a host that is actually reading, so the rules to check are, in D23's terms:
+   the greeting is owed to the first host that attaches (D22 verified this on
+   target, twice in three attaches), it is re-owed when **either** control line
+   newly goes high, and it is re-owed again after `ev::HostGreetPolicy::kSilenceMs`
+   (10 s) of host silence, repeating at that cadence while the silence continues.
+   Because of the last rule, **each capture must run for longer than 10 s**: a
+   capture whose first line is `BOOT,...` shows the attach edge and not the
+   beacon, so record the two cases separately - a repeated `BOOT,...` appearing
+   mid-capture is the beacon, and its absence in a long-enough capture is a
+   finding. Record what each attach actually produced rather than what is
+   expected of it. Record `BOOT,...` verbatim: it reports the firmware
    id, the cadence, whether watchdog enablement is requested, whether every
    configuration check passed, whether the regulator enabled and whether the
    vehicle is armed - the facts that say which image and which configuration this
    boot is running.
 2. **Inspection, verbatim.** Record the exact bytes of `version`, `status`,
-   `checks`, `config show`, `help`. Then record `announce` and `arm`: with the
+   `checks`, `boot`, `config show`, `help` - `boot` (D23) re-sends the boot line on
+   demand and its answer *is* that line, so it must match the greeting verbatim.
+   Then record `announce` and `arm`: with the
    shipped provisional configuration both must be refused, and the refusal must
    name the first failing check. **Do not assume which check** - record the one
    named. A refusal naming a check that is clearly not the first failure is a
@@ -62,7 +84,11 @@ each step, operator.
 3. **Configuration and rule validation.** `config set` with a level, distance,
    time and bottle line; echo with `config show` and `config check`. Then a
    malformed field and an out-of-range field: each must be refused with a named
-   error, never silently clamped. Record each error name.
+   error, never silently clamped, and - for the out-of-range field - `config show`
+   afterwards must still report the *previous* configuration, because a refused
+   value is now refused outright rather than held (D21 F-5, fixed in D22). Record
+   each error name verbatim, including the new
+   `ERR,cmd=config set,reason=ValueOutOfRange,error=<rule error>`.
 4. **Malformed input never reaches the chain.** Send junk, an over-long line, too
    many tokens, a huge number and a half-finished command. Each produces a named
    error; no `OK` is produced for a command that was not applied; `status` still
@@ -78,10 +104,13 @@ each step, operator.
 7. **Cadence.** With telemetry at its default rate, capture a soak and read the
    `dt_ms` distribution. This step and Step 6 are the two the watchdog timeout
    choice leans on, so they are not optional: B1 (`bench health` in the bench
-   image, `pio run -e bench -t upload`) also reports the worst lateness, the
-   dropped deadlines, the pass/refresh/withheld counts and the measured
-   boot-to-first-refresh gap. Repeat at the highest admissible rate, and record
-   the worst case across both - never the average.
+   image, `pio run -e bench -t upload`) reports the pass/refresh/withheld counts,
+   the measured boot-to-first-refresh gap, the last tick's `late_ms`/`dropped`,
+   and - since D22 - the session's own extremes `worst_late_ms` and
+   `dropped_total`. Read the extremes, and read them twice: two readings of
+   `dropped_total` that differ mean the loop is still losing deadlines, which a
+   single spot value cannot show. Repeat at the highest admissible rate, and
+   record the worst case across both - never the average.
 
 ## Repetitions
 
@@ -98,12 +127,21 @@ combination at rest. To stop: remove USB; confirm the motor supply is off.
 
 ## Acceptance / decision rule
 
-Pass requires all of: the pre-registered upload/reboot counts met; the boot line
-appears exactly once per boot; every documented command answered in the
-documented shape; every malformed input named and rejected with no state change;
-cadence showing no dropped deadlines and no unexplained lateness at the chosen
-telemetry rate. If any upload fails, or the board reboots without a boot cause,
-do not proceed - that is a defect in the boot path or the host link.
+Pass requires all of: the pre-registered upload/reboot counts met, with each
+upload entering the bootloader without a manual touch; the boot line being the
+first line a newly attached host sees, including a host that attaches after boot,
+**and** - in a capture longer than `ev::HostGreetPolicy::kSilenceMs` - a repeated
+`BOOT,...` line from the silence rule, with `boot` answered by that same line
+verbatim (D23); a host attaching when the firmware already believed one was
+attached is recorded as an observation and counted neither way, because no
+host-side signal distinguishes it;
+every documented command answered in the documented shape; every malformed input
+named and rejected with no state change, including an out-of-range value leaving
+the held configuration untouched; cadence showing no dropped deadlines and no
+unexplained lateness at the chosen telemetry rate, with `dropped_total` and
+`worst_late_ms` reporting the extremes. If any upload fails, or the board reboots
+without a boot cause, do not proceed - that is a defect in the boot path or the
+host link.
 
 ## If it passes
 
@@ -122,3 +160,11 @@ First suspects, in the escalation order of `AGENTS.md` section 31: the bounded
 boot wait in `setup()`, the transport's `availableForWrite()` gating, and port
 enumeration or cable/port choice - then a firmware defect. Do not proceed to H0W
 or any powered protocol until H0 passes.
+
+If the board is left on the bus but not enumerating (D21 F-3: no COM port, no
+`VID_2341` device, `Unknown USB Device (Device Descriptor Request Failed)`), the
+pre-upload hook prints its own classification of that state before `dfu-util`
+errors out - record that output verbatim, then power cycle the board. The cause is
+still undetermined; a second occurrence with the same cable and port is what would
+turn it from an anomaly into a diagnosis, and it is worth a deliberate retry of
+the identical command afterwards to see whether the failure is sticky.

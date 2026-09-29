@@ -12,6 +12,13 @@ its raw observations are recorded.
 front of them. None is executed by a coding agent, and this stage stops before
 anything is powered. Writing a procedure is not running a test.
 
+**As of D25-D28, H0 and H0W have been executed** on the real board - USB only,
+motor supply off and disconnected - by the operator, and their raw captures are in
+`data/evidence/P-H0-2026-09-28/`, `data/evidence/P-H0-repeat-2026-09-28/` and
+`data/evidence/P-H0W-2026-09-28/`; the rows they earned are in `VERIFIED_STATE.md`.
+The protocol files themselves remain the plan, and nothing in this directory is
+evidence.
+
 ## Why this exists
 
 The firmware, the operator interface and the analysis tooling are built and
@@ -59,17 +66,21 @@ the same pattern.
 | H9 | [Fault injection](P-H9-fault-injection.md) | P (+E, +S) | H3, H7 |
 | H10 | [Full-run repeatability](P-H10-full-run-repeatability.md) | P | H7, H8, H9 |
 
-## Bench instrumentation (built; not yet exercised)
+## Bench instrumentation (built; B1, the pin readout and the hang hook exercised)
 
 Several protocols need the firmware to report something the production image
 deliberately cannot, one needs a bounded way to command effort outside a run, and
-H0W needs a deliberate way to stall the loop. These instruments now exist **in
-code**, and none of them has been run on hardware: they are prerequisites, not
-evidence.
+H0W needs a deliberate way to stall the loop. These instruments exist **in code**,
+and an instrument is a prerequisite for a measurement, never a measurement itself.
 
-**Status: BUILT, NEVER RUN.** Every instrument below is in the tree and builds;
-none has been observed on the board, and this section is not a result. Nothing
-here changes a `VERIFIED_STATE.md` row.
+**Status: BUILT.** B1, the driver-pin readout and the deliberate-hang hook have
+been run on the board in the H0 and H0W sessions (D25-D28): the counters, the
+cadence extremes, the worst refresh interval and the worst control-loop stall were
+read, and the hook produced real watchdog resets. Their evidence is in
+`data/evidence/P-H0W-2026-09-28/` and the rows in `VERIFIED_STATE.md`. **B2, B3 and
+B4 have not been run on hardware**, so nothing about the bench drive, the raw tick
+readout or the raw input readout is observed yet, and no protocol that uses B2 runs
+until H3's first step has demonstrated its bounded expiration and latched fault.
 
 The mechanism is the separate PlatformIO `bench` environment described in
 `SOFTWARE_ARCHITECTURE.md` section 17: `env:bench` compiles `src/bench/` and the
@@ -98,6 +109,14 @@ receives the define, and `src/main.cpp` refuses to compile if it ever does.
   **measured boot-to-first-refresh gap** (`first_refresh_ms`), whether the open was
   attempted/opened/refused, whether enablement is requested, the requested timeout,
   and the scheduler's `control_ticks`/`dt_ms`/`late_ms`/`dropped`/`violations`.
+  `late_ms` and `dropped` describe the **last control tick**; `worst_late_ms` and
+  `dropped_total` (D22) are the session's running extremes, which is the pair
+  H0 Step 7's "worst case, never the average" needs. `worst_refresh_gap_ms` (D27)
+  is the longest interval between two consecutive refreshes (the quantity H0W
+  Step 2 asks for), and `worst_stall_ms` (D28) the longest gap between two
+  consecutive control ticks, with the first tick excluded so the bounded boot wait
+  cannot dominate it - the stall, not the period, is the number that bounds credited
+  near-zero dwell.
   Needed by H0 and H0W (cadence evidence, the watchdog timeout choice, and the
   maximum control-loop stall that bounds the near-zero dwell credited without
   observation - see the H0W protocol). It is read-only, and the refresh stays in
@@ -150,6 +169,15 @@ receives the define, and `src/main.cpp` refuses to compile if it ever does.
 - **B4 - raw input readout.** `bench inputs` (also `bench trigger`). Reports the
   raw trigger level (`trigger_low`), the driver fault line's raw level, and
   `batt_counts`/`curr_counts`. H1B needs it (active level and bounce).
+- **The driver-pin readout (H0W Step 3).** `bench pins`. Reports the three driver
+  inputs as the MCU itself holds them (`digitalRead()`), plus the duty the adapter
+  last wrote, with `source=pin_read` saying which field is an observation and which
+  is written intent - a PWM duty cannot be read back from a pin. Its `deenergized=`
+  is the pure predicate that judges a command (`ev::drv8874InputsAreDeEnergized`)
+  applied to those levels, so a pin held the wrong way reports `0` instead of
+  reading as safe. It is the MCU's own view of the pins it drives: whether those
+  levels de-energize the driver outputs is H1A's electrical measurement, and a pin
+  driven low but held high at the header would still read as the MCU sees it.
 - **The deliberate-hang hook (H0W Step 3).** `kDeliberateHangAfterPasses` in
   `src/bench/BenchMain.cpp`: a compile-time pass count after which the loop hangs
   inside a pass, and it stages one `BENCH,hang=1,...` line first. It is a constant
@@ -157,7 +185,10 @@ receives the define, and `src/main.cpp` refuses to compile if it ever does.
   and it lives in the bench tree, so the vehicle image cannot contain it. H0W
   Step 3 sets it, rebuilds, and observes the resulting watchdog reset. It must
   only ever be set with the motor supply off: B2's bounded expiry is evaluated by
-  the same loop, so a hang suspends it too.
+  the same loop, so a hang suspends it too. **Note the unit:** a "pass" here is one
+  loop *iteration* and the loop is free-running at ~46,000/s (D26), so `460000U`
+  hangs about 10 s after the first pass, not 2.5 hours. The hook has now been used
+  (D27/D28) and is back at its shipped `0U`.
 
 Anything a protocol measures that the firmware cannot report is a defect to close
 in code before the test, not something to approximate with a scale that is itself
@@ -225,6 +256,10 @@ acceptable derivation; "five because the protocol said five" is not one.
 5. `docs/hardware/motor-driver-drv8874.md` tables updated if the measured driver
    behaviour contradicts the plan. Fix the plan or the wiring - never add a sign
    somewhere else.
+6. The matching entry in `docs/limitations.md` narrowed or deleted, so the
+   register of what the project cannot yet claim keeps matching the record. A
+   limitation that is still listed after its evidence exists is as misleading as
+   a row promoted without evidence.
 
 A report from `tools/telemetry/analyze.py` says what the firmware believed. It is
 never evidence of vehicle behavior, and it is never pasted into
@@ -260,10 +295,10 @@ inconclusive.
 | #10 wheel slip | H4 (hand-rolled vs powered), H7, H10 |
 | #11 bottle interaction behaviour | H8 |
 | #12 benefit of a ground / dead-wheel encoder | H4 (low plus cruise-near slip, deadband/coast separated) + H7 + H10: the measured slip distribution, with an explicit justified/not-justified verdict |
-| on-target watchdog behaviour and chosen timeout (**no row yet**) | H0W |
-| host-drain behaviour of the serial link (**no row yet**) | H0 |
-| observed control cadence and lateness (**no row yet**) | H0, H0W |
+| on-target watchdog behaviour and chosen timeout | H0W - **passed for the bench load**, D28 (Step 8 owed under a loaded run) |
+| host-drain behaviour of the serial link | H0 - **passed**, D25 |
+| observed control cadence and lateness | H0 (D25), H0W (D26-D28) |
 
-Items with no row yet are added only if the corresponding protocol passes; the
-existing numbered rows are never relabelled by these protocols, only promoted
-with their own recorded evidence.
+These rows were added when the corresponding protocol passed; the existing numbered
+rows are never relabelled by these protocols, only promoted with their own recorded
+evidence (`VERIFIED_STATE.md`).
