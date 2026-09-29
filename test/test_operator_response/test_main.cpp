@@ -210,6 +210,32 @@ void test_config_set_acknowledgement_repeats_the_held_configuration(void) {
         buffer);
 }
 
+// A refused `config set` names the rule the value broke and carries no
+// configuration echo: nothing was stored, and an echo of the unchanged held state
+// beside an error invites reading the refused value as held (finding F-5).
+void test_config_set_refusal_names_the_rule_and_echoes_nothing(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+
+    TEST_ASSERT_TRUE(ev::formatConfigSetRefusal(ev::ConfigError::TargetDistanceOutOfRange,
+                                                buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "ERR,cmd=config set,reason=ValueOutOfRange,error=TargetDistanceOutOfRange", buffer);
+
+    // Every rule error the door can report is a comma-free vocabulary name, so the
+    // line stays parseable whatever was refused.
+    for (uint8_t index = 0U; index <= static_cast<uint8_t>(ev::ConfigError::BottleStartNotLevelDistance);
+         ++index) {
+        const ev::ConfigError error = static_cast<ev::ConfigError>(index);
+        TEST_ASSERT_TRUE(ev::formatConfigSetRefusal(error, buffer, ev::kSerialLineCapacity) > 0U);
+        TEST_ASSERT_NOT_NULL(strstr(buffer, "ERR,cmd=config set,reason=ValueOutOfRange,error="));
+        TEST_ASSERT_NOT_NULL(strstr(buffer, ev::telemetryConfigErrorName(error)));
+        // The rule error is the last field and carries no delimiter of its own, so
+        // a script can read it to end of line whatever was refused.
+        const char* name = ev::telemetryConfigErrorName(error);
+        TEST_ASSERT_EQUAL_INT(0, strcmp(buffer + strlen(buffer) - strlen(name), name));
+    }
+}
+
 // The check report names every check, so "which fact is missing" is answered by
 // named columns rather than by a count.
 void test_check_report_names_every_check(void) {
@@ -483,6 +509,7 @@ void test_help_table_lists_the_commands(void) {
     bool mentionsConfigSet = false;
     bool mentionsTelemetryRate = false;
     bool mentionsStatus = false;
+    bool mentionsBoot = false;
     for (uint16_t index = 0U; index < ev::kOperatorHelpLineCount; ++index) {
         const char* line = ev::kOperatorHelpLines[index];
         TEST_ASSERT_NOT_NULL(line);
@@ -491,10 +518,12 @@ void test_help_table_lists_the_commands(void) {
         mentionsArm = mentionsArm || strncmp(line, "arm ", 4U) == 0;
         mentionsDisarm = mentionsDisarm || strncmp(line, "disarm ", 7U) == 0;
         mentionsStatus = mentionsStatus || strncmp(line, "status ", 7U) == 0;
+        mentionsBoot = mentionsBoot || strncmp(line, "boot ", 5U) == 0;
         mentionsConfigSet = mentionsConfigSet || strncmp(line, "config set ", 11U) == 0;
         mentionsTelemetryRate = mentionsTelemetryRate || strncmp(line, "telemetry rate ", 15U) == 0;
     }
     TEST_ASSERT_TRUE(mentionsStatus);
+    TEST_ASSERT_TRUE(mentionsBoot);
     TEST_ASSERT_TRUE(mentionsArm);
     TEST_ASSERT_TRUE(mentionsDisarm);
     TEST_ASSERT_TRUE(mentionsConfigSet);
@@ -509,6 +538,7 @@ int main(int, char**) {
     RUN_TEST(test_valid_configuration_echoes_values_and_derived_bottle_start);
     RUN_TEST(test_rejected_configuration_echoes_values_and_the_rule_error);
     RUN_TEST(test_config_set_acknowledgement_repeats_the_held_configuration);
+    RUN_TEST(test_config_set_refusal_names_the_rule_and_echoes_nothing);
     RUN_TEST(test_check_report_names_every_check);
     RUN_TEST(test_checks_failure_attribution_is_named_and_masked);
     RUN_TEST(test_announcement_refusals_carry_the_gate_that_refused);

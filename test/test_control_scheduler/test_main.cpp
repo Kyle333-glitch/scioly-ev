@@ -250,6 +250,78 @@ void test_wait_across_the_wrap_is_a_small_interval(void) {
     expectDue(1000U, 0U, 0U, decision);
 }
 
+// The worst lateness and the dropped-deadline total are session extremes, not
+// the last tick's values: a spot readout cannot answer "what was the worst case"
+// (P-H0 Step 7), so the scheduler keeps both. A later, smaller lateness must not
+// lower the extreme, and the dropped count must accumulate across ticks.
+void test_session_extremes_are_not_the_last_tick(void) {
+    ev::ControlScheduler scheduler(kPeriodMs);
+    scheduler.start(0U);
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstLateByMs());
+
+    // Right on the deadline: a clean tick leaves no worst case behind.
+    scheduler.decide(20U);
+    scheduler.advance(20U);
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstLateByMs());
+
+    // 35 ms late, one deadline (40) unreachable.
+    scheduler.decide(75U);
+    scheduler.advance(75U);
+    TEST_ASSERT_EQUAL_UINT32(35U, scheduler.worstLateByMs());
+    TEST_ASSERT_EQUAL_UINT32(1U, scheduler.droppedDeadlines());
+
+    // 5 ms late afterwards: it does not lower the extreme, and it drops nothing.
+    scheduler.decide(100U);
+    scheduler.advance(100U);
+    TEST_ASSERT_EQUAL_UINT32(35U, scheduler.worstLateByMs());
+    TEST_ASSERT_EQUAL_UINT32(1U, scheduler.droppedDeadlines());
+
+    // A worse tick raises the extreme and adds its own dropped deadlines
+    // (deadline at 120, this pass returns at 180: 60 ms late, three dropped).
+    scheduler.decide(180U);
+    scheduler.advance(180U);
+    TEST_ASSERT_EQUAL_UINT32(60U, scheduler.worstLateByMs());
+    TEST_ASSERT_EQUAL_UINT32(4U, scheduler.droppedDeadlines());
+    TEST_ASSERT_EQUAL_UINT32(4U, scheduler.ticks());
+}
+
+// The stall extreme is the gap between two consecutive committed ticks, and it is
+// not the lateness extreme: a tick can be late against its deadline and still be
+// exactly one period after the previous tick. P-H0W Step 2 asks for both numbers,
+// and the stall is the one that bounds credited near-zero dwell.
+void test_the_stall_extreme_is_the_gap_between_consecutive_ticks(void) {
+    ev::ControlScheduler scheduler(kPeriodMs);
+    scheduler.start(0U);
+
+    // The first tick has no predecessor, so it cannot contribute a gap: whatever
+    // interval preceded it is `dtMs`' own boot gap, reported separately. Here that
+    // gap would be 2000 ms and must not appear as a stall.
+    scheduler.decide(2000U);
+    scheduler.advance(2000U);
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstStallMs());
+    TEST_ASSERT_EQUAL_UINT32(1980U, scheduler.worstLateByMs());
+
+    // One period later: a clean 20 ms gap.
+    scheduler.decide(2020U);
+    scheduler.advance(2020U);
+    TEST_ASSERT_EQUAL_UINT32(20U, scheduler.worstStallMs());
+
+    // The loop is blocked for 60 ms (three periods): the gap is the extreme, and
+    // it is a wider number than the 40 ms lateness that came with it.
+    scheduler.decide(2080U);
+    scheduler.advance(2080U);
+    TEST_ASSERT_EQUAL_UINT32(60U, scheduler.worstStallMs());
+
+    // A later, shorter gap does not lower the extreme.
+    scheduler.decide(2100U);
+    scheduler.advance(2100U);
+    TEST_ASSERT_EQUAL_UINT32(60U, scheduler.worstStallMs());
+
+    // And a restart forgets it, like the other session extremes.
+    scheduler.start(5000U);
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstStallMs());
+}
+
 // Restarting re-arms the schedule from a new boundary and forgets the counters:
 // it is the loop's own boundary, not a vehicle event.
 void test_start_rearms_from_a_new_boundary(void) {
@@ -262,6 +334,8 @@ void test_start_rearms_from_a_new_boundary(void) {
     scheduler.start(10000U);
     TEST_ASSERT_EQUAL_UINT32(0U, scheduler.ticks());
     TEST_ASSERT_EQUAL_UINT32(0U, scheduler.droppedDeadlines());
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstLateByMs());
+    TEST_ASSERT_EQUAL_UINT32(0U, scheduler.worstStallMs());
     expectNotDue(19U, scheduler.decide(10001U));
     const ev::ControlTickDecision decision = scheduler.decide(10020U);
     expectDue(20U, 0U, 0U, decision);
@@ -274,6 +348,8 @@ int main(int, char**) {
     RUN_TEST(test_first_deadline_is_one_period_after_start);
     RUN_TEST(test_variable_dt_is_measured_not_nominal);
     RUN_TEST(test_missed_deadlines_are_dropped_and_counted);
+    RUN_TEST(test_session_extremes_are_not_the_last_tick);
+    RUN_TEST(test_the_stall_extreme_is_the_gap_between_consecutive_ticks);
     RUN_TEST(test_dropping_starts_above_one_whole_period);
     RUN_TEST(test_stalled_clock_does_not_retick);
     RUN_TEST(test_rewound_clock_is_reported_and_not_due);

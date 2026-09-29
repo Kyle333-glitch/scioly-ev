@@ -193,6 +193,56 @@ private:
     uint32_t telemetryLinesRefused_ = 0U;
 };
 
+// The host's control-line state: DTR and RTS, the two signals a USB CDC host
+// asserts when it opens the port. Reading them is the only presence question the
+// firmware can ask of a host.
+//
+// `dtr` is the core's own `connected()`, the predicate `Serial.write()` gates on
+// (`framework-arduinorenesas-uno`, `usb/SerialUSB.cpp`), so it means exactly "a
+// staged line can move right now" - the sense `pump()` needs. Why the firmware
+// needs to ask at all: *staged* is not *delivered*. A line staged while nothing
+// is reading sits in this transport indefinitely, and the port's own free-space
+// report does not reveal that - `availableForWrite()` describes the USB FIFO,
+// which has room whether or not a host exists. On the first hardware session the
+// boot line was staged into an unattended port and the capture that attached
+// later never saw it (finding F-4), so the vehicle layer asks before it commits a
+// line that must not be lost.
+//
+// `rts` is the second half of the same line state, read through `Serial.rts()`,
+// which is a plain read of the value `tud_cdc_line_state_cb` stored - it has no
+// side effect. `Serial.dtr()` is deliberately *not* used: reading it flips the
+// core's `ignore_dtr`, after which `connected()` - and therefore `write()` -
+// succeeds with no host attached, which is exactly the silent loss this exists to
+// avoid.
+//
+// Two bits rather than one, because a host can present a poor attach edge
+// (finding F-4): DTR is all the firmware can see of "a reader exists", and on
+// Windows a host that closes a port and reopens it for another reader process
+// does not always deassert it, so a line-state reading can be unchanged across a
+// genuinely new reader. An edge in *either* bit is therefore treated as an
+// attach; what the vehicle layer does with it, and why even that cannot be a
+// guarantee, is in `VehicleRuntime::serviceStagedText()` and
+// `data/evidence/P-H0-2026-09-28/d22-f4-attach-observations.txt`.
+//
+// `operator bool()` runs the USB task and, the first time it reports a connected
+// host, waits 10 ms (`SerialUSB.cpp`, its `first_call` guard). With the bounded
+// wait in `setup()` that normally happens during initialization, and a host that
+// attaches much later costs one 10 ms pass - which is why the vehicle layer
+// samples this at a bounded rate rather than on every pass (`kHostPollPasses`).
+struct HostLineState {
+    bool dtr = false;
+    bool rts = false;
+};
+
+inline HostLineState hostLineState() {
+    HostLineState state;
+    // DTR first: `operator bool()` runs the USB task, so a control-line change
+    // still queued is processed before the RTS bit below is read.
+    state.dtr = static_cast<bool>(Serial);
+    state.rts = Serial.rts();
+    return state;
+}
+
 // The one instance. It has static storage because the main loop is its only
 // caller and the buffer is too large for a stack frame, and because the ISR has
 // nothing to do with it either way.

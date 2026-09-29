@@ -234,6 +234,20 @@ inline void ackLine(const char* verb) {
 // the scheduler's own numbers from the runtime's last snapshot, which is what H0
 // and H0W record for cadence, and `first_refresh_ms` is the measured
 // boot-to-first-refresh gap the timeout choice has to cover.
+//
+// `late_ms` and `dropped` describe the *last* control tick, so a single readout of
+// them cannot answer "what was the worst case" (P-H0 Step 7 asks for exactly
+// that). `worst_late_ms` and `dropped_total` are the session's running extremes
+// over every tick since boot, from the scheduler's own counters, which is the
+// pair a soak reports; read both twice to see the loop still making progress.
+//
+// `worst_refresh_gap_ms` is the same kind of extreme for the watchdog itself: the
+// longest interval observed between two consecutive refreshes, which is the
+// quantity H0W Step 2 asks for and the schedulers' lateness can only approximate
+// (a refresh happens at the end of a pass, so its spacing is one pass wider than
+// the tick lateness). It is recorded in the checkpoint, from the same `nowMs` the
+// refresh already uses, so it adds a comparison per pass and no timer read - and
+// it changes nothing about when the watchdog is refreshed.
 inline void healthLine(const VehicleRuntime& runtime, const WatchdogCheckpoint& watchdog) {
     const TelemetrySnapshot& snapshot = runtime.telemetry();
     ev::BoundedText text(serialTransport::port().workingBuffer(),
@@ -250,10 +264,14 @@ inline void healthLine(const VehicleRuntime& runtime, const WatchdogCheckpoint& 
     text.field("withheld").appendUnsigned(watchdog.withheldRefreshes());
     text.field("last_refresh_ms").appendUnsigned(watchdog.lastRefreshMs());
     text.field("first_refresh_ms").appendUnsigned(watchdog.timeToFirstRefreshMs());
+    text.field("worst_refresh_gap_ms").appendUnsigned(watchdog.worstRefreshGapMs());
     text.field("control_ticks").appendUnsigned(snapshot.controlTicks);
     text.field("dt_ms").appendUnsigned(snapshot.dtMs);
     text.field("late_ms").appendUnsigned(snapshot.lateByMs);
     text.field("dropped").appendUnsigned(snapshot.droppedDeadlines);
+    text.field("worst_late_ms").appendUnsigned(snapshot.worstLateByMs);
+    text.field("worst_stall_ms").appendUnsigned(snapshot.worstStallMs);
+    text.field("dropped_total").appendUnsigned(snapshot.droppedDeadlinesTotal);
     text.field("violations").appendUnsigned(snapshot.orderViolations);
     text.field("armed").appendBool(runtime.armed());
     // The console's own interface counters, so a session can tell "I typed it and
@@ -316,12 +334,35 @@ inline void inputsLine() {
     respond(text);
 }
 
+// `bench pins` - the driver inputs as the MCU holds them (P-H0W Step 3).
+//
+// `source=pin_read` is part of the reading, not decoration: these are the levels
+// the MCU drives as reported by its own IOPORT read (`digitalRead()` ->
+// `R_IOPORT_PinRead()`), paired with the duty this adapter last wrote - a PWM duty
+// cannot be read back from a pin. An external voltage measurement at the header is
+// a different fact, owned by H1A. `deenergized=1` is `drv8874InputsAreDeEnergized`
+// applied to those levels and that duty, i.e. the same rule the plan uses for a
+// command, so a pin held the wrong way reports 0 instead of reading as safe.
+inline void pinsLine() {
+    const motorDriver::PinLevels levels = motorDriver::pinLevels();
+    ev::BoundedText text(serialTransport::port().workingBuffer(),
+                         benchConfig::kReadoutLineCapacity);
+    text.appendText("BENCH,pins=1");
+    text.field("source").appendText("pin_read");
+    text.field("nsleep_high").appendBool(levels.nSleepHigh);
+    text.field("phase_high").appendBool(levels.phaseHigh);
+    text.field("enable_high").appendBool(levels.enableHigh);
+    text.field("duty_permille_written").appendUnsigned(levels.dutyPermilleWritten);
+    text.field("deenergized").appendBool(levels.deEnergized);
+    respond(text);
+}
+
 inline void helpLine() {
     ev::BoundedText text(serialTransport::port().workingBuffer(),
                          benchConfig::kReadoutLineCapacity);
     text.appendText("BENCH,help=1");
     text.field("verbs")
-        .appendText("health drive arm stop reset ticks inputs");
+        .appendText("health drive arm stop reset ticks inputs pins");
     respond(text);
 }
 
@@ -431,6 +472,9 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
             return;
         case ev::BenchVerb::Inputs:
             inputsLine();
+            return;
+        case ev::BenchVerb::Pins:
+            pinsLine();
             return;
         case ev::BenchVerb::Unknown:
         case ev::BenchVerb::None:

@@ -52,6 +52,13 @@ namespace ev {
 //      *plus* whatever a pass costs, and telemetry can see that cost as
 //      lateness instead of it being hidden inside a burst.
 //
+//   *Per-decision* numbers answer "what did this pass do". They cannot answer
+//   "what was the worst this loop has been", which is the question a soak test
+//   asks (P-H0 Step 7). So the scheduler also keeps the two running extremes
+//   over the session since `start()`: the worst lateness any committed tick
+//   reported, and the cumulative count of deadlines dropped. Both are
+//   observations about the loop, not faults, and neither changes the decision.
+//
 // A rewound clock reading
 //
 //   A reading that is older than the previous one the scheduler saw is reported
@@ -130,6 +137,8 @@ public:
         nextDeadlineMs_ = nowMs + periodMs_;
         ticks_ = 0U;
         droppedTotal_ = 0U;
+        worstLateByMs_ = 0U;
+        worstStallMs_ = 0U;
     }
 
     // The decision for this pass, from this pass's clock reading.
@@ -175,7 +184,25 @@ public:
         }
         const int32_t sinceDeadlineMs = static_cast<int32_t>(nowMs - nextDeadlineMs_);
         if (sinceDeadlineMs > 0) {
-            droppedTotal_ += static_cast<uint32_t>(sinceDeadlineMs) / periodMs_;
+            const uint32_t lateByMs = static_cast<uint32_t>(sinceDeadlineMs);
+            if (lateByMs > worstLateByMs_) {
+                worstLateByMs_ = lateByMs;
+            }
+            droppedTotal_ += lateByMs / periodMs_;
+        }
+        // The gap between two *consecutive committed ticks* - the other extreme
+        // P-H0W asks for, and the one that bounds how much near-zero dwell may be
+        // credited without observation (`NearZeroVerifier`,
+        // `kMaxDwellGapMs`). Excluded on the first tick, by definition: a
+        // gap needs two control updates, and the interval before the first one is
+        // already `dtMs`' own boot gap, which is a different fact and a much
+        // larger number. Deliberately separate from `worstLateByMs_`: lateness is
+        // measured against the deadline, a stall against the previous tick.
+        if (hasLastTick_) {
+            const uint32_t stallMs = static_cast<uint32_t>(nowMs - lastTickMs_);
+            if (stallMs > worstStallMs_) {
+                worstStallMs_ = stallMs;
+            }
         }
         lastTickMs_ = nowMs;
         hasLastTick_ = true;
@@ -190,6 +217,17 @@ public:
     // value means the loop cannot keep the cadence and is evidence about loop
     // cost, not a fault.
     uint32_t droppedDeadlines() const { return droppedTotal_; }
+
+    // The worst lateness any committed tick has reported since `start()`: the
+    // maximum, not the value of the most recent tick. 0 until a late tick runs.
+    // This is the number a soak test reports instead of a spot reading.
+    uint32_t worstLateByMs() const { return worstLateByMs_; }
+
+    // The longest interval observed between two consecutive committed control
+    // ticks, since `start()`. The first tick is excluded (see `advance()`), so this
+    // is a steady-state number and the boot gap cannot dominate it. 0 until two
+    // ticks have run; equal to the period when nothing ever stalls.
+    uint32_t worstStallMs() const { return worstStallMs_; }
 
 private:
     // Measured interval since the previous completed tick, or since `start()`
@@ -207,6 +245,8 @@ private:
     uint32_t nextDeadlineMs_ = 0U;
     uint32_t ticks_ = 0U;
     uint32_t droppedTotal_ = 0U;
+    uint32_t worstLateByMs_ = 0U;
+    uint32_t worstStallMs_ = 0U;
 };
 
 }  // namespace ev

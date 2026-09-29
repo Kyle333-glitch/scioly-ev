@@ -90,6 +90,12 @@ void updateStatusLed(uint32_t nowMs) {
 // with the only bounded-expiry path (the loop) stopped. The bounded expiry in
 // `ev::BenchDrive` is evaluated by the loop, so a hang suspends it too - which is
 // exactly why H0W's hang step is not a powered step.
+// H0W Step 3: set to a non-zero pass count to hang the loop. NOTE the unit: a
+// "pass" here is one loop *iteration*, and the loop is free-running (~46,000/s
+// measured, D26) - it is not a 20 ms control tick. `460000U` therefore hangs
+// about **10 s** after the first pass, not 2.5 hours. `0U` is the shipped value
+// and the one this tree is left at; the hang campaign set it to 460000 and put it
+// back (D27).
 constexpr uint32_t kDeliberateHangAfterPasses = 0U;
 
 uint32_t hangPassesRemaining = 0U;
@@ -173,7 +179,7 @@ void loop() {
     // Low-priority work, in the production order: the operator's own output first,
     // then the console's read and dispatch, then the telemetry drain - so an
     // operator's answer outranks the log, and a bench verb outranks it too.
-    runtime.serviceStagedText();
+    runtime.serviceStagedText(nowMs);
     evhw::benchConsole::service(nowMs, runtime, watchdog);
 
     // The bounded bench command goes to the driver last - after the tick's own

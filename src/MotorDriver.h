@@ -86,6 +86,53 @@ inline bool& motorPinsOwned() {
 // contain no bench-named symbol, and `apply()` legitimately reads this flag.
 inline void setMotorPinsOwned(bool pinsOwned) { motorPinsOwned() = pinsOwned; }
 
+// ---------------------------------------------------------------------------
+// What the pins are actually being held at (P-H0W Step 3)
+// ---------------------------------------------------------------------------
+//
+// The duty this adapter last applied. It exists because a PWM duty cannot be read
+// back from a pin: `digitalRead` on the EN pin reports the level it is being held
+// at, which at 0 duty is LOW and at any other duty is toggling. So the readback
+// below pairs the **observed** pin levels with the **written** duty and says which
+// is which, rather than presenting the intent as a measurement.
+inline uint16_t& lastDutyPermilleWritten() {
+    static uint16_t duty = 0U;
+    return duty;
+}
+
+// The three driver inputs as the MCU itself sees them, plus the rule's verdict.
+//
+// Read through `digitalRead()` -> `R_IOPORT_PinRead()`: the level the MCU holds
+// each pin at, not an external voltage measurement at the header. That distinction
+// is the whole reason H0W can record this and still hand the electrical statement
+// to H1A.
+struct PinLevels {
+    bool nSleepHigh;
+    bool phaseHigh;
+    bool enableHigh;  // meaningful at 0 duty; above that the pin is switching
+    uint16_t dutyPermilleWritten;  // intent, not an observation
+    bool deEnergized;  // the plan's own rule, over the observed levels + that duty
+};
+
+inline PinLevels pinLevels() {
+    const bool nSleepHigh = digitalRead(kMotorSleepBar) == HIGH;
+    const bool phaseHigh = digitalRead(kMotorPhase) == HIGH;
+    const bool enableHigh = digitalRead(kMotorEnable) == HIGH;
+    const uint16_t duty = lastDutyPermilleWritten();
+    // The same pure predicate that judges a command, applied to what is on the
+    // pins instead of to what was asked for: it requires nSLEEP low and a zero
+    // duty, so a pin left driven the wrong way fails the check rather than being
+    // described as safe.
+    const ev::Drv8874Inputs asInputs{nSleepHigh, phaseHigh, duty};
+    PinLevels levels{};
+    levels.nSleepHigh = nSleepHigh;
+    levels.phaseHigh = phaseHigh;
+    levels.enableHigh = enableHigh;
+    levels.dutyPermilleWritten = duty;
+    levels.deEnergized = ev::drv8874InputsAreDeEnergized(asInputs);
+    return levels;
+}
+
 // Configures the three pins and leaves the driver de-energized: nSLEEP low,
 // PH low, EN at zero duty. This is the first hardware action the firmware takes,
 // before the encoder, the sensors, the serial port or any control state, so the
@@ -111,6 +158,7 @@ inline void beginDisabled() {
     // the duty arithmetic in the plan and the timer's own resolution agree.
     analogWriteResolution(ev::kPlannedPwmResolutionBits);
     analogWrite(kMotorEnable, 0);
+    lastDutyPermilleWritten() = 0U;
 }
 
 // Writes the driver's de-energized levels. Safe to call from anywhere, at any
@@ -120,6 +168,7 @@ inline void failSafe() {
     digitalWrite(kMotorSleepBar, LOW);
     digitalWrite(kMotorPhase, LOW);
     analogWrite(kMotorEnable, 0);
+    lastDutyPermilleWritten() = 0U;
 }
 
 // Applies one authorized command. `ev::drv8874InputsFor()` decides the levels;
@@ -139,6 +188,7 @@ inline void apply(const ev::AuthorizedMotorCommand& command) {
     digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
     analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
                                                        ev::kPlannedPwmResolutionBits));
+    lastDutyPermilleWritten() = levels.dutyPermille;
 }
 
 // Applies one bounded bench command (B2).
@@ -171,6 +221,7 @@ inline void applyBench(const ev::BenchDriveOutput& output) {
     digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
     analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
                                                        ev::kPlannedPwmResolutionBits));
+    lastDutyPermilleWritten() = levels.dutyPermille;
 }
 
 }  // namespace motorDriver

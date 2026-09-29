@@ -284,6 +284,7 @@ enum class OperatorCommandId : uint8_t {
     Status,
     Version,
     Checks,
+    Boot,           // re-send the boot line (this firmware's identity and state)
     ConfigShow,     // echo the held configuration and its rule verdict
     ConfigCheck,    // re-run the rule validation now and echo it
     ConfigSet,      // store the supplied fields (never announces anything)
@@ -310,6 +311,8 @@ inline const char* operatorCommandName(OperatorCommandId id) {
             return "version";
         case OperatorCommandId::Checks:
             return "checks";
+        case OperatorCommandId::Boot:
+            return "boot";
         case OperatorCommandId::ConfigShow:
             return "config show";
         case OperatorCommandId::ConfigCheck:
@@ -638,7 +641,8 @@ inline CommandParseResult parseOperatorCommand(const char* line, uint16_t length
     }
 
     if (tokenEquals(tokens[0], "status") || tokenEquals(tokens[0], "version") ||
-        tokenEquals(tokens[0], "checks") || tokenEquals(tokens[0], "announce") ||
+        tokenEquals(tokens[0], "checks") || tokenEquals(tokens[0], "boot") ||
+        tokenEquals(tokens[0], "announce") ||
         tokenEquals(tokens[0], "arm") || tokenEquals(tokens[0], "disarm") ||
         tokenEquals(tokens[0], "reset")) {
         if (tokenCount != 1U) {
@@ -649,6 +653,7 @@ inline CommandParseResult parseOperatorCommand(const char* line, uint16_t length
         result.request.id = tokenEquals(tokens[0], "status")     ? OperatorCommandId::Status
                             : tokenEquals(tokens[0], "version")  ? OperatorCommandId::Version
                             : tokenEquals(tokens[0], "checks")   ? OperatorCommandId::Checks
+                            : tokenEquals(tokens[0], "boot")     ? OperatorCommandId::Boot
                             : tokenEquals(tokens[0], "announce") ? OperatorCommandId::Announce
                             : tokenEquals(tokens[0], "arm")      ? OperatorCommandId::Arm
                             : tokenEquals(tokens[0], "disarm")   ? OperatorCommandId::Disarm

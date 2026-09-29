@@ -89,6 +89,7 @@ void test_every_verb_is_recognized_by_its_whole_name(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Ticks), static_cast<int>(ev::benchVerbFor(split("bench ticks"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Inputs), static_cast<int>(ev::benchVerbFor(split("bench inputs"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Inputs), static_cast<int>(ev::benchVerbFor(split("bench trigger"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Pins), static_cast<int>(ev::benchVerbFor(split("bench pins"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::DriveStatus), static_cast<int>(ev::benchVerbFor(split("bench drive-status"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Drive), static_cast<int>(ev::benchVerbFor(split("bench drive fwd 10 10"))));
 }
@@ -97,6 +98,7 @@ void test_every_verb_is_recognized_by_its_whole_name(void) {
 void test_a_prefix_of_a_verb_is_not_the_verb(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench dri"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench drive-stat"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench pin"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench arming"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Unknown), static_cast<int>(ev::benchVerbFor(split("bench ARM"))));
 }

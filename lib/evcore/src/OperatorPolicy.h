@@ -98,6 +98,58 @@ inline HeldRunConfigVerdict heldRunConfigVerdict(const RunConfigFields& fields) 
     return verdict;
 }
 
+// Checks the fields one `config set` supplied, *before* any of them is stored.
+//
+// Why this exists: a held value is echoed back by `config show` and is
+// indistinguishable from a value the operator meant, so a mistyped number must
+// not become state at all. On the first hardware session an out-of-range Target
+// Distance was held and reported as held (`OK,cmd=config set` with
+// `rules=0,error=TargetDistanceOutOfRange`) - named and still unarmable, but the
+// held configuration had changed, which is not what the protocol says a refused
+// value does (finding F-5).
+//
+// Scope: only the checks a single field can fail on its own - a non-finite
+// number, one of the rule ranges, and a level index that names a real level. The
+// announced grid and the cross-field geometry checks (Bottle Start before
+// Target, Bottle Start fixed by the level) need the level *and* the rest of the
+// configuration, so they stay with the single rule entry point
+// (`validateRunConfig()` through `heldRunConfigVerdict()`) that `config show`,
+// `config check` and `announce` already run. Two entry points, deliberately: this
+// one refuses a value at the door, that one judges a whole configuration.
+inline RunConfigValidation validateSuppliedConfigFields(const RunConfigFields& supplied) {
+    if (supplied.hasLevel && supplied.levelIndex >= kTournamentLevelCount) {
+        return {false, ConfigError::InvalidTournamentLevel};
+    }
+    if (supplied.hasTargetDistanceM) {
+        if (!std::isfinite(supplied.targetDistanceM)) {
+            return {false, ConfigError::NonFiniteValue};
+        }
+        if (supplied.targetDistanceM < rules2027::kTargetDistanceMinM ||
+            supplied.targetDistanceM > rules2027::kTargetDistanceMaxM) {
+            return {false, ConfigError::TargetDistanceOutOfRange};
+        }
+    }
+    if (supplied.hasTargetTimeS) {
+        if (!std::isfinite(supplied.targetTimeS)) {
+            return {false, ConfigError::NonFiniteValue};
+        }
+        if (supplied.targetTimeS < rules2027::kTargetTimeMinS ||
+            supplied.targetTimeS > rules2027::kTargetTimeMaxS) {
+            return {false, ConfigError::TargetTimeOutOfRange};
+        }
+    }
+    if (supplied.hasBottleLineDistanceM) {
+        if (!std::isfinite(supplied.bottleLineDistanceM)) {
+            return {false, ConfigError::NonFiniteValue};
+        }
+        if (supplied.bottleLineDistanceM < rules2027::kBottleLineDistanceMinM ||
+            supplied.bottleLineDistanceM > rules2027::kBottleLineDistanceMaxM) {
+            return {false, ConfigError::BottleLineDistanceOutOfRange};
+        }
+    }
+    return {true, ConfigError::None};
+}
+
 // ---------------------------------------------------------------------------
 // State-restricted commands
 // ---------------------------------------------------------------------------
@@ -159,6 +211,7 @@ inline bool isInspectionCommand(OperatorCommandId id) {
         case OperatorCommandId::Status:
         case OperatorCommandId::Version:
         case OperatorCommandId::Checks:
+        case OperatorCommandId::Boot:
         case OperatorCommandId::ConfigShow:
         case OperatorCommandId::ConfigCheck:
             return true;
@@ -268,6 +321,7 @@ inline CommandAdmissibility admissibilityOf(OperatorCommandId id, const Operator
         case OperatorCommandId::Status:
         case OperatorCommandId::Version:
         case OperatorCommandId::Checks:
+        case OperatorCommandId::Boot:
         case OperatorCommandId::ConfigShow:
         case OperatorCommandId::ConfigCheck:
         case OperatorCommandId::Disarm:

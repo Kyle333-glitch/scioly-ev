@@ -132,13 +132,27 @@ constexpr double kPlannedReversalStopThresholdMps = 0.05;
 constexpr double kPlannedReversalStopDwellS = 0.2;
 
 // The longest gap between two control updates that may still be credited as
-// continued near-zero evidence, milliseconds. This is what bounds how much of a
-// stop dwell can accumulate without being observed, so its honest value is the
-// measured maximum control-loop stall from H0W - not the 20 ms control period,
-// which is the cadence the loop is *asked* for rather than the worst one it
-// delivers. Provisional until that measurement exists, which is why a stop
-// cannot be verified yet (`NearZeroVerifier.h`).
-constexpr uint32_t kPlannedMaxDwellGapMs = 40U;
+// continued near-zero evidence, milliseconds - and a **measured** value as of
+// H0W: `worst_stall_ms`, the longest interval between two consecutive committed
+// control ticks, was read from B1 under every healthy load condition (telemetry
+// off, the highest admissible rate with the host reading, the same rate with the
+// host deliberately not reading, and a 62 s soak) and never exceeded **28 ms**.
+//
+// It is deliberately not the 20 ms control period: the period is the cadence the
+// loop is *asked* for, and this is the worst gap it actually delivered, so a
+// dwell that spans a longer gap than this is not credited without fresh evidence
+// (`NearZeroVerifier.h`). Lower is the safe direction - a future run that stalls
+// longer only makes the verifier restart its interval - and the value is one
+// measurement, not a ceiling: re-measure it (H0W Step 8) when a loaded run adds
+// work to the same loop.
+//
+// Evidence: `data/evidence/P-H0W-2026-09-28/h0w-step8-pins-baseline.log`
+// (`worst_stall_ms=28`, two readings 57 s apart), with
+// `h0w-step8-stall-loads.log` / `h0w-step8-stall-unread.log` at 21-22 ms; log
+// entry D28.
+constexpr uint32_t kMaxDwellGapMs = 28U;
+constexpr const char* kMaxDwellGapEvidence =
+    "data/evidence/P-H0W-2026-09-28/h0w-step8-pins-baseline.log (worst_stall_ms), D28";
 
 // Run-policy bounds. Every one of these is a bound the run is allowed to wait
 // for evidence under, so a placeholder that is too short turns into a phase
@@ -188,6 +202,13 @@ inline ev::Sourced<uint16_t> provisionalPermille(uint16_t value) {
 
 inline ev::Sourced<uint32_t> provisionalGapMs(uint32_t value) {
     return ev::Sourced<uint32_t>(value, ev::ValueSource::Provisional);
+}
+
+// A gap that was measured on the board rather than guessed. The citation is not
+// optional: `Sourced::citesEvidence()` is what the `MeasuredValuesCiteEvidence`
+// configuration check reads, and a measured value without one fails it.
+inline ev::Sourced<uint32_t> measuredGapMs(uint32_t value, const char* citation) {
+    return ev::Sourced<uint32_t>(value, ev::ValueSource::Measured, citation);
 }
 
 inline ev::Sourced<ev::MotionDirection> provisionalDirection(ev::MotionDirection direction) {
@@ -265,13 +286,13 @@ inline ev::DirectionalMotionProfileLimits profileLimits() {
 inline ev::NearZeroConfig reversalStopVerification() {
     return ev::NearZeroConfig(provisionalValue(kPlannedReversalStopThresholdMps),
                               provisionalValue(kPlannedReversalStopDwellS),
-                              provisionalGapMs(kPlannedMaxDwellGapMs));
+                              measuredGapMs(kMaxDwellGapMs, kMaxDwellGapEvidence));
 }
 
 inline ev::NearZeroConfig finalStopVerification() {
     return ev::NearZeroConfig(provisionalValue(kPlannedReversalStopThresholdMps),
                               completeStopDwellS(),
-                              provisionalGapMs(kPlannedMaxDwellGapMs));
+                              measuredGapMs(kMaxDwellGapMs, kMaxDwellGapEvidence));
 }
 
 inline ev::RunPhaseConfig runPhaseConfig() {

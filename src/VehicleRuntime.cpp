@@ -20,6 +20,12 @@ namespace {
 // guarantee that the pass' cost is bounded.
 constexpr uint8_t kTelemetryRecordsPerPass = 4U;
 
+// How many loop passes between samples of the host control-line state
+// (`serialTransport::hostLineState()`). Every pass would run the USB task tens of
+// thousands of times a second for a fact that is not a deadline; this bounds the
+// cost while still noticing an attaching host long before the next control tick.
+constexpr uint8_t kHostPollPasses = 32U;
+
 }  // namespace
 
 VehicleRuntime::VehicleRuntime()
@@ -61,11 +67,13 @@ void VehicleRuntime::begin(uint32_t nowMs) {
     //    vehicle cannot be armed is available even before the first tick.
     configurationChecks_ = vehicleConfig::configurationBuildChecks(announcedConfigValid_, run_);
 
-    // 7. The operator interface's first line, staged but not sent: the boot line
+    // 7. The operator interface's first line, owed but not staged: the boot line
     //    is pumped by the first passes of the loop (`serviceSerial`), so a host
     //    that is absent, slow or closed cannot delay safe initialization - and a
     //    host that attaches later still learns which firmware it is talking to.
-    bootLinePending_ = true;
+    //    The greeting is *owed* here rather than queued, and it is re-owed for a
+    //    reader that arrives later (`greeter_`).
+    greeter_.requestGreeting(nowMs);
 
     // 8. The session's own boundary record. It is the first record of a session
     //    (`TelemetryRecord.h`) and it is queued, not written: nothing here waits
@@ -98,6 +106,12 @@ PassOutcome VehicleRuntime::runPass(uint32_t nowMs) {
 
     telemetry_.lateByMs = decision.lateByMs;
     telemetry_.droppedDeadlines = decision.droppedTicks;
+    // The session's own extremes, from the scheduler rather than from this
+    // decision: a soak test asks what the worst has been, not what the last tick
+    // was (P-H0 Step 7).
+    telemetry_.worstLateByMs = scheduler_.worstLateByMs();
+    telemetry_.droppedDeadlinesTotal = scheduler_.droppedDeadlines();
+    telemetry_.worstStallMs = scheduler_.worstStallMs();
     telemetry_.clockRewind = decision.clockRewind;
     telemetry_.controlTicks = scheduler_.ticks();
     telemetry_.orderInOrder = orderGuard_.tickInOrder();
@@ -414,8 +428,17 @@ void VehicleRuntime::captureTelemetry() {
 // refused would be a loss no drop counter could report.
 void VehicleRuntime::drainTelemetry() {
     serialTransport::LineTransport& transport = serialTransport::port();
+    // Nothing is popped while no host is attached. The port's free-space report is
+    // not enough to decide this: it describes the USB FIFO, which has room whether
+    // or not anyone is holding the port, so a record staged into an unattended port
+    // would sit here and be *absent from the queue* - and the queue's own drop
+    // accounting is the record of what the host missed. Waiting is the same
+    // discipline the boot line follows (`hostAttached_`), and it changes nothing
+    // the host sees: a reconnecting host still gets the queue's oldest records
+    // first. `hostAttached_` is sampled once per pass in `serviceStagedText()`,
+    // which both this image and the bench image call first.
     for (uint8_t index = 0U; index < kTelemetryRecordsPerPass; ++index) {
-        if (transport.busy() || !telemetrySession_.hasPending()) {
+        if (!hostAttached_ || transport.busy() || !telemetrySession_.hasPending()) {
             return;
         }
         ev::TelemetryRecord record;
@@ -445,31 +468,49 @@ void VehicleRuntime::drainTelemetry() {
 // it is busy again. The help cursor can advance more than one line in a pass, but
 // the work is bounded by the static table (`ev::kOperatorHelpLineCount` lines), so
 // a `help` answer can never make a single pass unbounded.
-void VehicleRuntime::serviceStagedText() {
+void VehicleRuntime::serviceStagedText(uint32_t nowMs) {
     serialTransport::LineTransport& transport = serialTransport::port();
     transport.pump();
+
+    // Sample the host control-line state, bounded per pass (see
+    // `kHostPollPasses`). A newly asserted line - DTR *or* RTS - is an attach: a
+    // host that opens the port is greeted even if this port has been quiet for the
+    // whole boot. The boot line says which firmware is running and with which
+    // configuration-build verdicts, and the `EVE1` boot record carries none of
+    // that. A line staged while nobody was reading is not a delivered line
+    // (finding F-4, D21), so the state is tracked rather than assumed. Why two
+    // bits are tracked, and why neither can make this a guarantee, is in
+    // `SerialTransport.h` and `VehicleRuntime.h`.
+    if (hostPollCountdown_ == 0U) {
+        hostPollCountdown_ = kHostPollPasses;
+        const serialTransport::HostLineState state = serialTransport::hostLineState();
+        greeter_.observeLines(state.dtr, state.rts, nowMs);
+        hostLineState_ = state;
+        // `dtr` alone is the write gate, because it is what `Serial.write()`
+        // tests: a record is never popped for a port that cannot move it.
+        hostAttached_ = state.dtr;
+    } else {
+        --hostPollCountdown_;
+    }
+
+    // The clock the greeting's silence rule runs against (see `greeter_`). It is
+    // sampled every pass, not at the control-line rate: it is arithmetic on
+    // `nowMs`, and the deadline it enforces is `ev::HostGreetPolicy::kSilenceMs`
+    // wide, so the exact pass it fires on does not matter.
+    greeter_.observeClock(nowMs);
+
     if (transport.busy()) {
         return;
     }
 
-    if (bootLinePending_) {
-        ev::BoundedText text(transport.workingBuffer(), ev::kSerialLineCapacity);
-        text.appendText("BOOT");
-        text.field("fw").appendText(vehicleConfig::kFirmwareId);
-        text.field("schema").appendUnsigned(ev::kTelemetrySchemaVersion);
-        text.field("cadence_ms").appendUnsigned(vehicleConfig::kControlPeriodMs);
-        text.field("watchdog").appendBool(kWatchdogEnablementRequested);
-        text.field("checks_all").appendBool(configurationChecks_.allPass());
-        text.field("regulator").appendBool(regulatorEnabled_);
-        text.field("armed").appendBool(authority_.isArmed());
-        text.field("telemetry").appendBool(telemetrySession_.enabled());
-        text.field("stride").appendUnsigned(telemetrySession_.strideTicks());
-        // The operator interface itself: the loop is running and commands will
-        // be answered from this pass on. It is the one field of the boot line
-        // that is about the interface rather than about the chain.
-        text.field("ready").appendBool(true);
-        bootLinePending_ = false;
-        respondLine(text.truncated() ? ev::kBoundedLineDidNotFit : text.length());
+    if (greeter_.owed()) {
+        if (!hostAttached_) {
+            // Nobody is reading. Keep the greeting owed and keep the transport
+            // idle, rather than committing a line the port cannot move.
+            return;
+        }
+        greeter_.delivered(nowMs);
+        stageBootLine();
         return;
     }
 
@@ -490,8 +531,33 @@ void VehicleRuntime::serviceStagedText() {
     }
 }
 
+// The greeting, formatted and staged. Shared by the attach/silence re-arm in
+// `serviceStagedText()` and by the `boot` command, so the line an operator asks
+// for and the line a host is greeted with cannot drift apart. It is staged as an
+// urgent response: a greeting is what a reader is waiting for, and it may replace
+// a staged telemetry line rather than queue behind it.
+void VehicleRuntime::stageBootLine() {
+    serialTransport::LineTransport& transport = serialTransport::port();
+    ev::BoundedText text(transport.workingBuffer(), ev::kSerialLineCapacity);
+    text.appendText("BOOT");
+    text.field("fw").appendText(vehicleConfig::kFirmwareId);
+    text.field("schema").appendUnsigned(ev::kTelemetrySchemaVersion);
+    text.field("cadence_ms").appendUnsigned(vehicleConfig::kControlPeriodMs);
+    text.field("watchdog").appendBool(kWatchdogEnablementRequested);
+    text.field("checks_all").appendBool(configurationChecks_.allPass());
+    text.field("regulator").appendBool(regulatorEnabled_);
+    text.field("armed").appendBool(authority_.isArmed());
+    text.field("telemetry").appendBool(telemetrySession_.enabled());
+    text.field("stride").appendUnsigned(telemetrySession_.strideTicks());
+    // The operator interface itself: the loop is running and commands will be
+    // answered from this pass on. It is the one field of the boot line that is
+    // about the interface rather than about the chain.
+    text.field("ready").appendBool(true);
+    respondLine(text.truncated() ? ev::kBoundedLineDidNotFit : text.length());
+}
+
 void VehicleRuntime::serviceSerial(uint32_t nowMs) {
-    serviceStagedText();
+    serviceStagedText(nowMs);
 
     // Received bytes, bounded per pass. A line that arrives slowly is accumulated
     // across passes; nothing here waits for the rest of it.
@@ -509,6 +575,10 @@ void VehicleRuntime::serviceSerial(uint32_t nowMs) {
         if (received < 0) {
             break;
         }
+        // A byte from the host is the clearest evidence that a reader is there,
+        // and it restarts the silence interval: an operator typing commands is one
+        // session and is greeted once, not once per command (finding F-4).
+        greeter_.observeHostByte(nowMs);
         const ev::LineEvent event = lineReader_.push(static_cast<char>(received));
         if (event == ev::LineEvent::LineReady) {
             handleCommandLine(lineReader_.line(), lineReader_.lineLength(), nowMs);
@@ -558,6 +628,24 @@ void VehicleRuntime::handleCommandLine(const char* line, uint16_t length, uint32
         return;
     }
 
+    // A `config set` is judged on its values here, before anything is stored: a
+    // held value is echoed back by `config show` and cannot be told apart from a
+    // value the operator meant, so an out-of-range or non-finite number must not
+    // become state (H0 finding F-5). The refusal is classified as a rejection, not
+    // an acceptance, so the counters keep meaning "applied" and "not applied".
+    if (id == ev::OperatorCommandId::ConfigSet) {
+        const ev::RunConfigValidation supplied =
+            ev::validateSuppliedConfigFields(parsed.request.fields);
+        if (!supplied.ok) {
+            ++commandsRejected_;
+            respondLine(ev::formatConfigSetRefusal(
+                supplied.error, serialTransport::port().workingBuffer(), ev::kSerialLineCapacity));
+            pushOperatorEvent(ev::TelemetryEventCode::CommandRejected,
+                              ev::telemetryConfigErrorName(supplied.error));
+            return;
+        }
+    }
+
     ++commandsAccepted_;
     applyCommand(parsed.request, nowMs);
 }
@@ -588,6 +676,17 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
 
         case ev::OperatorCommandId::Checks:
             respondLine(ev::formatChecksLine(configurationChecks_, buffer, capacity));
+            return;
+
+        case ev::OperatorCommandId::Boot:
+            // The greeting on demand. The answer *is* the boot line, so it is the
+            // same formatter the automatic greeting uses and there is no separate
+            // acknowledgment to keep in agreement with it. Delivering it here is
+            // what keeps it to one line: `owed()` is cleared as the line is
+            // staged, so the next pass cannot greet a second time, and asking for
+            // it is itself host activity, so the silence interval restarts.
+            greeter_.delivered(nowMs);
+            stageBootLine();
             return;
 
         case ev::OperatorCommandId::ConfigShow:
@@ -655,9 +754,12 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
 }
 
 // Stores the fields the operator named. Only the fields that were supplied are
-// touched, so `config set` can be typed in any order and repeated; nothing here
-// validates - range, grid and geometry checks belong to `validateRunConfig()`,
-// which `config show` and `announce` run through the policy.
+// touched, so `config set` can be typed in any order and repeated. What can reach
+// here has already passed the per-field rule checks
+// (`ev::validateSuppliedConfigFields()`, called from `handleCommandLine()`), so no
+// out-of-range or non-finite value is ever stored; the announced grid and the
+// cross-field geometry checks still belong to `validateRunConfig()` through the
+// policy, which `config show` and `announce` run.
 void VehicleRuntime::applyConfigSet(const ev::RunConfigFields& supplied) {
     if (supplied.hasLevel) {
         heldConfig_.hasLevel = true;

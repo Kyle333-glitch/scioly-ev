@@ -146,6 +146,102 @@ void test_held_configuration_verdict_reports_all_three_facts(void) {
                           static_cast<int>(verdict.error));
 }
 
+// A field supplied to `config set` is judged before it is stored: an
+// out-of-range or non-finite value is refused with the rule error it broke, and
+// nothing about the *held* configuration changes (finding F-5 - a held value is
+// echoed back by `config show`, so it cannot be told apart from a value the
+// operator meant).
+void test_supplied_fields_are_checked_against_the_rules_before_storage(void) {
+    // A complete, rules-valid configuration passes field by field.
+    const ev::RunConfigValidation valid = ev::validateSuppliedConfigFields(validStateConfig());
+    TEST_ASSERT_TRUE(valid.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ConfigError::None),
+                          static_cast<int>(valid.error));
+
+    // An empty `config set` supplies nothing, so there is nothing to refuse.
+    const ev::RunConfigValidation empty = ev::validateSuppliedConfigFields(ev::RunConfigFields{});
+    TEST_ASSERT_TRUE(empty.ok);
+
+    // One field at a time, out of range in both directions and off the real
+    // number line. Each is refused as the rule it broke, not as a generic error.
+    struct Case {
+        ev::RunConfigFields fields;
+        ev::ConfigError expected;
+    };
+    Case cases[6];
+
+    cases[0].fields = validStateConfig();
+    cases[0].fields.targetDistanceM = 9.50;  // above the 9.00 m maximum (rule 8.h)
+    cases[0].expected = ev::ConfigError::TargetDistanceOutOfRange;
+
+    cases[1].fields = validStateConfig();
+    cases[1].fields.targetDistanceM = 4.99;  // below the 5.00 m minimum
+    cases[1].expected = ev::ConfigError::TargetDistanceOutOfRange;
+
+    cases[2].fields = validStateConfig();
+    cases[2].fields.targetTimeS = 25.0;  // above the 20.0 s maximum (rule 8.i)
+    cases[2].expected = ev::ConfigError::TargetTimeOutOfRange;
+
+    cases[3].fields = validStateConfig();
+    cases[3].fields.bottleLineDistanceM = 0.50;  // below the 1.00 m minimum (rule 8.j)
+    cases[3].expected = ev::ConfigError::BottleLineDistanceOutOfRange;
+
+    cases[4].fields = ev::RunConfigFields{};
+    cases[4].fields.hasTargetDistanceM = true;
+    cases[4].fields.targetDistanceM = std::numeric_limits<double>::infinity();
+    cases[4].expected = ev::ConfigError::NonFiniteValue;
+
+    cases[5].fields = ev::RunConfigFields{};
+    cases[5].fields.hasLevel = true;
+    cases[5].fields.levelIndex = ev::kTournamentLevelCount;  // no such level
+    cases[5].expected = ev::ConfigError::InvalidTournamentLevel;
+
+    for (uint8_t index = 0U; index < 6U; ++index) {
+        const ev::RunConfigValidation verdict =
+            ev::validateSuppliedConfigFields(cases[index].fields);
+        TEST_ASSERT_FALSE(verdict.ok);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(cases[index].expected),
+                              static_cast<int>(verdict.error));
+    }
+
+    // Boundary values are inside the rules: the check is the rule range, not a
+    // stricter test invented here.
+    ev::RunConfigFields atMinimums;
+    atMinimums.hasTargetDistanceM = true;
+    atMinimums.targetDistanceM = ev::rules2027::kTargetDistanceMinM;
+    atMinimums.hasTargetTimeS = true;
+    atMinimums.targetTimeS = ev::rules2027::kTargetTimeMinS;
+    atMinimums.hasBottleLineDistanceM = true;
+    atMinimums.bottleLineDistanceM = ev::rules2027::kBottleLineDistanceMinM;
+    TEST_ASSERT_TRUE(ev::validateSuppliedConfigFields(atMinimums).ok);
+
+    ev::RunConfigFields atMaximums;
+    atMaximums.hasTargetDistanceM = true;
+    atMaximums.targetDistanceM = ev::rules2027::kTargetDistanceMaxM;
+    atMaximums.hasTargetTimeS = true;
+    atMaximums.targetTimeS = ev::rules2027::kTargetTimeMaxS;
+    atMaximums.hasBottleLineDistanceM = true;
+    atMaximums.bottleLineDistanceM = ev::rules2027::kBottleLineDistanceMaxM;
+    TEST_ASSERT_TRUE(ev::validateSuppliedConfigFields(atMaximums).ok);
+}
+
+// The per-field check is deliberately not the whole rule set: the announced grid
+// and the cross-field geometry need the level and the rest of the configuration,
+// so a value that is in range but off the level's grid is still a value the door
+// accepts and the single rule entry point rejects. This is the boundary between
+// the two, and it is asserted so neither check is assumed to cover the other.
+void test_in_range_but_off_grid_is_left_to_the_whole_configuration_check(void) {
+    ev::RunConfigFields offGrid = validStateConfig();
+    offGrid.targetDistanceM = 7.53;  // State's grid is 0.10 m (rule 8.h)
+    TEST_ASSERT_TRUE(ev::validateSuppliedConfigFields(offGrid).ok);
+
+    const ev::HeldRunConfigVerdict held = ev::heldRunConfigVerdict(offGrid);
+    TEST_ASSERT_TRUE(held.complete);
+    TEST_ASSERT_FALSE(held.rulesOk);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ConfigError::TargetDistanceOffInterval),
+                          static_cast<int>(held.error));
+}
+
 // The geometry the run will use is reported, not left for the operator to
 // reconstruct: the Target Point, the announced Bottle Line Distance, and the
 // Bottle Start Point the level fixes.
@@ -171,6 +267,7 @@ void test_inspection_and_telemetry_are_allowed_in_every_state(void) {
     const ev::OperatorCommandId inspection[] = {
         ev::OperatorCommandId::Help,        ev::OperatorCommandId::Status,
         ev::OperatorCommandId::Version,     ev::OperatorCommandId::Checks,
+        ev::OperatorCommandId::Boot,
         ev::OperatorCommandId::ConfigShow,  ev::OperatorCommandId::ConfigCheck,
         ev::OperatorCommandId::TelemetryOn, ev::OperatorCommandId::TelemetryOff,
         ev::OperatorCommandId::TelemetryStatus,
@@ -512,6 +609,8 @@ int main(int, char**) {
     RUN_TEST(test_tournament_level_mapping_is_total);
     RUN_TEST(test_completed_configuration_derives_the_bottle_start_from_the_level);
     RUN_TEST(test_held_configuration_verdict_reports_all_three_facts);
+    RUN_TEST(test_supplied_fields_are_checked_against_the_rules_before_storage);
+    RUN_TEST(test_in_range_but_off_grid_is_left_to_the_whole_configuration_check);
     RUN_TEST(test_run_axis_geometry_matches_the_configuration);
     RUN_TEST(test_inspection_and_telemetry_are_allowed_in_every_state);
     RUN_TEST(test_disarm_is_never_gated);

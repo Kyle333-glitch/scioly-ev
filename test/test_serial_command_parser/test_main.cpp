@@ -196,6 +196,7 @@ void test_every_command_spelling_parses(void) {
     expectCommand("status", ev::OperatorCommandId::Status);
     expectCommand("version", ev::OperatorCommandId::Version);
     expectCommand("checks", ev::OperatorCommandId::Checks);
+    expectCommand("boot", ev::OperatorCommandId::Boot);
     expectCommand("config show", ev::OperatorCommandId::ConfigShow);
     expectCommand("config check", ev::OperatorCommandId::ConfigCheck);
     expectCommand("config clear", ev::OperatorCommandId::ConfigClear);
@@ -301,6 +302,7 @@ void test_unknown_commands_and_subcommands_are_named(void) {
 // The right command with the wrong shape of arguments: counted, not guessed.
 void test_wrong_token_counts_are_rejected(void) {
     expectError("status extra", ev::CommandError::WrongTokenCount);
+    expectError("boot now", ev::CommandError::WrongTokenCount);
     expectError("help me", ev::CommandError::WrongTokenCount);
     expectError("arm on", ev::CommandError::WrongTokenCount);
     expectError("config show extra", ev::CommandError::WrongTokenCount);

@@ -251,6 +251,24 @@ inline uint16_t formatConfigSetAck(const RunConfigFields& fields, const HeldRunC
     return finishBoundedLine(text, buffer);
 }
 
+// `ERR,cmd=config set,reason=ValueOutOfRange,error=<rule error>` - a supplied
+// field the rules do not accept was refused and *nothing was stored*, so this line
+// is the whole effect of the command (`OperatorPolicy.h`,
+// `validateSuppliedConfigFields()`). There is no configuration echo on purpose: an
+// echo of the unchanged held state next to an error invites reading the refused
+// value as held. `reason` is the parse vocabulary's own name for the class of
+// mistake, the same one a malformed number gets; `error` is the rule the value
+// broke, in the vocabulary `CONFIG` and the announce refusal already use.
+inline uint16_t formatConfigSetRefusal(ConfigError error, char* buffer, uint16_t capacity) {
+    BoundedText text(buffer, capacity);
+    text.appendText(kOperatorErrorPrefix);
+    text.field("cmd").appendText(operatorCommandName(OperatorCommandId::ConfigSet));
+    text.field("reason").appendText(
+        commandErrorName(CommandError::ValueOutOfRange));
+    text.field("error").appendText(telemetryConfigErrorName(error));
+    return finishBoundedLine(text, buffer);
+}
+
 // ---------------------------------------------------------------------------
 // The check report
 // ---------------------------------------------------------------------------
@@ -398,6 +416,7 @@ constexpr const char* const kOperatorHelpLines[] = {
     "version       - firmware identity and telemetry schema",
     "status        - run state and the held configuration's verdict",
     "checks        - every configuration-build check, named",
+    "boot          - re-send the boot line for this reader",
     "config show   - echo the held configuration",
     "config check  - re-run the rule validation now",
     "config set level=<regional|state|national> distance=<m> time=<s> bottle_line=<m>",

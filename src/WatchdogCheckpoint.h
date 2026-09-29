@@ -122,42 +122,58 @@ namespace evhw {
 // H0W, and is not what `pio run` or `pio run -e bench` produces.
 constexpr bool kWatchdogEnablementRequested = EV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED != 0;
 
-// The planned timeout, in milliseconds. UNVERIFIED: no measurement of the loop's
-// worst-case pass and no measurement of the boot gap exist yet, and no watchdog
-// behavior has been observed. H0W chooses this value with
-// `ev::requiredWatchdogTimeoutMs()` and records the realized period separately,
-// because the timer rounds the request up to the next achievable period.
-constexpr uint32_t kWatchdogTimeoutMs = 250U;
-
-// The planned boot-to-first-refresh budget, milliseconds. UNVERIFIED
-// placeholder: the real value is whatever `timeToFirstRefreshMs()` reports in
-// H0W's soak, and until then this is a guess about how long the end of `setup()`
-// and the first pass take. It is small on purpose - the watchdog is opened after
-// the bounded serial wait, and this build performs no other wait.
-constexpr uint32_t kBootToFirstRefreshBudgetMs = 50U;
-
-// The planned worst healthy refresh interval, milliseconds. UNVERIFIED
-// placeholder: the real value is the worst interval between two consecutive
-// refreshes across every healthy load condition, which is what H0W's soak
-// measures. It is expected to be a little above the 20 ms control period, since
-// a pass costs the period plus its own work.
-constexpr uint32_t kWorstRefreshIntervalBudgetMs = 40U;
-
-// The margin the timeout must leave above the larger of the two gaps,
-// milliseconds. UNVERIFIED placeholder; H0W records the margin it used.
-constexpr uint32_t kWatchdogPlanMarginMs = 25U;
+// The timeout, in milliseconds, and the measured facts behind it.
+//
+// These are no longer placeholders. They are the numbers H0W measured on the
+// board (DEVELOPMENT_LOG.md D26/D27; captures in
+// `data/evidence/P-H0W-2026-09-28/`), and the rule below is asserted against them:
+//
+//   * `kBootToFirstRefreshBudgetMs = 0` - the measured gap is **below one
+//     millisecond**. `first_refresh_ms` reported 0 in every enabled soak, because
+//     the watchdog is opened at the very end of `setup()` and the first pass
+//     follows immediately. Zero here is a measurement at millisecond resolution,
+//     not an unmeasured absence: the true value is somewhere in [0, 1) ms.
+//   * `kWorstRefreshIntervalBudgetMs = 14` - the longest interval observed
+//     between two consecutive refreshes, identical (14 ms) across every healthy
+//     load condition measured: telemetry off, the highest admissible rate with the
+//     host reading, the same rate with the host deliberately not reading, and
+//     after a watchdog reset. It is one early pass' cost, not a periodic stall:
+//     the loop itself runs at ~46,000 passes/s, so a refresh gap is normally 0 ms
+//     at this resolution and this value never grew over 190 s of soaking.
+//   * `kWatchdogPlanMarginMs = 100` - fixed in advance in the H0W
+//     pre-registration (`data/prereg/P-H0W-2026-09-28.md`), before any of the
+//     numbers above existed, as five times the nominal 20 ms control period.
+//   * `kWatchdogTimeoutMs = 114` - `ev::requiredWatchdogTimeoutMs()`'s answer for
+//     those inputs (14 + 100), asserted below so the request cannot drift away
+//     from the rule that chose it.
+//
+// The requested value is **not** the realized one: the timer rounds the request up
+// to the next achievable prescaler/reload pair. H0W Step 7 records the realized
+// period from the reset latency, and the margin this value leaves over the worst
+// measured gap is what makes that rounding harmless.
+constexpr uint32_t kWatchdogTimeoutMs = 114U;
+constexpr uint32_t kBootToFirstRefreshBudgetMs = 0U;
+constexpr uint32_t kWorstRefreshIntervalBudgetMs = 14U;
+constexpr uint32_t kWatchdogPlanMarginMs = 100U;
 
 // The same rule H0W applies, asserted against the requested values. A build that
 // requests enablement with a timeout that cannot survive boot does not compile.
+//
+// It asserts the **whole** rule (`timeoutIsQualified`), not just the two coverage
+// clauses: the margin is part of the decision H0W's Step 6 applies, and a build
+// that dropped it here would be enforcing a rule the protocol does not state.
+// With the numbers above the assertion is `114 > 0 && 114 > 14 && 114 >= 114`.
 constexpr ev::WatchdogQualification kWatchdogQualification{kBootToFirstRefreshBudgetMs,
                                                            kWorstRefreshIntervalBudgetMs,
                                                            kWatchdogPlanMarginMs};
 static_assert(!kWatchdogEnablementRequested ||
-                  (ev::timeoutCoversBoot(kWatchdogTimeoutMs, kWatchdogQualification) &&
-                   ev::timeoutCoversRefreshInterval(kWatchdogTimeoutMs, kWatchdogQualification)),
+                  ev::timeoutIsQualified(kWatchdogTimeoutMs, kWatchdogQualification),
               "the requested watchdog timeout must be longer than both the boot-to-first-refresh "
-              "gap and the worst refresh interval (P-H0W); the boot gap is the one a timeout "
-              "chosen from steady-state intervals alone gets wrong");
+              "gap and the worst refresh interval, by the margin (P-H0W); the boot gap is the one "
+              "a timeout chosen from steady-state intervals alone gets wrong");
+static_assert(kWatchdogTimeoutMs == ev::requiredWatchdogTimeoutMs(kWatchdogQualification),
+              "the requested watchdog timeout must be the smallest value the rule allows, so a "
+              "hand-edited request cannot quietly leave the measured margin behind (P-H0W Step 6)");
 
 // The checkpoint. One instance, owned by the firmware entry point.
 class WatchdogCheckpoint {
@@ -173,6 +189,7 @@ public:
         openRefused_ = false;
         hasFirstRefresh_ = false;
         timeToFirstRefreshMs_ = 0U;
+        worstRefreshGapMs_ = 0U;
     }
 
     // Opens the watchdog when, and only when, enablement is requested. Called
@@ -213,6 +230,24 @@ public:
         }
         WDT.refresh();
         ++refreshes_;
+        // The interval the timeout has to cover, measured rather than inferred
+        // (H0W Step 2): the gap from the *last refresh* to this one. Measured from
+        // the previous refresh rather than from the previous pass, so a withheld
+        // or skipped refresh shows up here as a larger gap - which is exactly what
+        // would eventually trip the timer. It costs nothing: `nowMs` is already a
+        // parameter, and no timer or peripheral is read. Resolution is one
+        // millisecond, which is more than enough for a timeout measured in
+        // hundreds of milliseconds; a sub-millisecond gap (the normal case for a
+        // free-running loop) reads 0 rather than being invented. The first refresh
+        // is excluded, because the boot-to-first-refresh gap is its own number
+        // (`timeToFirstRefreshMs()`) and mixing the two would hide which one is
+        // large.
+        if (hasFirstRefresh_) {
+            const uint32_t gapMs = nowMs - lastRefreshMs_;
+            if (gapMs > worstRefreshGapMs_) {
+                worstRefreshGapMs_ = gapMs;
+            }
+        }
         lastRefreshMs_ = nowMs;
         if (!hasFirstRefresh_) {
             // The boot gap, measured rather than assumed: how long the board took
@@ -252,6 +287,15 @@ public:
     uint32_t timeToFirstRefreshMs() const { return timeToFirstRefreshMs_; }
     bool hasTimeToFirstRefresh() const { return hasFirstRefresh_; }
 
+    // The longest interval observed between two consecutive refreshes,
+    // milliseconds, excluding the first refresh (see `endOfPass()`). This is the
+    // "worst healthy refresh interval" `ev::WatchdogQualification` wants, read
+    // from the loop rather than derived from two `health` lines separated by an
+    // unknown amount of work. Zero means either that enablement is off or that no
+    // gap of a millisecond or more has happened - the two are told apart by
+    // `refreshes()`.
+    uint32_t worstRefreshGapMs() const { return worstRefreshGapMs_; }
+
 private:
     bool opened_ = false;
     bool openAttempted_ = false;
@@ -260,6 +304,7 @@ private:
     uint32_t bootMs_ = 0U;
     uint32_t openedAtMs_ = 0U;
     uint32_t timeToFirstRefreshMs_ = 0U;
+    uint32_t worstRefreshGapMs_ = 0U;
     uint32_t passes_ = 0U;
     uint32_t refreshes_ = 0U;
     uint32_t withheldRefreshes_ = 0U;

@@ -161,6 +161,7 @@ enum class BenchVerb : uint8_t {
     DriveStatus = 7,    // `bench drive-status`
     Ticks = 8,          // `bench ticks`
     Inputs = 9,         // `bench inputs`, `bench trigger`
+    Pins = 11,          // `bench pins`
     Unknown = 10,       // a `bench` line with a verb nobody implements
 };
 
@@ -205,6 +206,9 @@ inline BenchVerb benchVerbFor(const BenchTokens& tokens) {
     }
     if (benchTokenEquals(verb, length, "inputs") || benchTokenEquals(verb, length, "trigger")) {
         return BenchVerb::Inputs;
+    }
+    if (benchTokenEquals(verb, length, "pins")) {
+        return BenchVerb::Pins;
     }
     return BenchVerb::Unknown;
 }

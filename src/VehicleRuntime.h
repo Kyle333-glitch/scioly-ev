@@ -5,6 +5,7 @@
 #include <CompetitionStateMachine.h>
 #include <ControlScheduler.h>
 #include <ControlTickOrder.h>
+#include <HostGreetPolicy.h>
 #include <Motion.h>
 #include <MotionChainReset.h>
 #include <MotionProfile.h>
@@ -112,8 +113,20 @@ struct TelemetrySnapshot {
     // Timing, from the scheduler's decision and its counters.
     uint32_t nowMs = 0U;
     uint32_t dtMs = 0U;
+    // This tick's own lateness and the deadlines it dropped.
     uint32_t lateByMs = 0U;
     uint32_t droppedDeadlines = 0U;
+    // The session's extremes over every tick since `begin()`, which is what a
+    // soak test reports: the scheduler's worst lateness so far, and every
+    // deadline dropped so far. The two fields above describe the last tick only
+    // (P-H0 Step 7 asks for the worst case, not a spot reading).
+    uint32_t worstLateByMs = 0U;
+    uint32_t droppedDeadlinesTotal = 0U;
+    // The longest gap between two consecutive committed ticks (first tick
+    // excluded). Same "session extreme" kind of number, different question: this
+    // is the bound on how much near-zero dwell may be credited across an
+    // unobserved gap (P-H0W Step 2).
+    uint32_t worstStallMs = 0U;
     uint32_t controlTicks = 0U;
     bool clockRewind = false;
 
@@ -305,7 +318,11 @@ public:
     // around its own command dispatch. Production calls neither of these
     // directly - it calls `serviceSerial()`, which is exactly these two around the
     // read loop - so the bench cannot change the production order by using them.
-    void serviceStagedText();
+    //
+    // `serviceStagedText()` takes the clock because the greeting is owed to a
+    // reader that has been silent long enough to be treated as new (finding F-4);
+    // see `greeter_`.
+    void serviceStagedText(uint32_t nowMs);
     void drainTelemetry();
 
     // One operator line, applied: parsed, gated by the operator policy, answered,
@@ -352,6 +369,11 @@ private:
     void applyArm();
     void applyReset(uint32_t nowMs);
     void applyTelemetryRate(double requestedRateHz);
+
+    // The greeting, formatted and staged. Shared by the attach/silence re-arm in
+    // `serviceStagedText()` and by the `boot` command, so the line an operator asks
+    // for and the line a host is greeted with cannot drift apart.
+    void stageBootLine();
 
     void respondLine(uint16_t length);
     void respondRefusal(ev::OperatorCommandId id, const char* reason);
@@ -431,7 +453,37 @@ private:
     ev::TelemetrySession telemetrySession_{};
     ev::TelemetryEventDetector eventDetector_{};
     uint16_t helpLineIndex_ = ev::kOperatorHelpLineCount;
-    bool bootLinePending_ = false;
+    // Whether the boot line is owed to a reader, and why (H0 finding F-4): a
+    // newly asserted control line (DTR or RTS), a host silent long enough to be a
+    // new reader, or an explicit `boot`. The decision is the pure
+    // `ev::HostGreetPolicy`, host-tested at its edges and at its silence boundary;
+    // this layer supplies the two inputs it cannot see - the sampled control lines
+    // and the clock - and commits the line when the policy says it is owed.
+    //
+    // What that is, and is not: the greeting is sent once per boot to the first
+    // host that attaches, again at each observed attach edge, and again at each
+    // silence deadline (once per `ev::HostGreetPolicy::kSilenceMs` of host
+    // silence). A host that presents no control-line edge *and* never writes
+    // cannot be told apart from the previous reader, so the greeting is not
+    // claimed to reach such a host promptly - the silence rule bounds that case
+    // rather than removing it. On target, one of three attaches showed no attach
+    // transition at all, which is the observation that rule answers; see
+    // `data/evidence/P-H0-2026-09-28/d22-f4-attach-observations.txt`.
+    ev::HostGreetPolicy greeter_{};
+    // The last sampled host control-line state, the derived "can a write leave"
+    // flag, and the countdown that samples both. The USB task is deliberately not
+    // run on every pass: this loop measured ~21 microseconds a pass on the first
+    // hardware session, and an attach is not a deadline - a host is greeted within
+    // `kHostPollPasses` passes, far inside one control period.
+    //
+    // `hostAttached_` is `dtr` alone, because that is the predicate `write()` gates
+    // on - used as "can a write leave", which is exactly what the transport needs,
+    // and not as a reliable "a reader is present" oracle for anything else. `rts`
+    // reaches the greeter as a second attach edge and is never a reason to believe
+    // a write can move.
+    serialTransport::HostLineState hostLineState_{};
+    bool hostAttached_ = false;
+    uint8_t hostPollCountdown_ = 0U;
 
     uint32_t commandsAccepted_ = 0U;
     uint32_t commandsRejected_ = 0U;
