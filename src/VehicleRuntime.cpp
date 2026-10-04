@@ -12,6 +12,13 @@ namespace evhw {
 
 using ev::ControlTickStage;
 
+// Names the incident where a run state machine accepted an announcement and then
+// refused the delay it was offered. It is unreachable with this configuration -
+// the announcement gate refuses an unusable plan first, and the plan's delay can
+// never exceed the policy's bound because it is bounded by the announced Target
+// Time - so it exists to make a caller bug visible instead of silent.
+constexpr const char* kReasonDelayNotPermitted = "PlannedDelayNotUsable";
+
 namespace {
 
 // How many telemetry records one pass may move. Bounded so a full lane cannot
@@ -236,12 +243,24 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     ev::RunInputs runInputs;
     runInputs.authorityArmed = authority_.isArmed();
     runInputs.startTriggered = rawInputs_.startTriggerActive;
-    // Bottle contact, capture and push are evidence the vehicle must produce. The
-    // mechanism does not exist, so none is reported and no phase that waits for
-    // one can advance (`VERIFIED_STATE.md` #11).
-    runInputs.bottleContactDetected = false;
-    runInputs.captureComplete = false;
-    runInputs.pushComplete = false;
+    // The forward leg's bottle-interaction evidence, derived from the run axis
+    // (`deriveBottleEvidence()`): this vehicle has no bottle sensor, so the three
+    // facts are positions the firmware believes rather than observations of the
+    // bottle, and every distance they rest on is a `Sourced` value that must be
+    // `Measured` before a run may be announced - so this path cannot run on a
+    // placeholder. The derivation reports nothing at all while the position
+    // verdict is unusable, which is what makes a phase whose evidence never
+    // arrives end in its configured timeout rather than in a guessed exit.
+    //
+    // The leg it uses is the leg the run is on now (`legForward_`, updated in
+    // stage 6 of the previous tick from the run's own command), because the leg
+    // this cycle will name does not exist until the run has been stepped.
+    const ev::BottleEvidence bottleEvidence =
+        ev::deriveBottleEvidence(axisGeometry_, legForward_, axisPosition.positionM,
+                                 positionUsable_, vehicleConfig::bottleEvidenceConfig());
+    runInputs.bottleContactDetected = bottleEvidence.contactDetected;
+    runInputs.captureComplete = bottleEvidence.captureComplete;
+    runInputs.pushComplete = bottleEvidence.pushComplete;
     runInputs.remainingDistanceUsable = positionUsable_;
     runInputs.remainingDistanceM = remainingToTargetM;
     runInputs.stopEvidence = ev::composeStopEvidence(
@@ -265,11 +284,16 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     const ev::MotionDirection direction =
         legForward_ ? ev::MotionDirection::Forward : ev::MotionDirection::Reverse;
 
+    // The limits this run is shaped with: the *announced run's* planned cruise,
+    // not the strategy value (`runProfileLimits_`, set at the announcement from
+    // `planRunTiming()`). The run's Target Time therefore reaches the commanded
+    // speeds, and the brake offset and velocity ceiling still come from the leg
+    // being travelled.
     const ev::MotionProfileCommand shaped = ev::nextTargetVelocity(
         profileTarget_.inputsFor(travel ? ev::MotionProfileIntent::Travel
                                         : ev::MotionProfileIntent::Stop,
                                  direction, legRemainingM, dtMs),
-        profileLimits_.forDirection(direction));
+        runProfileLimits_.forDirection(direction));
     profileTarget_.accept(shaped);
 
     // A travel request may only be presented as powered once the shaped target
@@ -277,18 +301,31 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // previous direction to zero before it flips the sign, and presenting the
     // regulator's effort while the shape is still on the old side would ask for
     // powered effort in the direction the run has just stopped travelling in.
-    const bool shapePointsAlongLeg =
-        ev::targetVelocityPointsAlongLeg(shaped, direction, profileLimits_.forDirection(direction));
+    const bool shapePointsAlongLeg = ev::targetVelocityPointsAlongLeg(
+        shaped, direction, runProfileLimits_.forDirection(direction));
 
     // ---------------------------------------------------------------- stage 7
-    // The effort: the regulator's, or the run's own deliberate stop mapping. The
-    // regulator is deliberately not stepped for a stop, so an unactuated cycle
-    // accumulates no regulator state against a target nothing is following.
+    // The effort: the regulator's, or the run's own deliberate stop mapping.
+    //
+    // A ramp-down is regulated, and that is deliberate: `RampDown*` means the
+    // profile is bringing the commanded target to zero at the deceleration limit,
+    // and the effort has to follow that target down. Mapping it straight to a
+    // non-powered request (which is what the run's stop mapping does, correctly,
+    // for `Brake*`) would drop the commanded effort in one cycle and turn the
+    // controlled ramp into a coast. The regulator's one-sided effort limit is what
+    // keeps this safe: while the target decays it can only ask for effort in the
+    // travel direction, and once the target reaches zero the request quantizes to
+    // `Disabled`, so a ramp can never ask for powered effort the other way.
+    //
+    // The regulator is deliberately not stepped for a deliberate stop, so an
+    // unactuated cycle accumulates no regulator state against a target nothing is
+    // following.
     orderGuard_.enter(ControlTickStage::MotionControl);
     ev::MotorEffort effort(ev::MotorMode::Disabled, 0U);
     bool regulatorStepped = false;
     ev::VelocityControlStatus controlStatus = ev::VelocityControlStatus::Disabled;
-    if (travel && intentionCurrent && shapePointsAlongLeg) {
+    const bool rampDown = ev::isRunRampDownCommand(status.intention.command);
+    if ((travel || rampDown) && intentionCurrent && shapePointsAlongLeg) {
         const ev::VelocityControlResult control = velocityController_.update(
             nowMs, shaped.targetVelocityMps, velocityReady.usable, estimate_.velocityMps);
         effort = control.effort;
@@ -361,6 +398,9 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.driverFaultLowCycles = cyclesWithDriverFaultLow_;
     snapshot.driverFaultConfigurationValid = configurationChecks_.driverFaultConfigurationValid;
     snapshot.phase = status.phase;
+    snapshot.bottleContactDetected = bottleEvidence.contactDetected;
+    snapshot.captureComplete = bottleEvidence.captureComplete;
+    snapshot.pushComplete = bottleEvidence.pushComplete;
     snapshot.runCommand = status.intention.command;
     snapshot.intentionCurrent = intentionCurrent;
     snapshot.targetVelocityMps = shaped.targetVelocityMps;
@@ -805,7 +845,19 @@ void VehicleRuntime::applyConfigSet(const ev::RunConfigFields& supplied) {
 }
 
 void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
-    const ev::AnnounceVerdict verdict = ev::announceVerdictFor(heldConfig_, configurationChecks_);
+    const ev::RunConfig config = ev::completedRunConfig(heldConfig_);
+    const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(config);
+
+    // The announced run's timing plan, before anything is accepted: which cruise
+    // the run will travel at, how long it will deliberately wait, and whether the
+    // announced Target Time is reachable inside the configured limits at all. A
+    // Target Time that is not reachable is refused here, with the plan's own
+    // reason, rather than accepted and then violated or timed out.
+    const ev::RunTimingPlan plan =
+        ev::planRunTiming(vehicleConfig::runTimingPlanInputs(geometry, config.targetTimeS));
+
+    const ev::AnnounceVerdict verdict =
+        ev::announceVerdictFor(heldConfig_, configurationChecks_, plan);
     if (!verdict.ok) {
         // The gate refuses without latching anything: a half-typed configuration
         // is a refusal to report, not a fault to clear.
@@ -816,15 +868,19 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
         return;
     }
 
-    const ev::RunConfig config = ev::completedRunConfig(heldConfig_);
     const ev::RunStartStatus status =
-        run_.announceRun(config, ev::validateRunConfig(config), nowMs);
+        run_.announceRun(config, ev::validateRunConfig(config), plan.plannedDelayS, nowMs);
     if (status != ev::RunStartStatus::Started) {
         // The gate accepted what the policy then refused: a caller bug, reported
-        // rather than left as a half-announced run.
-        respondRefusal(ev::OperatorCommandId::Announce, ev::kOperatorReasonChecksFailed);
-        pushOperatorEvent(ev::TelemetryEventCode::AnnounceRefused,
-                          ev::kOperatorReasonChecksFailed);
+        // rather than left as a half-announced run. `PlannedDelayNotUsable` is the
+        // one status the gate cannot have covered (the plan's delay is bounded by
+        // the announced Target Time, which the policy's own bound must cover), so
+        // it is named rather than collapsed into a generic refusal.
+        const char* reason = status == ev::RunStartStatus::PlannedDelayNotUsable
+                                 ? kReasonDelayNotPermitted
+                                 : ev::kOperatorReasonChecksFailed;
+        respondRefusal(ev::OperatorCommandId::Announce, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::AnnounceRefused, reason);
         return;
     }
 
@@ -832,11 +888,16 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     // The geometry the announced configuration defines. The origin stays where it
     // is: the Start Point is established at the arming decision, which is the
     // moment the vehicle is staged on the line.
-    axisGeometry_ = ev::runAxisGeometryFor(heldConfig_);
+    axisGeometry_ = geometry;
+    // The run's own decided values, held here so the profile and the run use the
+    // same ones: the planned cruise at the shaping layer, the planned delay inside
+    // the run policy (which `announceRun()` has just stored), and the plan itself
+    // as the record of what was decided.
+    timingPlan_ = plan;
+    runProfileLimits_ = vehicleConfig::profileLimitsWithCruise(plan.plannedCruiseMps);
     legForward_ = true;
     pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted, ev::kTelemetryMissingField);
-    respondLine(ev::formatOperatorAck(ev::OperatorCommandId::Announce,
-                                     serialTransport::port().workingBuffer(),
+    respondLine(ev::formatAnnounceAck(verdict, serialTransport::port().workingBuffer(),
                                      ev::kSerialLineCapacity));
 }
 
@@ -890,6 +951,11 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     // operator typed, and a new run must be announced with it again - one command
     // - rather than retyped. `config clear` is the command that discards it.
     axisGeometry_ = ev::RunAxisGeometry(0.0, 0.0, 0.0);
+    // The announced run's plan and its shaped limits go with the run: the next one
+    // is planned from its own announcement (which may name a different Target
+    // Time), and no planned cruise survives a new-run boundary.
+    timingPlan_ = ev::refusedTimingPlan(ev::RunTimingPlanStatus::NotPlanned);
+    runProfileLimits_ = vehicleConfig::profileLimits();
     legForward_ = true;
     runOriginTicks_ = encoderInput::snapshotTicks().ticks;
     cyclesWithDriverFaultLow_ = 0U;

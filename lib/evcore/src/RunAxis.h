@@ -200,6 +200,16 @@ inline RunAxisPosition runAxisPositionM(int32_t originTicks, int32_t currentTick
     return RunAxisPosition(signedTravelM, true, RunAxisStatus::Usable);
 }
 
+// The whole travel an announced run covers, metres: the forward leg out to the
+// turn-around position (the Target Point plus the announced Bottle Line
+// Distance, rule 8.j) and the reverse leg back to the Target Point. This is the
+// distance a timing plan is sized against - the run must travel it, not just the
+// announced Target Distance - and it is derived from the announced geometry, so
+// there is no second, competing distance for a run's budget.
+inline double plannedTravelDistanceM(const RunAxisGeometry& geometry) {
+    return geometry.turnAroundPositionM() + geometry.bottleLineDistanceM;
+}
+
 // Distance still to travel along the run axis to the Target Point, metres, on
 // the leg being travelled: positive while the point is still ahead, zero at it,
 // and negative once it has been passed.

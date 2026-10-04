@@ -16,6 +16,10 @@ enum class ValueSource : uint8_t {
     RuleDerived = 1,
     // Backed by a recorded physical measurement (see VERIFIED_STATE.md).
     Measured = 2,
+    // Computed from measured/cited inputs by pure arithmetic (never a
+    // measurement of the vehicle). Must cite the derivation; never relabelled
+    // Measured. D35: the run's planned cruise is the first such value.
+    Derived = 3,
 };
 
 // A physical value together with the evidence behind it. There is no default
@@ -36,6 +40,8 @@ struct Sourced {
         : value(value_), source(source_), evidence(evidence_) {}
 
     constexpr bool isMeasured() const { return source == ValueSource::Measured; }
+
+    constexpr bool isDerived() const { return source == ValueSource::Derived; }
 
     // True when this value's provenance is complete: a placeholder needs no
     // citation, and anything else has to name where it came from.

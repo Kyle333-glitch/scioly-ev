@@ -5,6 +5,7 @@
 
 #include "CompetitionStateMachine.h"
 #include "ConfigurationChecks.h"
+#include "MotionProfile.h"
 #include "RunAxis.h"
 #include "RunConfig.h"
 #include "SafetyAuthority.h"
@@ -344,9 +345,10 @@ inline CommandAdmissibility admissibilityOf(OperatorCommandId id, const Operator
 // Why a configuration may not be offered to a run. `None` means it may.
 enum class AnnounceRefusal : uint8_t {
     None = 0,
-    ConfigIncomplete,   // a field has not been set: announce would be a partial configuration
-    ConfigInvalid,      // the rules rejected it: `ConfigError` below names which
-    PolicyNotUsable,    // the run policy may not sequence a run with this configuration
+    ConfigIncomplete,      // a field has not been set: announce would be a partial configuration
+    ConfigInvalid,         // the rules rejected it: `ConfigError` below names which
+    PolicyNotUsable,       // the run policy may not sequence a run with this configuration
+    TargetTimeUnreachable, // the announced Target Time cannot be met inside the configured limits
 };
 
 inline const char* announceRefusalName(AnnounceRefusal refusal) {
@@ -359,6 +361,8 @@ inline const char* announceRefusalName(AnnounceRefusal refusal) {
             return "ConfigInvalid";
         case AnnounceRefusal::PolicyNotUsable:
             return "PolicyNotUsable";
+        case AnnounceRefusal::TargetTimeUnreachable:
+            return "TargetTimeUnreachable";
     }
     return "None";
 }
@@ -370,6 +374,12 @@ struct AnnounceVerdict {
     // The check that refuses a `PolicyNotUsable` announcement, so the operator is
     // told which fact is missing rather than that the run is "not ready".
     ConfigurationCheckId firstFailedCheck = ConfigurationCheckId::Count;
+    // The run's timing plan, as the vehicle layer built it from the announced
+    // configuration. Reported on both the acceptance and a
+    // `TargetTimeUnreachable` refusal, because the number behind the refusal is
+    // the plan's own estimate: "the fastest admissible travel takes 18.4 s" is
+    // the fact an operator needs to choose a different Target Time.
+    RunTimingPlan plan = refusedTimingPlan(RunTimingPlanStatus::NotPlanned);
 };
 
 // The announcement gate. Checked in order, so the reported reason is the first
@@ -382,9 +392,20 @@ struct AnnounceVerdict {
 // is what the command layer uses so that a *typed* configuration that cannot be
 // announced yet is a refusal to report rather than a fault to clear. The
 // policy's refusal stays as defence in depth for any future caller.
+//
+// The timing plan is an argument rather than something this gate computes: the
+// plan depends on the measured limits and the announced geometry (which live in
+// the vehicle layer's own configuration), and a second copy of that arithmetic
+// here could disagree with the plan the run is actually announced with. The order
+// of the checks is the order the operator should fix things in: a typed
+// configuration must be complete and legal before its time budget is worth
+// judging, and the run policy must be usable before a plan can be sequenced at
+// all.
 inline AnnounceVerdict announceVerdictFor(const RunConfigFields& fields,
-                                          const ConfigurationBuildChecks& checks) {
+                                          const ConfigurationBuildChecks& checks,
+                                          const RunTimingPlan& plan) {
     AnnounceVerdict verdict;
+    verdict.plan = plan;
     verdict.config = heldRunConfigVerdict(fields);
     if (!verdict.config.complete) {
         verdict.refusal = AnnounceRefusal::ConfigIncomplete;
@@ -397,6 +418,13 @@ inline AnnounceVerdict announceVerdictFor(const RunConfigFields& fields,
     if (!checks.runPolicyUsable) {
         verdict.refusal = AnnounceRefusal::PolicyNotUsable;
         verdict.firstFailedCheck = ConfigurationCheckId::RunPolicyUsable;
+        return verdict;
+    }
+    if (!plan.valid) {
+        // An announcement that cannot be met inside the configured limits is
+        // refused, never silently violated: the run has no way to honor a Target
+        // Time shorter than its fastest admissible travel, so it does not start.
+        verdict.refusal = AnnounceRefusal::TargetTimeUnreachable;
         return verdict;
     }
     verdict.ok = true;

@@ -65,13 +65,22 @@ ev::NearZeroConfig stopConfig(ev::Sourced<double> threshold, ev::Sourced<double>
     return ev::NearZeroConfig(threshold, dwell, fixtureStopGap());
 }
 
-// Fixture policy: a 0.2 s stop verification, a 3 s reversal bound, and phase
-// bounds long enough that only the test that starves a phase sees them.
-ev::RunPhaseConfig phaseConfig(double optionalDelayS) {
-    return ev::RunPhaseConfig(measured(optionalDelayS), measured(5.0), measured(1.0),
-                              measured(5.0), measured(5.0), measured(5.0), measured(5.0),
-                              measured(1.0),
-                              stopConfig(measured(0.05), measured(0.2)));
+// The bottle-evidence policy the fixtures use: a measured lead, advance and push
+// margin. The derivation itself has its own tests (`test_bottle_evidence`); the
+// fixtures here only need a usable configuration, because the run policy refuses
+// to be sequenced on a placeholder.
+ev::BottleEvidenceConfig fixtureBottleConfig() {
+    return ev::BottleEvidenceConfig(measured(0.10), measured(0.20), measured(0.05));
+}
+
+// Fixture policy: a 0.2 s stop verification, a 3 s reversal bound, phase bounds
+// long enough that only the test that starves a phase sees them, and a
+// planned-cruise floor the plan tests can build on.
+ev::RunPhaseConfig phaseConfig(double maximumOptionalDelayS) {
+    return ev::RunPhaseConfig(
+        measured(maximumOptionalDelayS), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(5.0), measured(1.0),
+        stopConfig(measured(0.05), measured(0.2)), measured(0.10), fixtureBottleConfig());
 }
 
 ev::ReversalConfig reversalConfig() {
@@ -114,17 +123,32 @@ struct Harness {
     ev::CompetitionStateMachine machine;
     uint32_t nowMs;
 
-    Harness(const ev::RunPhaseConfig& config, const ev::ReversalConfig& reversal, uint32_t startMs)
-        : machine(config, reversal), nowMs(startMs) {}
+    // The most delay the fixture's policy permits. The fixture announcement
+    // spends that much, so a run that has to reach OptionalDelay announces its
+    // whole bound and a fixture with a zero bound skips the phase entirely - the
+    // delay is a per-announcement decision now, not a policy value.
+    double maximumDelayS;
+
+    Harness(const ev::RunPhaseConfig& config, const ev::ReversalConfig& reversal, uint32_t startMs,
+            double maximumDelayS_ = 0.0)
+        : machine(config, reversal), nowMs(startMs), maximumDelayS(maximumDelayS_) {}
 };
 
-Harness defaultHarness(double optionalDelayS) {
-    return Harness(phaseConfig(optionalDelayS), reversalConfig(), 1000U);
+Harness defaultHarness(double maximumOptionalDelayS) {
+    return Harness(phaseConfig(maximumOptionalDelayS), reversalConfig(), 1000U,
+                   maximumOptionalDelayS);
+}
+
+// Announces the valid fixture run with an explicit planned delay. The run policy
+// bounds it by the announced policy (`maximumOptionalDelayS`).
+ev::RunStartStatus announceValidRunWithDelay(Harness& harness, double plannedDelayS) {
+    const ev::RunConfig config = validRunConfig();
+    return harness.machine.announceRun(config, ev::validateRunConfig(config), plannedDelayS,
+                                       harness.nowMs);
 }
 
 ev::RunStartStatus announceValidRun(Harness& harness) {
-    const ev::RunConfig config = validRunConfig();
-    return harness.machine.announceRun(config, ev::validateRunConfig(config), harness.nowMs);
+    return announceValidRunWithDelay(harness, harness.maximumDelayS);
 }
 
 // One cycle's stated evidence. Every field defaults to a stated, safe fact; the
@@ -356,8 +380,8 @@ void test_an_invalid_announcement_faults_and_requires_an_explicit_reset(void) {
     TEST_ASSERT_FALSE(validation.ok);
 
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::ConfigInvalid),
-                          static_cast<int>(
-                              harness.machine.announceRun(config, validation, harness.nowMs)));
+                          static_cast<int>(harness.machine.announceRun(config, validation, 0.0,
+                                                                      harness.nowMs)));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::InvalidRunConfig),
                           static_cast<int>(harness.machine.faultCode()));
 
@@ -365,7 +389,7 @@ void test_an_invalid_announcement_faults_and_requires_an_explicit_reset(void) {
     const ev::RunConfig valid = validRunConfig();
     TEST_ASSERT_EQUAL_INT(
         static_cast<int>(ev::RunStartStatus::FaultLatched),
-        static_cast<int>(harness.machine.announceRun(valid, ev::validateRunConfig(valid),
+        static_cast<int>(harness.machine.announceRun(valid, ev::validateRunConfig(valid), 0.0,
                                                     harness.nowMs)));
 
     // Nothing acts during the fault, however much evidence arrives.
@@ -395,7 +419,8 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     // This machine's own bounds are placeholders, so it may not sequence a run.
     const ev::RunPhaseConfig placeholderDelay = ev::RunPhaseConfig(
         provisional(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)));
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        fixtureBottleConfig());
     Harness harness(placeholderDelay, reversalConfig(), 1000U);
     TEST_ASSERT_FALSE(harness.machine.configUsable());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
@@ -618,7 +643,8 @@ void test_a_bound_below_a_millisecond_expires_rather_than_never(void) {
     const ev::RunPhaseConfig shortBounds =
         ev::RunPhaseConfig(measured(0.0), measured(0.0005), measured(1.0), measured(5.0),
                            measured(5.0), measured(5.0), measured(5.0), measured(1.0),
-                           stopConfig(measured(0.05), measured(0.2)));
+                           stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+                           fixtureBottleConfig());
     Harness harness(shortBounds, reversalConfig(), 1000U);
     announceValidRun(harness);
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));
@@ -1385,6 +1411,49 @@ void test_reversal_refusals_map_to_faults(void) {
         static_cast<int>(ev::faultStopPolicyFor(ev::FaultCode::RunSequencingError)));
 }
 
+// D35: the maximum optional delay is a rule value (rule 8.i), not a
+// measurement. A cited RuleDerived bound passes; a placeholder or an uncited
+// rule value fails, mirroring the final-stop dwell policy.
+void test_cited_rule_derived_optional_delay_passes(void) {
+    const ev::Sourced<double> citedDelay(20.0, ev::ValueSource::RuleDerived,
+                                         "rules2027 8.i (Target Time maximum)");
+    TEST_ASSERT_TRUE(citedDelay.citesEvidence());
+    TEST_ASSERT_TRUE(ev::optionalDelayProvenanceIsEstablished(citedDelay));
+    const ev::RunPhaseConfig config(
+        citedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(0.10), fixtureBottleConfig());
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
+    ev::CompetitionStateMachine machine(config, reversalConfig());
+    TEST_ASSERT_TRUE(machine.configUsable());
+}
+
+void test_uncited_and_provisional_optional_delay_fail(void) {
+    // Provisional placeholder fails.
+    const ev::RunPhaseConfig provisionalConfig(
+        provisional(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(0.10), fixtureBottleConfig());
+    TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalConfig).ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
+                          static_cast<int>(ev::validateRunPhaseConfig(provisionalConfig).error));
+
+    // Uncited RuleDerived fails exactly like a placeholder: no smuggled bound.
+    const ev::Sourced<double> uncitedDelay(20.0, ev::ValueSource::RuleDerived);
+    TEST_ASSERT_FALSE(uncitedDelay.citesEvidence());
+    TEST_ASSERT_FALSE(ev::optionalDelayProvenanceIsEstablished(uncitedDelay));
+    const ev::RunPhaseConfig uncitedConfig(
+        uncitedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(0.10), fixtureBottleConfig());
+    TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(uncitedConfig).ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
+                          static_cast<int>(ev::validateRunPhaseConfig(uncitedConfig).error));
+
+    // A measured bound still passes, so the fix did not narrow the old path.
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(phaseConfig(1.0)).ok);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_a_fresh_state_machine_is_idle_and_asks_for_nothing);
@@ -1426,5 +1495,7 @@ int main(int, char**) {
     RUN_TEST(test_the_authority_refuses_a_direct_reverse_independently);
     RUN_TEST(test_the_run_and_the_authority_never_flip_direction_without_a_verified_stop);
     RUN_TEST(test_reversal_refusals_map_to_faults);
+    RUN_TEST(test_cited_rule_derived_optional_delay_passes);
+    RUN_TEST(test_uncited_and_provisional_optional_delay_fail);
     return UNITY_END();
 }

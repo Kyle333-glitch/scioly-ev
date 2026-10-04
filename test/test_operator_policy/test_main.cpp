@@ -53,6 +53,23 @@ ev::ConfigurationBuildChecks allChecksPassing() {
     return checks;
 }
 
+ev::Sourced<double> measuredValue(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::Measured);
+}
+
+// The plan the vehicle layer builds for the fixture configuration, through the
+// production arithmetic (`planRunTiming()`) rather than a hand-built struct: State
+// level with a 7.50 m target and a 1.00 m Bottle Line Distance means 9.50 m of
+// announced travel (rule 8.j puts the turn-around a bottle-line beyond the Target
+// Point and the run comes back), and 15.0 s is an announced time those limits can
+// meet.
+ev::RunTimingPlan planForTargetTime(double targetTimeS) {
+    return ev::planRunTiming(ev::RunTimingPlanInputs(
+        9.50, ev::Sourced<double>(targetTimeS, ev::ValueSource::RuleDerived, "rules2027 8.i"),
+        measuredValue(1.20), measuredValue(1.20), measuredValue(0.50), measuredValue(1.00),
+        measuredValue(0.10), measuredValue(0.20), measuredValue(30.0)));
+}
+
 // Unity's double assertions are compiled out of this test build, so a value is
 // compared through its difference. The tolerance is far below what the rules
 // distinguish and far above the rounding of a double.
@@ -429,18 +446,20 @@ void test_refusal_spellings_are_wire_safe(void) {
 // rule error, and a rule error before the run policy's own readiness.
 void test_announcement_gate_reports_the_first_thing_to_fix(void) {
     const ev::ConfigurationBuildChecks passing = allChecksPassing();
+    const ev::RunTimingPlan plan = planForTargetTime(15.0);
+    TEST_ASSERT_TRUE(plan.valid);
 
     ev::RunConfigFields incomplete;
     incomplete.hasLevel = true;
     incomplete.levelIndex = 1U;
-    ev::AnnounceVerdict verdict = ev::announceVerdictFor(incomplete, passing);
+    ev::AnnounceVerdict verdict = ev::announceVerdictFor(incomplete, passing, plan);
     TEST_ASSERT_FALSE(verdict.ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::ConfigIncomplete),
                           static_cast<int>(verdict.refusal));
 
     ev::RunConfigFields invalid = validStateConfig();
     invalid.bottleLineDistanceM = 4.00;  // beyond the 3.00 m maximum (rule 8.j)
-    verdict = ev::announceVerdictFor(invalid, passing);
+    verdict = ev::announceVerdictFor(invalid, passing, plan);
     TEST_ASSERT_FALSE(verdict.ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::ConfigInvalid),
                           static_cast<int>(verdict.refusal));
@@ -449,17 +468,44 @@ void test_announcement_gate_reports_the_first_thing_to_fix(void) {
 
     ev::ConfigurationBuildChecks unusable = passing;
     unusable.runPolicyUsable = false;
-    verdict = ev::announceVerdictFor(validStateConfig(), unusable);
+    verdict = ev::announceVerdictFor(validStateConfig(), unusable, plan);
     TEST_ASSERT_FALSE(verdict.ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::PolicyNotUsable),
                           static_cast<int>(verdict.refusal));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ConfigurationCheckId::RunPolicyUsable),
                           static_cast<int>(verdict.firstFailedCheck));
 
-    verdict = ev::announceVerdictFor(validStateConfig(), passing);
+    verdict = ev::announceVerdictFor(validStateConfig(), passing, plan);
     TEST_ASSERT_TRUE(verdict.ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::None),
                           static_cast<int>(verdict.refusal));
+}
+
+// An announced Target Time the run cannot meet inside the configured limits is
+// refused by name, and the plan's own status travels with the refusal so the
+// operator is told which fact behind the plan refused it. Nothing is silently
+// violated: the alternative would be a run that either exceeds a limit or times
+// out mid-course.
+void test_an_unreachable_target_time_is_refused_with_the_plan_reason(void) {
+    const ev::ConfigurationBuildChecks passing = allChecksPassing();
+    const ev::RunTimingPlan impossible = planForTargetTime(1.0);
+    TEST_ASSERT_FALSE(impossible.valid);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunTimingPlanStatus::TargetTimeTooShort),
+                          static_cast<int>(impossible.status));
+
+    const ev::AnnounceVerdict verdict =
+        ev::announceVerdictFor(validStateConfig(), passing, impossible);
+    TEST_ASSERT_FALSE(verdict.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::TargetTimeUnreachable),
+                          static_cast<int>(verdict.refusal));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunTimingPlanStatus::TargetTimeTooShort),
+                          static_cast<int>(verdict.plan.status));
+
+    // The refusal names a wire-safe reason, like every other refusal spelling.
+    const char* name = ev::announceRefusalName(verdict.refusal);
+    TEST_ASSERT_NOT_NULL(name);
+    TEST_ASSERT_NULL(strchr(name, ','));
+    TEST_ASSERT_EQUAL_STRING("TargetTimeUnreachable", name);
 }
 
 // ---------------------------------------------------------------------------

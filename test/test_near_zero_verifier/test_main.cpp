@@ -48,6 +48,17 @@ ev::Sourced<uint32_t> measuredGap(uint32_t value) {
     return ev::Sourced<uint32_t>(value, ev::ValueSource::Measured);
 }
 
+// A value the official rules fix, with the rule it came from. The citation is
+// what makes it usable for a dwell; a `RuleDerived` value with no citation is
+// refused exactly like a placeholder.
+ev::Sourced<double> ruleDerived(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::RuleDerived, "rules2027 8.p");
+}
+
+ev::Sourced<double> ruleDerivedWithoutCitation(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::RuleDerived);
+}
+
 // Fixture policy: within 0.05 m/s, held continuously for 0.2 s, with an update
 // gap limit of 250 ms.
 //
@@ -102,14 +113,16 @@ ev::VelocityEstimate syntheticEstimate(double velocityMps, bool valid, bool clai
 void test_config_refuses_unmeasured_and_degenerate_values(void) {
     TEST_ASSERT_TRUE(ev::validateNearZeroConfig(fixtureConfig()).ok);
 
-    // A placeholder threshold, dwell or gap limit can never verify anything.
+    // A placeholder threshold or gap limit can never verify anything.
     const ev::NearZeroConfig provisionalThreshold(provisional(0.05), measured(0.2),
                                                   measuredGap(250U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::ValuesAreNotMeasured),
                           static_cast<int>(ev::validateNearZeroConfig(provisionalThreshold).error));
+    // A placeholder dwell is refused for its own reason: it is neither measured
+    // nor a cited rule value, and a stop that rests on a guess may not gate one.
     const ev::NearZeroConfig provisionalDwell(measured(0.05), provisional(0.2),
                                               measuredGap(250U));
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::ValuesAreNotMeasured),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::DwellIsNotEstablished),
                           static_cast<int>(ev::validateNearZeroConfig(provisionalDwell).error));
     // The gap limit is what bounds how much dwell can be credited without
     // observation, so an unmeasured one is not usable either.
@@ -137,6 +150,37 @@ void test_config_refuses_unmeasured_and_degenerate_values(void) {
     const ev::NearZeroConfig zeroGap(measured(0.05), measured(0.2), measuredGap(0U));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::NonPositiveUpdateGap),
                           static_cast<int>(ev::validateNearZeroConfig(zeroGap).error));
+}
+
+// The final stop's dwell is the event's Complete Stop (rule 8.p) - a rule value,
+// never a measurement - so it must be accepted where a measured dwell is, while a
+// placeholder still is not. This is the check that decides whether a run with an
+// otherwise complete calibration can ever leave FinalBrake.
+void test_a_cited_rule_dwell_gates_a_stop_and_an_uncited_one_does_not(void) {
+    const ev::NearZeroConfig completeStop(measured(0.05), ruleDerived(3.0), measuredGap(3200U));
+    TEST_ASSERT_TRUE(ev::validateNearZeroConfig(completeStop).ok);
+    TEST_ASSERT_TRUE(ev::dwellProvenanceIsEstablished(completeStop.dwellS));
+
+    // A rule value that does not say which rule is not established: the citation
+    // is the difference between a rule and an unmeasured number.
+    const ev::NearZeroConfig uncited(measured(0.05), ruleDerivedWithoutCitation(3.0),
+                                     measuredGap(3200U));
+    TEST_ASSERT_FALSE(ev::validateNearZeroConfig(uncited).ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::NearZeroConfigError::DwellIsNotEstablished),
+                          static_cast<int>(ev::validateNearZeroConfig(uncited).error));
+    TEST_ASSERT_FALSE(ev::dwellProvenanceIsEstablished(uncited.dwellS));
+
+    // The measurement may still be what a dwell is (the reversal gate's is).
+    TEST_ASSERT_TRUE(ev::dwellProvenanceIsEstablished(measured(0.2)));
+    TEST_ASSERT_FALSE(ev::dwellProvenanceIsEstablished(provisional(0.2)));
+
+    // And the rule dwell actually verifies a stop: the config is usable, so the
+    // verifier produces verdicts instead of refusing.
+    ev::NearZeroVerifier verifier(completeStop);
+    TEST_ASSERT_TRUE(verifier.configUsable());
+    const ev::NearZeroEvidence evidence = evidenceAt(0.0, true);
+    expectStatus(ev::NearZeroStatus::DwellInProgress, verifier.update(1000U, evidence));
+    expectStatus(ev::NearZeroStatus::Verified, verifier.update(4000U, evidence));
 }
 
 // --- The composed evidence packet -------------------------------------------

@@ -109,12 +109,15 @@ ev::SafetyLimits limitsWithMaxEffort(uint16_t maxEffortPermille) {
 }
 
 // The run policy the new-run sequence also resets. Every value is a fixture, as
-// everywhere else in this file: no bound here is measured.
+// everywhere else in this file: no bound here is measured. The planned delay is a
+// per-announcement value now, so the fixture policy bounds it at zero and the
+// announcement below spends none.
 ev::RunPhaseConfig chainPhaseConfig() {
     return ev::RunPhaseConfig(
         measuredValue(0.0), measuredValue(5.0), measuredValue(1.0), measuredValue(5.0),
         measuredValue(5.0), measuredValue(5.0), measuredValue(5.0), measuredValue(1.0),
-        stopConfig(measuredValue(0.05), measuredValue(0.2)));
+        stopConfig(measuredValue(0.05), measuredValue(0.2)), measuredValue(0.10),
+        ev::BottleEvidenceConfig(measuredValue(0.10), measuredValue(0.20), measuredValue(0.05)));
 }
 
 ev::ReversalConfig chainReversalConfig() {
@@ -542,7 +545,8 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
     const ev::RunConfig announced = chainRunConfig();
     TEST_ASSERT_EQUAL_INT(
         static_cast<int>(ev::RunStartStatus::Started),
-        static_cast<int>(run.announceRun(announced, ev::validateRunConfig(announced), 1000U)));
+        static_cast<int>(
+            run.announceRun(announced, ev::validateRunConfig(announced), 0.0, 1000U)));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Armed),
                           static_cast<int>(run.update(1020U, chainRunInputs()).phase));
 

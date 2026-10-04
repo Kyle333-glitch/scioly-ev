@@ -192,7 +192,18 @@ constexpr double kFixtureMaxIntegrationStepS = 0.05;
 // Long enough that only a scenario that deliberately starves a phase reaches
 // them; the nominal run spends about 16 s of scripted time in the whole
 // sequence at the fixture rate, so these bounds are runway, not policy.
-constexpr double kFixtureOptionalDelayS = 0.1;
+// The most deliberate pre-travel delay the fixture policy permits. The fixture
+// announcement spends it in full (`announce()`, below), which is what keeps the
+// scripted scenarios' timing - and their OptionalDelay phase - unchanged now that
+// the delay is a per-announcement plan value rather than a policy value.
+constexpr double kFixtureMaximumOptionalDelayS = 0.1;
+
+// The fixture planned-cruise floor and bottle-evidence distances: measured
+// fixtures, like every other value in this file, so the run policy is usable.
+constexpr double kFixtureMinimumCruiseMps = 0.10;
+constexpr double kFixtureBottleContactLeadM = 0.10;
+constexpr double kFixtureBottleCaptureAdvanceM = 0.20;
+constexpr double kFixtureBottlePushMarginM = 0.05;
 constexpr double kFixtureApproachTimeoutS = 5.0;
 constexpr double kFixtureCaptureTimeoutS = 2.0;
 constexpr double kFixturePushTimeoutS = 12.0;
@@ -333,7 +344,7 @@ inline ScenarioFixtures nominalFixtures() {
             measuredPermille(kFixtureMaxEffortPermille), kFixtureMaxIntegralPermille,
             kFixtureMaxIntegrationStepS),
         ev::DirectionalMotionProfileLimits(forward, reverse),
-        ev::RunPhaseConfig(measuredValue(kFixtureOptionalDelayS),
+        ev::RunPhaseConfig(measuredValue(kFixtureMaximumOptionalDelayS),
                            measuredValue(kFixtureApproachTimeoutS),
                            measuredValue(kFixtureCaptureTimeoutS),
                            measuredValue(kFixturePushTimeoutS),
@@ -341,7 +352,10 @@ inline ScenarioFixtures nominalFixtures() {
                            measuredValue(kFixtureFinalApproachTimeoutS),
                            measuredValue(kFixtureFinalStopTimeoutS),
                            measuredValue(kFixtureFinalApproachDistanceM),
-                           fixtureStopConfig()),
+                           fixtureStopConfig(), measuredValue(kFixtureMinimumCruiseMps),
+                           ev::BottleEvidenceConfig(measuredValue(kFixtureBottleContactLeadM),
+                                                    measuredValue(kFixtureBottleCaptureAdvanceM),
+                                                    measuredValue(kFixtureBottlePushMarginM))),
         ev::ReversalConfig(fixtureStopConfig(), measuredValue(kFixtureReversalTimeoutS)),
         measuredPositiveDirection(ev::MotionDirection::Forward));
 }
@@ -594,7 +608,11 @@ public:
     // adopted.
     ev::RunStartStatus announce(const ev::RunConfig& config) {
         const ev::RunConfigValidation validation = ev::validateRunConfig(config);
-        const ev::RunStartStatus status = run_.announceRun(config, validation, nowMs_);
+        // The fixture announcement spends the whole delay the fixture policy
+        // permits, so the scripted runs keep their OptionalDelay phase now that
+        // the delay is decided per announcement by the run layer's timing plan.
+        const ev::RunStartStatus status =
+            run_.announceRun(config, validation, kFixtureMaximumOptionalDelayS, nowMs_);
         if (status != ev::RunStartStatus::RunAlreadyActive &&
             status != ev::RunStartStatus::FaultLatched) {
             configurationValid_ = validation.ok;

@@ -62,10 +62,18 @@ namespace ev {
 //   vehicle layer maps it onto that field, per the producer contract stated at
 //   `SafetySystemState::atZeroSpeed`.
 // * No threshold and no dwell is written down here. Both arrive as `Sourced`
-//   values, and a value that is not `ValueSource::Measured` produces a refusal
-//   instead of a verdict. Until the stop is measured (`VERIFIED_STATE.md` #5,
-//   #9), the honest configuration is `Provisional` and the honest result is a
-//   refusal that authorizes nothing.
+//   values, and a placeholder produces a refusal instead of a verdict. Until the
+//   stop is measured (`VERIFIED_STATE.md` #5, #9), the honest configuration is
+//   `Provisional` and the honest result is a refusal that authorizes nothing.
+// * One provenance rule is deliberately wider than "Measured", and it is stated
+//   where it is applied (`dwellProvenanceIsEstablished()`): a dwell the official
+//   rules *fix* may gate a stop. The run's final stop is the event's Complete
+//   Stop (rule 8.p, `ev::rules2027::kCompleteStopS`), which is a rule value and
+//   never a measurement - demanding a measurement for it would make a run with
+//   an otherwise complete calibration unsequenceable, and relabelling the rule
+//   value `Measured` would be fabricating a measurement. A `Provisional` dwell is
+//   still refused, and the threshold and the gap limit are still required to be
+//   `Measured`: they describe this vehicle, not the event.
 // * It has no clock (`nowMs` is an argument), no hardware, no allocation, no
 //   filtering and no prediction. It is not a stop command and it brakes nothing.
 // * It has no timeout of its own. How long a verification may take is decided by
@@ -88,8 +96,9 @@ struct NearZeroConfig {
 
     // How long the near-zero evidence must hold continuously before the stop is
     // verified, seconds. This is the interval over which the stop was observed
-    // (SafetyAuthority.h); a bench candidate value, not a measured stopping
-    // behavior.
+    // (SafetyAuthority.h). Either a value measured on this vehicle or - for the
+    // run's final stop - the interval the rules fix (rule 8.p); see
+    // `dwellProvenanceIsEstablished()`.
     Sourced<double> dwellS;
 
     // The longest gap between two updates that may still be credited as continued
@@ -100,12 +109,30 @@ struct NearZeroConfig {
 
 enum class NearZeroConfigError : uint8_t {
     None = 0,
-    ValuesAreNotMeasured,     // threshold, dwell or gap limit is not ValueSource::Measured
+    ValuesAreNotMeasured,     // threshold or gap limit is not ValueSource::Measured
+    DwellIsNotEstablished,    // the dwell is neither measured nor a cited rule value
     NonFiniteValue,           // NaN or infinity
     NonPositiveThreshold,     // a zero threshold could never be observed
     NonPositiveDwell,         // a zero dwell would verify on the first observation
     NonPositiveUpdateGap,     // a zero gap limit would refuse every continued interval
 };
+
+// True when a dwell may gate a stop: it was measured on this vehicle, or the
+// official rules fix it and the citing rule is recorded (`Sourced::citesEvidence()`).
+//
+// The rule case exists for exactly one value - the run's Complete Stop interval
+// (rule 8.p) - and it is a *rule* value: the event says how long the stop is, so
+// no experiment on this vehicle can turn it into a measurement, and a vehicle
+// with nothing left but that rule value must still be able to complete a run.
+// The citation is required rather than assumed, so a `RuleDerived` dwell that
+// names no rule is refused exactly like a placeholder - which is what keeps this
+// from becoming a way to smuggle an unmeasured number past the gate.
+inline bool dwellProvenanceIsEstablished(const Sourced<double>& dwell) {
+    if (dwell.isMeasured()) {
+        return true;
+    }
+    return dwell.source == ValueSource::RuleDerived && dwell.citesEvidence();
+}
 
 struct NearZeroConfigValidation {
     // Invariant: error == None exactly when ok is true.
@@ -120,9 +147,11 @@ struct NearZeroConfigValidation {
 // measurement, and a zero dwell would verify a stop on the first near-zero
 // observation, which is not an observed interval at all.
 inline NearZeroConfigValidation validateNearZeroConfig(const NearZeroConfig& config) {
-    if (!config.velocityThresholdMps.isMeasured() || !config.dwellS.isMeasured() ||
-        !config.maxUpdateGapMs.isMeasured()) {
+    if (!config.velocityThresholdMps.isMeasured() || !config.maxUpdateGapMs.isMeasured()) {
         return {false, NearZeroConfigError::ValuesAreNotMeasured};
+    }
+    if (!dwellProvenanceIsEstablished(config.dwellS)) {
+        return {false, NearZeroConfigError::DwellIsNotEstablished};
     }
     if (!std::isfinite(config.velocityThresholdMps.value) || !std::isfinite(config.dwellS.value)) {
         return {false, NearZeroConfigError::NonFiniteValue};

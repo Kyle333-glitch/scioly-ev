@@ -65,6 +65,7 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 //
 //   STATUS  = 357   every control-state field, the widest names, the longest
 //                   configuration rule error name
+//   ANNOUNCE_ACK = 138  the widest plan status name and four 13-character values
 //   CONFIG  = 170   the widest level name, three 13-character typed values, the
 //                   derived Bottle Start Point (one of three rule values), and
 //                   the longest rule error name
@@ -79,6 +80,10 @@ constexpr uint16_t kOperatorStatusLineWorstCaseChars = 357U;
 constexpr uint16_t kOperatorConfigEchoWorstCaseChars = 170U;
 constexpr uint16_t kOperatorChecksLineWorstCaseChars = 445U;
 constexpr uint16_t kOperatorTelemetryLineWorstCaseChars = 88U;
+// The announce confirmation is the longest plan echo: the widest plan status name
+// (`PlanExceedsMaxRunDuration`), four 13-character fixed-point values, and the
+// prefix and field names around them.
+constexpr uint16_t kOperatorAnnounceAckWorstCaseChars = 138U;
 
 // The largest response this module can produce. `config set`'s confirmation is
 // the echo plus a `cmd` field, comfortably under the checks report.
@@ -155,22 +160,49 @@ inline uint16_t formatArmRefusal(const ArmVerdict& verdict, char* buffer, uint16
     return finishBoundedLine(text, buffer);
 }
 
-// `ERR,cmd=announce,reason=<refusal>,error=<rule error>,first_fail=<check>`. Both
-// detail fields are always present: `error` when the rules rejected the
-// configuration, `first_fail` when the run policy cannot sequence it, and the
-// missing marker when that field does not apply to this refusal.
+// `ERR,cmd=announce,reason=<refusal>,error=<detail>,first_fail=<check>`. Both
+// detail fields are always present: `error` names the rule error when the rules
+// rejected the configuration and the timing plan's own status when the announced
+// Target Time cannot be met, `first_fail` names the configuration check when the
+// run policy cannot sequence the run, and the missing marker when a field does
+// not apply to this refusal.
 inline uint16_t formatAnnounceRefusal(const AnnounceVerdict& verdict, char* buffer,
                                       uint16_t capacity) {
     BoundedText text(buffer, capacity);
     text.appendText(kOperatorErrorPrefix);
     text.field("cmd").appendText(operatorCommandName(OperatorCommandId::Announce));
     text.field("reason").appendText(announceRefusalName(verdict.refusal));
-    text.field("error").appendText(verdict.refusal == AnnounceRefusal::ConfigInvalid
-                                       ? telemetryConfigErrorName(verdict.config.error)
-                                       : kTelemetryMissingField);
+    const char* detail = kTelemetryMissingField;
+    if (verdict.refusal == AnnounceRefusal::ConfigInvalid) {
+        detail = telemetryConfigErrorName(verdict.config.error);
+    } else if (verdict.refusal == AnnounceRefusal::TargetTimeUnreachable) {
+        detail = runTimingPlanStatusName(verdict.plan.status);
+    }
+    text.field("error").appendText(detail);
     text.field("first_fail").appendText(verdict.refusal == AnnounceRefusal::PolicyNotUsable
                                             ? configurationCheckName(verdict.firstFailedCheck)
                                             : kTelemetryMissingField);
+    return finishBoundedLine(text, buffer);
+}
+
+// `OK,cmd=announce,plan=<status>,cruise_mps=<v>,delay_s=<v>,total_s=<v>,margin_s=<v>`
+// - the confirmation that the run was announced, with the plan it was announced
+// with. The plan is echoed rather than only stored because it is what the run
+// will actually do: the announced Target Time, the announced geometry and the
+// configured limits already decided the cruise speed and the deliberate delay,
+// and an operator who cannot see them cannot explain a run's timing afterwards.
+// `total_s` is the plan's whole estimate (travel + the reversal stop's reserve +
+// the delay) and `margin_s` is what the announced time has left over.
+inline uint16_t formatAnnounceAck(const AnnounceVerdict& verdict, char* buffer,
+                                  uint16_t capacity) {
+    BoundedText text(buffer, capacity);
+    text.appendText(kOperatorOkPrefix);
+    text.field("cmd").appendText(operatorCommandName(OperatorCommandId::Announce));
+    text.field("plan").appendText(runTimingPlanStatusName(verdict.plan.status));
+    text.field("cruise_mps").appendFixed(verdict.plan.plannedCruiseMps, kTelemetryFieldDecimals);
+    text.field("delay_s").appendFixed(verdict.plan.plannedDelayS, kTelemetryFieldDecimals);
+    text.field("total_s").appendFixed(verdict.plan.intendedTotalS, kTelemetryFieldDecimals);
+    text.field("margin_s").appendFixed(verdict.plan.marginS, kTelemetryFieldDecimals);
     return finishBoundedLine(text, buffer);
 }
 

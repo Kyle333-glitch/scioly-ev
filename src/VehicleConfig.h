@@ -119,6 +119,14 @@ constexpr double kPlannedCruiseMps = 0.5;
 constexpr double kPlannedAccelMps2 = 0.5;
 constexpr double kPlannedDecelMps2 = 1.0;
 
+// The slowest cruise at which travel is known to be reliable, m/s. The run's
+// timing plan never plans below it - a speed the drivetrain cannot follow is not
+// a way to spend time, so the slack it cannot spend travelling becomes a
+// deliberate stationary delay instead. A rollout/velocity trace (H4/H5) plus a
+// "lowest commanded cruise that produces reliable movement" measurement replaces
+// this; until then it is a placeholder and no run may be announced on it.
+constexpr double kPlannedMinimumCruiseMps = 0.10;
+
 // Regulator placeholders. None is a tuning result (`VERIFIED_STATE.md` #8).
 constexpr double kPlannedFeedForwardPermillePerMps = 250.0;
 constexpr double kPlannedProportionalPermillePerMps = 150.0;
@@ -154,10 +162,32 @@ constexpr uint32_t kMaxDwellGapMs = 28U;
 constexpr const char* kMaxDwellGapEvidence =
     "data/evidence/P-H0W-2026-09-28/h0w-step8-pins-baseline.log (worst_stall_ms), D28";
 
+// The **longest** deliberate pre-travel delay a run may spend, seconds. The delay
+// a run actually spends is decided per announcement by `planRunTiming()` from the
+// announced Target Time and the announced geometry; this is the bound that plan
+// may not exceed. It is the event's own maximum Target Time (rule 8.i): no run may
+// wait longer than the longest run the event can ask for, which is a bound the
+// rules state rather than a number anyone has to measure. Deliberately NOT
+// `Measured` - no experiment on this vehicle can establish what the event's rules
+// say - and it is RuleDerived rather than Provisional because it *is* a rule
+// value, cited below through `completeStopDwellS()`'s convention.
+constexpr double kPlannedMaximumOptionalDelayS = ev::rules2027::kTargetTimeMaxS;
+
+// Bottle-interaction placeholders: how far before the Bottle Start Point the
+// pusher is taken to touch the bottle, how far past that the bottle counts as
+// captured, and how far past the turn-around position the push must carry it.
+// None of these is a mechanism measurement - the pusher's reach, the funnel's
+// capture length and where the bottle ends up relative to the line are exactly
+// what the bottle-integration protocol (P-H8) measures against independently
+// observed bottle positions. Until then they are placeholders, and a run may not
+// be announced on them.
+constexpr double kPlannedBottleContactLeadM = 0.0;
+constexpr double kPlannedBottleCaptureAdvanceM = 0.0;
+constexpr double kPlannedBottlePushMarginM = 0.0;
+
 // Run-policy bounds. Every one of these is a bound the run is allowed to wait
 // for evidence under, so a placeholder that is too short turns into a phase
 // timeout rather than into motion - which is the safe direction.
-constexpr double kPlannedOptionalDelayS = 0.0;
 constexpr double kPlannedApproachTimeoutS = 20.0;
 constexpr double kPlannedCaptureTimeoutS = 5.0;
 constexpr double kPlannedPushTimeoutS = 20.0;
@@ -303,24 +333,82 @@ inline ev::VelocityControllerConfig controllerConfig() {
                                         kPlannedMaxIntegrationStepS);
 }
 
-inline ev::MotionProfileLimits profileLimitsForOneDirection(ev::Sourced<double> velocityCeilingMps) {
-    return ev::MotionProfileLimits(provisionalValue(kPlannedCruiseMps), velocityCeilingMps,
+// One leg's shaping limits, for the direction being travelled.
+//
+// The two legs carry *different* measured values - the forward and reverse brake
+// offsets differ, and so do the two safety velocity ceilings - so the direction is
+// an argument here rather than a constant: a caller that packed one leg's values
+// by hand could silently attach the forward offset to a reverse leg, and the
+// profile is handed one set of limits and cannot tell. Defect fixed here: the
+// reverse leg used to be built from `kPlannedForwardBrakeOffsetM` as well.
+inline ev::MotionProfileLimits profileLimitsForOneDirection(
+    ev::MotionDirection direction, ev::Sourced<double> cruiseMps,
+    ev::Sourced<double> velocityCeilingMps) {
+    return ev::MotionProfileLimits(cruiseMps, velocityCeilingMps,
                                    provisionalValue(kPlannedAccelMps2),
                                    provisionalValue(kPlannedDecelMps2),
-                                   provisionalValue(kPlannedForwardBrakeOffsetM),
+                                   direction == ev::MotionDirection::Forward
+                                       ? provisionalValue(kPlannedForwardBrakeOffsetM)
+                                       : provisionalValue(kPlannedReverseBrakeOffsetM),
                                    provisionalDirection(kPlannedPositiveCommandDirection));
 }
 
 inline ev::DirectionalMotionProfileLimits profileLimits() {
     return ev::DirectionalMotionProfileLimits(
-        profileLimitsForOneDirection(provisionalValue(kPlannedMaxForwardVelocityMps)),
-        profileLimitsForOneDirection(provisionalValue(kPlannedMaxReverseVelocityMps)));
+        profileLimitsForOneDirection(ev::MotionDirection::Forward,
+                                     provisionalValue(kPlannedCruiseMps),
+                                     provisionalValue(kPlannedMaxForwardVelocityMps)),
+        profileLimitsForOneDirection(ev::MotionDirection::Reverse,
+                                     provisionalValue(kPlannedCruiseMps),
+                                     provisionalValue(kPlannedMaxReverseVelocityMps)));
+}
+
+// The same limits with the run's *planned* cruise in place of the configured
+// strategy cruise: what the vehicle layer presents for an announced run once its
+// timing plan has chosen a speed (`ev::planRunTiming()`).
+//
+// The planned value is derived at the announcement boundary from the announced
+// Target Time and limits that are all `Measured` (the plan refuses otherwise, so
+// this path is unreachable on a placeholder). Its provenance is therefore
+// `ValueSource::Derived` (D35): a computed planning value, never a measurement
+// of the vehicle, with the derivation cited. Nothing may promote it to
+// `VERIFIED_STATE.md`, and no calibration gate may treat it as `Measured`.
+inline ev::Sourced<double> plannedCruiseValue(double plannedCruiseMps) {
+    return ev::Sourced<double>(plannedCruiseMps, ev::ValueSource::Derived,
+                               "derived: planRunTiming() from measured limits and the announced "
+                               "Target Time (rules2027 8.i)");
+}
+
+inline ev::DirectionalMotionProfileLimits profileLimitsWithCruise(double plannedCruiseMps) {
+    const ev::Sourced<double> cruise = plannedCruiseValue(plannedCruiseMps);
+    return ev::DirectionalMotionProfileLimits(
+        profileLimitsForOneDirection(ev::MotionDirection::Forward, cruise,
+                                     provisionalValue(kPlannedMaxForwardVelocityMps)),
+        profileLimitsForOneDirection(ev::MotionDirection::Reverse, cruise,
+                                     provisionalValue(kPlannedMaxReverseVelocityMps)));
 }
 
 inline ev::NearZeroConfig reversalStopVerification() {
     return ev::NearZeroConfig(provisionalValue(kPlannedReversalStopThresholdMps),
                               provisionalValue(kPlannedReversalStopDwellS),
                               measuredGapMs(kMaxDwellGapMs, kMaxDwellGapEvidence));
+}
+
+// How the forward leg's bottle evidence is derived from the run axis. Every
+// distance is a placeholder that must be measured by the bottle-integration
+// protocol before a run may be announced; see `kPlannedBottleContactLeadM`.
+inline ev::BottleEvidenceConfig bottleEvidenceConfig() {
+    return ev::BottleEvidenceConfig(provisionalValue(kPlannedBottleContactLeadM),
+                                    provisionalValue(kPlannedBottleCaptureAdvanceM),
+                                    provisionalValue(kPlannedBottlePushMarginM));
+}
+
+// The delay bound: the event's maximum Target Time, as a rule value (rule 8.i),
+// so a run's own plan can never wait longer than the longest run the event can
+// ask for. A rule citation is not a measurement, and this is not one.
+inline ev::Sourced<double> maximumOptionalDelayS() {
+    return ev::Sourced<double>(kPlannedMaximumOptionalDelayS, ev::ValueSource::RuleDerived,
+                               "rules2027 8.i (Target Time maximum)");
 }
 
 inline ev::NearZeroConfig finalStopVerification() {
@@ -330,15 +418,15 @@ inline ev::NearZeroConfig finalStopVerification() {
 }
 
 inline ev::RunPhaseConfig runPhaseConfig() {
-    return ev::RunPhaseConfig(provisionalValue(kPlannedOptionalDelayS),
-                              provisionalValue(kPlannedApproachTimeoutS),
+    return ev::RunPhaseConfig(maximumOptionalDelayS(), provisionalValue(kPlannedApproachTimeoutS),
                               provisionalValue(kPlannedCaptureTimeoutS),
                               provisionalValue(kPlannedPushTimeoutS),
                               provisionalValue(kPlannedReverseTimeoutS),
                               provisionalValue(kPlannedFinalApproachTimeoutS),
                               provisionalValue(kPlannedFinalStopTimeoutS),
                               provisionalValue(kPlannedFinalApproachDistanceM),
-                              finalStopVerification());
+                              finalStopVerification(),
+                              provisionalValue(kPlannedMinimumCruiseMps), bottleEvidenceConfig());
 }
 
 inline ev::ReversalConfig reversalConfig() {
@@ -348,6 +436,41 @@ inline ev::ReversalConfig reversalConfig() {
 
 inline ev::Sourced<ev::MotionDirection> positiveTicksDirection() {
     return provisionalDirection(kPlannedPositiveTicksDirection);
+}
+
+// The announced Target Time, as the timing plan reads it: an announced *rule*
+// parameter (rule 8.i), bounded and grid-checked by `validateRunConfig()` at the
+// announcement boundary, and cited here so the plan's own feasibility arithmetic
+// is traceable to the rule that produced it.
+inline ev::Sourced<double> announcedTargetTimeS(double targetTimeS) {
+    return ev::Sourced<double>(targetTimeS, ev::ValueSource::RuleDerived,
+                               "announced Target Time, rules2027 8.i");
+}
+
+// Everything the timing plan needs for one announced run, built from the announced
+// geometry and the announced Target Time.
+//
+// The planning ceiling is the *more restrictive* of the two legs' velocity
+// ceilings, so a plan that fits is a plan that fits on both legs; the cruise is
+// capped by it as well as by the strategy cruise. That conservatism is deliberate:
+// a plan built on the forward ceiling alone would be optimistic about the reverse
+// leg, and the profile would refuse (or clamp) a cruise above the leg's ceiling.
+inline ev::RunTimingPlanInputs runTimingPlanInputs(const ev::RunAxisGeometry& geometry,
+                                                  double announcedTargetTimeSValue) {
+    const ev::Sourced<double> cruiseCeiling = provisionalValue(kPlannedCruiseMps);
+    const ev::Sourced<double> tighterVelocityCeiling =
+        kPlannedMaxForwardVelocityMps < kPlannedMaxReverseVelocityMps
+            ? provisionalValue(kPlannedMaxForwardVelocityMps)
+            : provisionalValue(kPlannedMaxReverseVelocityMps);
+    return ev::RunTimingPlanInputs(
+        ev::plannedTravelDistanceM(geometry), announcedTargetTimeS(announcedTargetTimeSValue),
+        cruiseCeiling, tighterVelocityCeiling, provisionalValue(kPlannedAccelMps2),
+        provisionalValue(kPlannedDecelMps2), provisionalValue(kPlannedMinimumCruiseMps),
+        // The reversal stop's own dwell is inside Run Time; the final Complete Stop
+        // is not (rule 8.p), so only the reversal time is reserved here. It is the
+        // same `Sourced` value the sequencer verifies a stop against, from the same
+        // builder, so the plan cannot reserve a dwell the run does not hold.
+        reversalStopVerification().dwellS, provisionalValue(kPlannedMaxRunDurationS));
 }
 
 // ---------------------------------------------------------------------------
@@ -427,14 +550,18 @@ inline bool allPromotedValuesCiteEvidence() {
     const bool stopCited =
         provenance::cited(reversalStop) && provenance::cited(finalStop) &&
         provenance::cited(reversal.verification) && provenance::cited(reversal.reversalTimeoutS);
-    const bool phaseCited = provenance::cited(phase.optionalDelayS) &&
+    const bool phaseCited = provenance::cited(phase.maximumOptionalDelayS) &&
                             provenance::cited(phase.approachTimeoutS) &&
                             provenance::cited(phase.captureTimeoutS) &&
                             provenance::cited(phase.pushTimeoutS) &&
                             provenance::cited(phase.reverseTimeoutS) &&
                             provenance::cited(phase.finalApproachTimeoutS) &&
                             provenance::cited(phase.finalStopTimeoutS) &&
-                            provenance::cited(phase.finalApproachDistanceM);
+                            provenance::cited(phase.finalApproachDistanceM) &&
+                            provenance::cited(phase.minimumPlannedCruiseMps) &&
+                            provenance::cited(phase.bottleEvidence.contactLeadDistanceM) &&
+                            provenance::cited(phase.bottleEvidence.captureAdvanceDistanceM) &&
+                            provenance::cited(phase.bottleEvidence.pushMarginDistanceM);
 
     return calibrationCited && limitsCited && controllerCited && polarityCited && profileCited &&
            stopCited && phaseCited;

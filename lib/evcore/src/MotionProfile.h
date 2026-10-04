@@ -142,6 +142,46 @@ struct MotionDurationEstimate {
     MotionDurationStatus status;
 };
 
+// The time to travel `distanceM` under a trapezoidal (or, when the distance is
+// too short to reach cruise speed, triangular) profile, from kinematics alone and
+// with no provenance: the arithmetic `motionDurationS` and the run's timing plan
+// below both use this one formula, so "how long does this distance take" has a
+// single answer in this module.
+//
+// Returns NaN when no duration exists: a non-finite or non-positive limit, a
+// non-finite or negative distance, or an arithmetic result that is not finite.
+// A caller that needs to report *why* there is no duration states the reason
+// itself; this function only answers when it can.
+inline double travelDurationS(double distanceM, double cruiseMps, double accelLimitMps2,
+                              double decelLimitMps2) {
+    if (!std::isfinite(distanceM) || distanceM < 0.0 || !std::isfinite(cruiseMps) ||
+        !std::isfinite(accelLimitMps2) || !std::isfinite(decelLimitMps2) || !(cruiseMps > 0.0) ||
+        !(accelLimitMps2 > 0.0) || !(decelLimitMps2 > 0.0)) {
+        return std::nan("");
+    }
+    if (distanceM == 0.0) {
+        return 0.0;
+    }
+
+    const double accelDistanceM = cruiseMps * cruiseMps / (2.0 * accelLimitMps2);
+    const double decelDistanceM = cruiseMps * cruiseMps / (2.0 * decelLimitMps2);
+
+    double durationS = 0.0;
+    if (accelDistanceM + decelDistanceM <= distanceM) {
+        const double cruiseDistanceM = distanceM - accelDistanceM - decelDistanceM;
+        durationS = cruiseMps / accelLimitMps2 + cruiseDistanceM / cruiseMps +
+                    cruiseMps / decelLimitMps2;
+    } else {
+        // Triangular profile: the peak speed solves
+        // distance = v^2/(2a) + v^2/(2d).
+        const double peakVelocityMps =
+            std::sqrt(2.0 * distanceM /
+                      (1.0 / accelLimitMps2 + 1.0 / decelLimitMps2));
+        durationS = peakVelocityMps / accelLimitMps2 + peakVelocityMps / decelLimitMps2;
+    }
+    return std::isfinite(durationS) ? durationS : std::nan("");
+}
+
 // Time to travel `distanceM` with a trapezoidal speed profile: accelerate at
 // `accelLimitMps2` to the cruise speed, cruise, decelerate at `decelLimitMps2`
 // to rest. When the distance is too short to reach cruise speed, the triangular
@@ -172,30 +212,9 @@ inline MotionDurationEstimate motionDurationS(double distanceM,
         !(accelLimitMps2.value > 0.0) || !(decelLimitMps2.value > 0.0)) {
         return {0.0, false, MotionDurationStatus::LimitsAreNotUsable};
     }
-    if (distanceM == 0.0) {
-        return {0.0, true, MotionDurationStatus::Valid};
-    }
 
-    const double accelDistanceM =
-        cruiseVelocityMps.value * cruiseVelocityMps.value / (2.0 * accelLimitMps2.value);
-    const double decelDistanceM =
-        cruiseVelocityMps.value * cruiseVelocityMps.value / (2.0 * decelLimitMps2.value);
-
-    double durationS = 0.0;
-    if (accelDistanceM + decelDistanceM <= distanceM) {
-        const double cruiseDistanceM = distanceM - accelDistanceM - decelDistanceM;
-        durationS = cruiseVelocityMps.value / accelLimitMps2.value +
-                    cruiseDistanceM / cruiseVelocityMps.value +
-                    cruiseVelocityMps.value / decelLimitMps2.value;
-    } else {
-        // Triangular profile: the peak speed solves
-        // distance = v^2/(2a) + v^2/(2d).
-        const double peakVelocityMps =
-            std::sqrt(2.0 * distanceM /
-                      (1.0 / accelLimitMps2.value + 1.0 / decelLimitMps2.value));
-        durationS = peakVelocityMps / accelLimitMps2.value +
-                    peakVelocityMps / decelLimitMps2.value;
-    }
+    const double durationS = travelDurationS(distanceM, cruiseVelocityMps.value, accelLimitMps2.value,
+                                             decelLimitMps2.value);
     if (!std::isfinite(durationS)) {
         return {0.0, false, MotionDurationStatus::DurationIsNotFinite};
     }
@@ -276,6 +295,283 @@ inline MotionTimingSummary motionTimingSummary(const MotionTimingIntent& intent,
     const double intendedTotalS = duration.durationS + intent.intentionalDelayS;
     return {duration.durationS, intendedTotalS, intent.targetTimeS - intendedTotalS, true,
             MotionTimingStatus::Valid};
+}
+
+// ---------------------------------------------------------------------------
+// The run's timing plan - how an announced Target Time becomes motion
+// ---------------------------------------------------------------------------
+//
+// The announced Target Time is a *scored* event parameter (rule 8.i): a run that
+// finishes far from it scores worse than one that lands on it, and the run may
+// not exceed the configured safety limits to chase it. This is the one place
+// that turns it into motion, and it answers three questions at once:
+//
+//   1. **Which cruise speed?** The slowest cruise whose estimated travel fits
+//      inside the announced time, so the run spends its slack by covering the
+//      announced distance at a controlled speed instead of by crawling below the
+//      speed at which the drivetrain is known to move.
+//   2. **How much deliberate stationary delay?** Whatever the time budget has
+//      left after the travel and the run's non-travel reserve, bounded by the
+//      configured maximum delay and by the configured maximum run duration. This
+//      is what stops a generous announced time from being "finished early":
+//      instead of asking the drivetrain to travel absurdly slowly, the run waits
+//      and then travels.
+//   3. **Is the announcement possible at all?** A Target Time shorter than the
+//      fastest admissible travel cannot be met without exceeding a limit, so it
+//      is refused rather than silently violated. The refusal names the reason.
+//
+// What this is not: it is not a measurement, it is not a controller, and it
+// commands nothing. The numbers are kinematic arithmetic on caller-supplied
+// limits, the same way `motionTimingSummary()` is, and they are as good as those
+// limits - which are placeholders until a physical test replaces them.
+//
+// Every limit arrives as a `Sourced` value and a value that is not `Measured`
+// refuses the plan rather than shaping one; the announced Target Time is the one
+// exception, because it is an announced *rule* parameter and is carried as
+// `RuleDerived` with the rule cited (`RunConfig.targetTimeS`, rule 8.i).
+
+// Why no plan exists, or that one does. The zero value is `Planned`, so a plan
+// that was never produced cannot default into a valid-looking one: there is no
+// default constructor below, and `refusedTimingPlan()` is how "no plan yet" is
+// stated.
+enum class RunTimingPlanStatus : uint8_t {
+    Planned = 0,                 // a plan exists
+    NotPlanned = 1,              // no run has been announced, so there is nothing to plan
+    InvalidTargetTime,           // the announced Target Time is not a positive finite number
+    InvalidGeometry,             // the announced travel distance is not a positive finite number
+    LimitsAreNotUsable,          // a limit is not Measured, or is malformed
+    TargetTimeTooShort,          // the fastest admissible travel cannot fit inside the Target Time
+    PlanExceedsMaxRunDuration,   // travel + reserve + delay exceeds the configured maximum run duration
+};
+
+inline const char* runTimingPlanStatusName(RunTimingPlanStatus status) {
+    switch (status) {
+        case RunTimingPlanStatus::Planned:
+            return "Planned";
+        case RunTimingPlanStatus::NotPlanned:
+            return "NotPlanned";
+        case RunTimingPlanStatus::InvalidTargetTime:
+            return "InvalidTargetTime";
+        case RunTimingPlanStatus::InvalidGeometry:
+            return "InvalidGeometry";
+        case RunTimingPlanStatus::LimitsAreNotUsable:
+            return "LimitsAreNotUsable";
+        case RunTimingPlanStatus::TargetTimeTooShort:
+            return "TargetTimeTooShort";
+        case RunTimingPlanStatus::PlanExceedsMaxRunDuration:
+            return "PlanExceedsMaxRunDuration";
+    }
+    return "?";
+}
+
+// One announced run's plan. Deliberately no default constructor: a plan with no
+// announcement behind it must be impossible to write.
+struct RunTimingPlan {
+    constexpr RunTimingPlan(double plannedCruiseMps_, double plannedDelayS_, double travelDurationS_,
+                            double reserveS_, double intendedTotalS_, double marginS_, bool valid_,
+                            RunTimingPlanStatus status_)
+        : plannedCruiseMps(plannedCruiseMps_),
+          plannedDelayS(plannedDelayS_),
+          travelDurationS(travelDurationS_),
+          reserveS(reserveS_),
+          intendedTotalS(intendedTotalS_),
+          marginS(marginS_),
+          valid(valid_),
+          status(status_) {}
+
+    // The cruise speed the run shapes its travel toward, metres per second. 0.0
+    // when no plan exists.
+    double plannedCruiseMps;
+
+    // The deliberate stationary delay the run spends before it travels, seconds.
+    // 0.0 when the announced time needs no delay (or when no plan exists).
+    double plannedDelayS;
+
+    // Estimated travel time at `plannedCruiseMps`, seconds, from `travelDurationS()`:
+    // the same arithmetic `motionDurationS()` reports, for the same distance.
+    double travelDurationS;
+
+    // The non-travel time the plan sets aside inside the run's own time - the
+    // reversal stop's dwell, which is inside Run Time (the final Complete Stop is
+    // not, rule 8.p) - seconds. It is a caller-supplied reserve, not an estimate
+    // this module makes.
+    double reserveS;
+
+    // travelDurationS + reserveS + plannedDelayS, seconds.
+    double intendedTotalS;
+
+    // TargetTime - intendedTotalS, seconds: how much of the announced time the
+    // plan does not spend. Never negative on a valid plan.
+    double marginS;
+
+    // Invariant: valid == (status == Planned).
+    bool valid;
+
+    RunTimingPlanStatus status;
+};
+
+// What the plan is built from. No default constructor: a plan must state what it
+// was planned from.
+struct RunTimingPlanInputs {
+    constexpr RunTimingPlanInputs(double travelDistanceM_, Sourced<double> targetTimeS_,
+                                  Sourced<double> cruiseCeilingMps_,
+                                  Sourced<double> velocityCeilingMps_,
+                                  Sourced<double> accelLimitMps2_,
+                                  Sourced<double> decelLimitMps2_,
+                                  Sourced<double> minimumCruiseMps_,
+                                  Sourced<double> nonTravelReserveS_,
+                                  Sourced<double> maxRunDurationS_)
+        : travelDistanceM(travelDistanceM_),
+          targetTimeS(targetTimeS_),
+          cruiseCeilingMps(cruiseCeilingMps_),
+          velocityCeilingMps(velocityCeilingMps_),
+          accelLimitMps2(accelLimitMps2_),
+          decelLimitMps2(decelLimitMps2_),
+          minimumCruiseMps(minimumCruiseMps_),
+          nonTravelReserveS(nonTravelReserveS_),
+          maxRunDurationS(maxRunDurationS_) {}
+
+    // The whole travel the plan covers, metres: the run layer's announced
+    // distance (`ev::plannedTravelDistanceM()` in RunAxis.h).
+    double travelDistanceM;
+
+    // The announced Target Time (rules 8.i). RuleDerived, with the rule cited.
+    Sourced<double> targetTimeS;
+
+    // The cruise speed the strategy would like to use, and the safety ceiling for
+    // the travel. The lower of the two is the planning ceiling.
+    Sourced<double> cruiseCeilingMps;
+    Sourced<double> velocityCeilingMps;
+
+    // Rate limits the travel must respect, metres per second squared.
+    Sourced<double> accelLimitMps2;
+    Sourced<double> decelLimitMps2;
+
+    // The slowest cruise at which travel is known to be reliable, metres per
+    // second. The plan does not go below it: a speed the drivetrain cannot follow
+    // is not a way to spend time, and the remaining slack becomes delay instead.
+    Sourced<double> minimumCruiseMps;
+
+    // The run's non-travel time inside Run Time, seconds (the reversal stop's
+    // dwell). Excluded from Run Time by the rules: the final Complete Stop.
+    Sourced<double> nonTravelReserveS;
+
+    // The configured maximum run duration, seconds. The planned total may not
+    // exceed it, so an announcement that would need an unreasonable wait is
+    // refused rather than planned.
+    Sourced<double> maxRunDurationS;
+};
+
+// The plan with no announcement behind it: what a run layer holds before a run
+// is announced, and what it returns to at a new-run boundary.
+inline RunTimingPlan refusedTimingPlan(RunTimingPlanStatus status) {
+    return RunTimingPlan(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, status);
+}
+
+// Builds the plan for one announced run.
+//
+// The algebra, and why it is exact rather than searched: for a cruise speed at
+// or below the peak of the triangular profile, the travel time is
+// `d/v + v*(1/(2a) + 1/(2d))`, which is decreasing in `v`. Setting it equal to
+// the travel budget `B` gives `k*v^2 - B*v + d = 0` with `k = 1/(2a) + 1/(2d)`,
+// whose smaller root is the *slowest* speed that still fits inside `B` - the
+// whole point of the plan, because slower is the safe direction and the ceiling
+// is what the run may not exceed. `B < 2*sqrt(k*d)` means even the triangular
+// profile is longer than the budget, i.e. no admissible speed fits.
+inline RunTimingPlan planRunTiming(const RunTimingPlanInputs& inputs) {
+    const double cruiseCeilingMps = inputs.cruiseCeilingMps.value < inputs.velocityCeilingMps.value
+                                        ? inputs.cruiseCeilingMps.value
+                                        : inputs.velocityCeilingMps.value;
+
+    if (!std::isfinite(inputs.targetTimeS.value) || !(inputs.targetTimeS.value > 0.0)) {
+        return refusedTimingPlan(RunTimingPlanStatus::InvalidTargetTime);
+    }
+    if (!std::isfinite(inputs.travelDistanceM) || !(inputs.travelDistanceM > 0.0)) {
+        return refusedTimingPlan(RunTimingPlanStatus::InvalidGeometry);
+    }
+    if (!inputs.cruiseCeilingMps.isMeasured() || !inputs.velocityCeilingMps.isMeasured() ||
+        !inputs.accelLimitMps2.isMeasured() || !inputs.decelLimitMps2.isMeasured() ||
+        !inputs.minimumCruiseMps.isMeasured() || !inputs.nonTravelReserveS.isMeasured() ||
+        !inputs.maxRunDurationS.isMeasured()) {
+        return refusedTimingPlan(RunTimingPlanStatus::LimitsAreNotUsable);
+    }
+
+    const double accelMps2 = inputs.accelLimitMps2.value;
+    const double decelMps2 = inputs.decelLimitMps2.value;
+    const double reserveS = inputs.nonTravelReserveS.value;
+    const double minimumCruiseMps = inputs.minimumCruiseMps.value;
+    const double maxRunDurationS = inputs.maxRunDurationS.value;
+    if (!std::isfinite(cruiseCeilingMps) || !(cruiseCeilingMps > 0.0) ||
+        !std::isfinite(accelMps2) || !(accelMps2 > 0.0) || !std::isfinite(decelMps2) ||
+        !(decelMps2 > 0.0) || !std::isfinite(minimumCruiseMps) || !(minimumCruiseMps > 0.0) ||
+        !std::isfinite(reserveS) || reserveS < 0.0 || !std::isfinite(maxRunDurationS) ||
+        !(maxRunDurationS > 0.0)) {
+        return refusedTimingPlan(RunTimingPlanStatus::LimitsAreNotUsable);
+    }
+    // A cruise floor above the planning ceiling is an inconsistent configuration,
+    // not something to clamp: the floor would silently become the ceiling and the
+    // run would travel at the safety limit.
+    if (minimumCruiseMps > cruiseCeilingMps) {
+        return refusedTimingPlan(RunTimingPlanStatus::LimitsAreNotUsable);
+    }
+
+    // Feasibility, stated with the speed the run may actually reach: a Target Time
+    // the fastest admissible travel cannot fit is refused, never met by exceeding
+    // a limit.
+    const double fastestTravelS =
+        travelDurationS(inputs.travelDistanceM, cruiseCeilingMps, accelMps2, decelMps2);
+    if (!std::isfinite(fastestTravelS) || inputs.targetTimeS.value < fastestTravelS + reserveS) {
+        return refusedTimingPlan(RunTimingPlanStatus::TargetTimeTooShort);
+    }
+
+    const double travelBudgetS = inputs.targetTimeS.value - reserveS;
+    const double k = 0.5 / accelMps2 + 0.5 / decelMps2;
+    const double discriminant =
+        travelBudgetS * travelBudgetS - 4.0 * k * inputs.travelDistanceM;
+    if (!std::isfinite(discriminant) || discriminant < 0.0) {
+        // The budget is shorter than the shortest profile there is.
+        return refusedTimingPlan(RunTimingPlanStatus::TargetTimeTooShort);
+    }
+
+    const double requiredCruiseMps =
+        (travelBudgetS - std::sqrt(discriminant)) / (2.0 * k);
+    const double plannedCruiseMps =
+        requiredCruiseMps > minimumCruiseMps ? requiredCruiseMps : minimumCruiseMps;
+    if (!std::isfinite(plannedCruiseMps) || plannedCruiseMps > cruiseCeilingMps) {
+        return refusedTimingPlan(RunTimingPlanStatus::TargetTimeTooShort);
+    }
+
+    const double travelS =
+        travelDurationS(inputs.travelDistanceM, plannedCruiseMps, accelMps2, decelMps2);
+    if (!std::isfinite(travelS)) {
+        return refusedTimingPlan(RunTimingPlanStatus::LimitsAreNotUsable);
+    }
+
+    // Whatever the budget has left after the travel is spent waiting, not by
+    // crawling below the floor. It is never negative: the chosen cruise fits the
+    // budget by construction.
+    double plannedDelayS = inputs.targetTimeS.value - (travelS + reserveS);
+    if (!(plannedDelayS > 0.0)) {
+        plannedDelayS = 0.0;
+    }
+
+    const double intendedTotalS = travelS + reserveS + plannedDelayS;
+    if (intendedTotalS > maxRunDurationS) {
+        return refusedTimingPlan(RunTimingPlanStatus::PlanExceedsMaxRunDuration);
+    }
+
+    // The margin is reported at zero rather than at a negative tail. The chosen
+    // cruise fits the budget by construction - it is solved for equality and the
+    // feasibility check above already proved the ceiling fits - so a negative
+    // margin could only be the last bits of a double, and a caller deciding "is
+    // this run going to be late" must not see one.
+    double marginS = inputs.targetTimeS.value - intendedTotalS;
+    if (marginS < 0.0) {
+        marginS = 0.0;
+    }
+
+    return RunTimingPlan(plannedCruiseMps, plannedDelayS, travelS, reserveS, intendedTotalS, marginS,
+                         true, RunTimingPlanStatus::Planned);
 }
 
 // ---------------------------------------------------------------------------

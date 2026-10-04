@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include <BottleEvidence.h>
 #include <CompetitionStateMachine.h>
 #include <ControlScheduler.h>
 #include <ControlTickOrder.h>
@@ -166,6 +167,13 @@ struct TelemetrySnapshot {
 
     // The run policy and the request this cycle presented.
     ev::RunPhase phase = ev::RunPhase::Idle;
+    // The three pieces of forward-leg bottle evidence the run was given this
+    // cycle (`deriveBottleEvidence()`), reported so a phase that is waiting can
+    // be attributed to the evidence that has not arrived. They are the run's
+    // inputs, not readings: the derivation is a position-derived belief.
+    bool bottleContactDetected = false;
+    bool captureComplete = false;
+    bool pushComplete = false;
     ev::RunMotionCommand runCommand = ev::RunMotionCommand::None;
     bool intentionCurrent = false;
     double targetVelocityMps = 0.0;
@@ -405,6 +413,21 @@ private:
     ev::SafetyLimits safetyLimits_;
     ev::VelocityEstimatorConfig estimatorConfig_;
     ev::DirectionalMotionProfileLimits profileLimits_;
+
+    // The limits the *current* run is shaped with: the configured limits with the
+    // announced run's planned cruise in place of the strategy cruise
+    // (`planRunTiming()`), so an announced Target Time changes the commanded
+    // speeds rather than only being reported. Back to `profileLimits_` at a
+    // new-run boundary.
+    ev::DirectionalMotionProfileLimits runProfileLimits_ = vehicleConfig::profileLimits();
+
+    // The announced run's timing plan: the cruise the run was announced with, the
+    // deliberate delay it spends and the estimates behind both. Replaced at each
+    // successful announcement, and reset to "not planned" at the new-run
+    // boundary. Nothing in the control path reads it back - the plan reaches the
+    // run through `run_.plannedDelayS()` and the profile limits above, so there is
+    // one copy of each decided value and this is the record of what was decided.
+    ev::RunTimingPlan timingPlan_ = ev::refusedTimingPlan(ev::RunTimingPlanStatus::NotPlanned);
 
     // The chain.
     ev::VelocityEstimator estimator_;

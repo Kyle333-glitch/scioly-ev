@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BottleEvidence.h"
 #include "Motion.h"
 #include "NearZeroVerifier.h"
 #include "ReversalSequencer.h"
@@ -169,6 +170,19 @@ inline bool isRunTravelCommand(RunMotionCommand command) {
     return command == RunMotionCommand::DriveForward || command == RunMotionCommand::DriveReverse;
 }
 
+// True for the commands that present a *ramp*: the commanded target is being
+// brought to zero at the deceleration limit, and the run layer keeps regulating
+// toward that shaped target while it falls. It exists so a ramp is not mistaken
+// for a dead stop: mapping `RampDown*` straight to a non-powered request drops the
+// commanded effort in one cycle, which is exactly the step the deceleration-limit
+// ramp exists to avoid. The separation from `isRunStopCommand()` is deliberate -
+// a ramp is still a regulated target, while a stop is a deliberate non-powered
+// hold with no target at all (see `runStopEffort()`).
+inline bool isRunRampDownCommand(RunMotionCommand command) {
+    return command == RunMotionCommand::RampDownForward ||
+           command == RunMotionCommand::RampDownReverse;
+}
+
 // True for the commands that ask for a deliberate non-powered stop: a target
 // ramp to zero (`RampDown*`) or an active brake hold (`Brake*`).
 inline bool isRunStopCommand(RunMotionCommand command) {
@@ -269,13 +283,16 @@ inline bool runIntentionIsCurrentFor(const RunMotionIntention& intention, uint32
 // here has a default, because nothing here has been measured; the vehicle layer
 // supplies each value with its source.
 struct RunPhaseConfig {
-    constexpr RunPhaseConfig(Sourced<double> optionalDelayS_, Sourced<double> approachTimeoutS_,
-                             Sourced<double> captureTimeoutS_, Sourced<double> pushTimeoutS_,
-                             Sourced<double> reverseTimeoutS_, Sourced<double> finalApproachTimeoutS_,
+    constexpr RunPhaseConfig(Sourced<double> maximumOptionalDelayS_,
+                             Sourced<double> approachTimeoutS_, Sourced<double> captureTimeoutS_,
+                             Sourced<double> pushTimeoutS_, Sourced<double> reverseTimeoutS_,
+                             Sourced<double> finalApproachTimeoutS_,
                              Sourced<double> finalStopTimeoutS_,
                              Sourced<double> finalApproachDistanceM_,
-                             NearZeroConfig stopVerification_)
-        : optionalDelayS(optionalDelayS_),
+                             NearZeroConfig stopVerification_,
+                             Sourced<double> minimumPlannedCruiseMps_,
+                             BottleEvidenceConfig bottleEvidence_)
+        : maximumOptionalDelayS(maximumOptionalDelayS_),
           approachTimeoutS(approachTimeoutS_),
           captureTimeoutS(captureTimeoutS_),
           pushTimeoutS(pushTimeoutS_),
@@ -283,14 +300,21 @@ struct RunPhaseConfig {
           finalApproachTimeoutS(finalApproachTimeoutS_),
           finalStopTimeoutS(finalStopTimeoutS_),
           finalApproachDistanceM(finalApproachDistanceM_),
-          stopVerification(stopVerification_) {}
+          stopVerification(stopVerification_),
+          minimumPlannedCruiseMps(minimumPlannedCruiseMps_),
+          bottleEvidence(bottleEvidence_) {}
 
-    // Deliberate pre-travel delay, seconds. 0 means the OptionalDelay phase is
-    // skipped. This is a run strategy value, not a rule value; the profile's
-    // `MotionTimingIntent::intentionalDelayS` must be fed from the same source,
-    // because a margin computed against a delay the run did not spend is a
-    // number about a different run.
-    Sourced<double> optionalDelayS;
+    // The *most* deliberate pre-travel delay a run may spend, seconds. The delay
+    // a run actually spends is decided per announcement by the run's timing plan
+    // (the announced Target Time, the announced geometry and these limits) and
+    // arrives at `announceRun()`; this is the bound that plan may not exceed, so
+    // no announcement can turn into an unbounded wait. 0 means no delay is
+    // permitted at all and the OptionalDelay phase is always skipped.
+    //
+    // The profile's `MotionTimingIntent::intentionalDelayS` must be fed from the
+    // same per-run value (`plannedDelayS()`), because a margin computed against a
+    // delay the run did not spend is a number about a different run.
+    Sourced<double> maximumOptionalDelayS;
 
     // Bounds, seconds. A phase that never receives its exit evidence ends at
     // Fault(PhaseTimeout) instead of waiting forever, and a bound is a deadline
@@ -317,16 +341,33 @@ struct RunPhaseConfig {
     // (rule 8.p) and is expected to be held much longer. Feeding both from one
     // value would silently make one of them wrong.
     NearZeroConfig stopVerification;
+
+    // The slowest cruise at which travel is known to be reliable, metres per
+    // second. The run's timing plan does not go below it: a speed the drivetrain
+    // cannot follow is not a way to spend time, and the plan spends the remaining
+    // slack as a deliberate delay instead (`planRunTiming()`). A run may not be
+    // announced on a placeholder here, because the plan would either crawl or
+    // wait on a number nobody measured.
+    Sourced<double> minimumPlannedCruiseMps;
+
+    // How the forward leg's bottle-interaction evidence is derived from the run
+    // axis (`BottleEvidence.h`). The phases that wait for it cannot exit without
+    // it, so it is validated with the rest of the run policy's configuration: a
+    // run may not be announced while any of its distances is a placeholder, and
+    // none of them may be assumed from the mechanism's intended geometry.
+    BottleEvidenceConfig bottleEvidence;
 };
 
 enum class RunPhaseConfigError : uint8_t {
     None = 0,
     ValuesAreNotMeasured,             // at least one value is not ValueSource::Measured
     NonFiniteValue,                   // NaN or infinity
-    NegativeDelay,                    // optionalDelayS below zero
+    NegativeDelay,                    // maximumOptionalDelayS below zero
     NonPositiveTimeout,               // a phase bound that is not > 0
     NonPositiveFinalApproachDistanceM,  // the final approach distance is not > 0
     StopVerificationNotUsable,        // the NearZeroConfig failed its own validation
+    NonPositiveMinimumCruise,         // the planned-cruise floor is not > 0
+    BottleEvidenceNotUsable,          // the BottleEvidenceConfig failed its own validation
 };
 
 struct RunPhaseConfigValidation {
@@ -335,27 +376,50 @@ struct RunPhaseConfigValidation {
     RunPhaseConfigError error;
 };
 
+// True when the maximum optional delay may bound a run: it was measured on
+// this vehicle, or the official rules fix it and the citing rule is recorded
+// (`Sourced::citesEvidence()`). Mirrors `dwellProvenanceIsEstablished()` in
+// `NearZeroVerifier.h`: the event's maximum Target Time (rule 8.i) is a rule
+// value, never a measurement, and an uncited rule value is refused exactly like
+// a placeholder.
+inline bool optionalDelayProvenanceIsEstablished(const Sourced<double>& delay) {
+    if (delay.isMeasured()) {
+        return true;
+    }
+    return delay.source == ValueSource::RuleDerived && delay.citesEvidence();
+}
+
 // Single entry point for the run policy's validation. The stop-verification
 // configuration is validated by `validateNearZeroConfig()` rather than
 // re-checked here, so the threshold/dwell policy keeps one definition.
 inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& config) {
-    if (!config.optionalDelayS.isMeasured() || !config.approachTimeoutS.isMeasured() ||
+    if (!optionalDelayProvenanceIsEstablished(config.maximumOptionalDelayS) || !config.approachTimeoutS.isMeasured() ||
         !config.captureTimeoutS.isMeasured() || !config.pushTimeoutS.isMeasured() ||
         !config.reverseTimeoutS.isMeasured() || !config.finalApproachTimeoutS.isMeasured() ||
-        !config.finalStopTimeoutS.isMeasured() || !config.finalApproachDistanceM.isMeasured()) {
+        !config.finalStopTimeoutS.isMeasured() || !config.finalApproachDistanceM.isMeasured() ||
+        !config.minimumPlannedCruiseMps.isMeasured()) {
         return {false, RunPhaseConfigError::ValuesAreNotMeasured};
     }
-    if (!std::isfinite(config.optionalDelayS.value) ||
+    if (!std::isfinite(config.maximumOptionalDelayS.value) ||
         !std::isfinite(config.approachTimeoutS.value) ||
         !std::isfinite(config.captureTimeoutS.value) || !std::isfinite(config.pushTimeoutS.value) ||
         !std::isfinite(config.reverseTimeoutS.value) ||
         !std::isfinite(config.finalApproachTimeoutS.value) ||
         !std::isfinite(config.finalStopTimeoutS.value) ||
-        !std::isfinite(config.finalApproachDistanceM.value)) {
+        !std::isfinite(config.finalApproachDistanceM.value) ||
+        !std::isfinite(config.minimumPlannedCruiseMps.value)) {
         return {false, RunPhaseConfigError::NonFiniteValue};
     }
-    if (config.optionalDelayS.value < 0.0) {
+    if (config.maximumOptionalDelayS.value < 0.0) {
         return {false, RunPhaseConfigError::NegativeDelay};
+    }
+    // A cruise floor that is not positive would let the plan divide by it or plan
+    // a standstill; the floor exists so the plan never crawls.
+    if (!(config.minimumPlannedCruiseMps.value > 0.0)) {
+        return {false, RunPhaseConfigError::NonPositiveMinimumCruise};
+    }
+    if (!validateBottleEvidenceConfig(config.bottleEvidence).ok) {
+        return {false, RunPhaseConfigError::BottleEvidenceNotUsable};
     }
     if (!(config.approachTimeoutS.value > 0.0) || !(config.captureTimeoutS.value > 0.0) ||
         !(config.pushTimeoutS.value > 0.0) || !(config.reverseTimeoutS.value > 0.0) ||
@@ -369,6 +433,15 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         return {false, RunPhaseConfigError::StopVerificationNotUsable};
     }
     return {true, RunPhaseConfigError::None};
+}
+
+// The deliberate pre-travel delay a *specific* announcement may spend, in
+// milliseconds, or 0 when the announcement spends none. Owned by the run layer's
+// timing plan (the announced Target Time and geometry decide it); this is the one
+// conversion from its seconds to the clock reading the OptionalDelay phase
+// compares against.
+inline uint32_t plannedDelayMs(double plannedDelayS) {
+    return msFromSeconds(plannedDelayS);
 }
 
 // Everything the vehicle layer observed this cycle. Every field defaults to the
@@ -421,6 +494,10 @@ enum class RunStartStatus : uint8_t {
     RunAlreadyActive,
     // A fault is of record. reset() is required before a new announcement.
     FaultLatched,
+    // The announcement's deliberate delay is negative, not a number, or larger
+    // than the configured maximum. A plan that would wait longer than the policy
+    // permits may not be sequenced, so nothing is announced.
+    PlannedDelayNotUsable,
 };
 
 // The phase's answer for one cycle. Deliberately no default constructor: a phase
@@ -514,6 +591,14 @@ public:
 
     ReversalPhase reversalPhase() const { return sequencer_.phase(); }
 
+    // The deliberate pre-travel delay this specific run was announced with,
+    // seconds. Set by `announceRun()` from the run layer's timing plan and
+    // bounded by `config().maximumOptionalDelayS`; 0 when the run spends none.
+    // This is the value the profile's `MotionTimingIntent::intentionalDelayS`
+    // must be fed with, so a reported margin is about the run that is actually
+    // being sequenced.
+    double plannedDelayS() const { return plannedDelayS_; }
+
     // The near-zero fact the vehicle layer maps onto `atZeroSpeed`, derived from
     // the phase the run is in rather than OR-ed across the run's history: a stop
     // that was verified for one leg must not be reported as the vehicle being
@@ -570,6 +655,7 @@ public:
         legDirection_ = MotionDirection::Forward;
         handoffPending_ = false;
         finalStopVerified_ = false;
+        plannedDelayS_ = 0.0;
         sequencer_.reset();
         stopVerifier_.reset();
     }
@@ -587,7 +673,7 @@ public:
     // explicit reset(): a half-corrected announcement must not leave a run
     // waiting that a later call can start.
     RunStartStatus announceRun(const RunConfig& config, const RunConfigValidation& validation,
-                               uint32_t nowMs) {
+                               double plannedDelayS, uint32_t nowMs) {
         if (phase_ == RunPhase::Fault) {
             return RunStartStatus::FaultLatched;
         }
@@ -604,7 +690,15 @@ public:
             latchFault(FaultCode::ProvisionalCalibration, nowMs);
             return RunStartStatus::PolicyConfigNotUsable;
         }
+        // The run's own deliberate delay, bounded by the policy. Refused without
+        // latching anything: this is a caller's plan that does not fit the
+        // policy, not a run whose sequencing failed.
+        if (!std::isfinite(plannedDelayS) || plannedDelayS < 0.0 ||
+            plannedDelayS > config_.maximumOptionalDelayS.value) {
+            return RunStartStatus::PlannedDelayNotUsable;
+        }
 
+        plannedDelayS_ = plannedDelayS;
         enterPhase(RunPhase::ParameterValid, nowMs);
         return RunStartStatus::Started;
     }
@@ -664,14 +758,13 @@ private:
                     break;
                 }
                 if (inputs.startTriggered) {
-                    enterPhase(config_.optionalDelayS.value > 0.0 ? RunPhase::OptionalDelay
-                                                                  : RunPhase::Approach,
+                    enterPhase(plannedDelayS_ > 0.0 ? RunPhase::OptionalDelay : RunPhase::Approach,
                                nowMs);
                 }
                 break;
 
             case RunPhase::OptionalDelay:
-                if (phaseElapsedMs(nowMs) >= msFromSeconds(config_.optionalDelayS.value)) {
+                if (phaseElapsedMs(nowMs) >= plannedDelayMs(plannedDelayS_)) {
                     enterPhase(RunPhase::Approach, nowMs);
                 }
                 break;
@@ -969,6 +1062,12 @@ private:
     // The earned direction change has been observed and the deliberate stop is
     // being presented for one cycle before the reverse travel is asked for.
     bool handoffPending_ = false;
+
+    // The deliberate pre-travel delay this run was announced with, seconds,
+    // bounded by `config_.maximumOptionalDelayS`. It is a run parameter, not
+    // geometry: no phase transition derives geometry from it, and nothing else
+    // may carry a second copy of it (`plannedDelayS()` is the one reader).
+    double plannedDelayS_ = 0.0;
 
     // The final stop has been verified by this machine's own `stopVerifier_`
     // (latched through Done). It is not the reversal gate's verdict: that latch

@@ -36,6 +36,20 @@ ev::RunConfigFields validStateConfig() {
     return fields;
 }
 
+ev::Sourced<double> measuredValue(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::Measured);
+}
+
+// The plan the vehicle layer builds for the fixture configuration, through the
+// production arithmetic: State level, 7.50 m target, 1.00 m Bottle Line Distance
+// (9.50 m of announced travel) and an announced time those limits can meet.
+ev::RunTimingPlan planForTargetTime(double targetTimeS) {
+    return ev::planRunTiming(ev::RunTimingPlanInputs(
+        9.50, ev::Sourced<double>(targetTimeS, ev::ValueSource::RuleDerived, "rules2027 8.i"),
+        measuredValue(1.20), measuredValue(1.20), measuredValue(0.50), measuredValue(1.00),
+        measuredValue(0.10), measuredValue(0.20), measuredValue(30.0)));
+}
+
 ev::ConfigurationBuildChecks allChecksPassing() {
     // Set through the id mapping rather than field by field, so a check added to
     // the vocabulary cannot be left false here by accident - which would show up
@@ -295,9 +309,11 @@ void test_announcement_refusals_carry_the_gate_that_refused(void) {
     const ev::ConfigurationBuildChecks checks = allChecksPassing();
 
     // A completed configuration the rules reject: the rule error is the detail.
+    const ev::RunTimingPlan plan = planForTargetTime(15.0);
+
     ev::RunConfigFields fields = validStateConfig();
     fields.targetDistanceM = 3.00;
-    ev::AnnounceVerdict verdict = ev::announceVerdictFor(fields, checks);
+    ev::AnnounceVerdict verdict = ev::announceVerdictFor(fields, checks, plan);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::ConfigInvalid),
                           static_cast<int>(verdict.refusal));
     TEST_ASSERT_TRUE(ev::formatAnnounceRefusal(verdict, buffer, ev::kSerialLineCapacity) > 0U);
@@ -306,16 +322,54 @@ void test_announcement_refusals_carry_the_gate_that_refused(void) {
 
     // A configuration the rules accept but the run policy cannot sequence: the
     // failing check is the detail.
-    ev::AnnounceVerdict policyVerdict = ev::announceVerdictFor(validStateConfig(), checks);
+    ev::AnnounceVerdict policyVerdict = ev::announceVerdictFor(validStateConfig(), checks, plan);
     TEST_ASSERT_TRUE(policyVerdict.ok);
     ev::ConfigurationBuildChecks unusable = checks;
     unusable.runPolicyUsable = false;
-    policyVerdict = ev::announceVerdictFor(validStateConfig(), unusable);
+    policyVerdict = ev::announceVerdictFor(validStateConfig(), unusable, plan);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::PolicyNotUsable),
                           static_cast<int>(policyVerdict.refusal));
     TEST_ASSERT_TRUE(ev::formatAnnounceRefusal(policyVerdict, buffer, ev::kSerialLineCapacity) > 0U);
     TEST_ASSERT_EQUAL_STRING(
         "ERR,cmd=announce,reason=PolicyNotUsable,error=-,first_fail=RunPolicyUsable", buffer);
+
+    // An announced time the limits cannot meet: the detail is the plan's own
+    // status, so the operator sees which fact behind the plan refused it.
+    const ev::RunTimingPlan impossible = planForTargetTime(1.0);
+    TEST_ASSERT_FALSE(impossible.valid);
+    const ev::AnnounceVerdict unreachable =
+        ev::announceVerdictFor(validStateConfig(), checks, impossible);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::TargetTimeUnreachable),
+                          static_cast<int>(unreachable.refusal));
+    TEST_ASSERT_TRUE(ev::formatAnnounceRefusal(unreachable, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "ERR,cmd=announce,reason=TargetTimeUnreachable,error=TargetTimeTooShort,first_fail=-",
+        buffer);
+}
+
+// The accepted announcement carries the plan the run was announced with, because
+// those are the numbers that decide the run's timing - not something the operator
+// can reconstruct from the typed configuration and the limits by eye.
+void test_announce_ack_carries_the_run_plan(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+    ev::AnnounceVerdict verdict;
+    verdict.ok = true;
+    verdict.plan = ev::RunTimingPlan(0.5000, 2.0000, 10.0000, 0.2000, 12.2000, 2.8000, true,
+                                     ev::RunTimingPlanStatus::Planned);
+
+    TEST_ASSERT_TRUE(ev::formatAnnounceAck(verdict, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "OK,cmd=announce,plan=Planned,cruise_mps=0.5000,delay_s=2.0000,total_s=12.2000,"
+        "margin_s=2.8000",
+        buffer);
+
+    // The plan the gate accepts for the fixture configuration is the production
+    // plan, built by the same arithmetic the vehicle layer runs.
+    const ev::RunTimingPlan fixturePlan = planForTargetTime(15.0);
+    const ev::AnnounceVerdict gated =
+        ev::announceVerdictFor(validStateConfig(), allChecksPassing(), fixturePlan);
+    TEST_ASSERT_TRUE(gated.ok);
+    TEST_ASSERT_TRUE(gated.plan.valid);
 }
 
 // The status line uses the telemetry sample's field names for the same facts, so
@@ -418,6 +472,18 @@ void test_worst_case_responses_match_the_declared_bounds(void) {
         ev::formatChecksLine(allChecksPassing(), buffer, ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(checksLength > 0U);
 
+    // The announce confirmation: the widest plan status name, so the refusal path
+    // and the acceptance path are bounded by the same estimate. The widest form
+    // carries negative values, which is the widest a fixed-point field can be.
+    ev::AnnounceVerdict wideAnnounce;
+    wideAnnounce.plan = ev::RunTimingPlan(-9999999.9999, -9999999.9999, -9999999.9999,
+                                          -9999999.9999, -9999999.9999, -9999999.9999, false,
+                                          ev::RunTimingPlanStatus::PlanExceedsMaxRunDuration);
+    const uint16_t announceAckLength =
+        ev::formatAnnounceAck(wideAnnounce, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_EQUAL_UINT32(ev::kOperatorAnnounceAckWorstCaseChars, announceAckLength);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), announceAckLength);
+
     // The widest check report is the one whose first failure is the longest check
     // name, so every check before it passes and every check from it on fails.
     ev::ConfigurationBuildChecks widest;
@@ -478,6 +544,7 @@ void test_worst_case_responses_match_the_declared_bounds(void) {
     TEST_ASSERT_TRUE(ev::kOperatorStatusLineWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(ev::kOperatorConfigEchoWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(ev::kOperatorTelemetryLineWorstCaseChars <= ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(ev::kOperatorAnnounceAckWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(setAckLength <= ev::kSerialLineCapacity);
 }
 
