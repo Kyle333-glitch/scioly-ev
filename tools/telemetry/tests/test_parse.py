@@ -28,18 +28,19 @@ from evtelemetry.parse import (
 # means the tool is checked against the record a board actually emits, not
 # against a paraphrase of it.
 REAL_SAMPLE_LINE = (
-    "EVS1,ver=1,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+    "EVS2,ver=2,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
     "pos_m=6.2140,pos_ok=1,vel_mps=0.7140,vel_ok=1,vel_cmd_mps=0.7000,rem_m=0.2860,"
-    "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,nfault_low=0,"
+    "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,"
+    "nfault=Installed,nfault_low=0,"
     "fault=None,authz=AuthorizedDrive,check=none,drop_s=0,drop_e=0"
 )
 REAL_EVENT_LINE = (
-    "EVE1,ver=1,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
+    "EVE2,ver=2,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
     "detail=ProvisionalCalibration,fault=ProvisionalCalibration,drop_s=3,drop_e=1"
 )
 
 _SAMPLE_DEFAULTS = {
-    "ver": "1",
+    "ver": str(schema.SCHEMA_VERSION),
     "t_ms": "0",
     "dt_ms": "20",
     "phase": "Idle",
@@ -55,6 +56,7 @@ _SAMPLE_DEFAULTS = {
     "effort_permille": "0",
     "batt_counts": "800",
     "curr_counts": "200",
+    "nfault": "Installed",
     "nfault_low": "0",
     "fault": "None",
     "authz": "DeniedNotArmed",
@@ -64,7 +66,7 @@ _SAMPLE_DEFAULTS = {
 }
 
 _EVENT_DEFAULTS = {
-    "ver": "1",
+    "ver": str(schema.SCHEMA_VERSION),
     "t_ms": "0",
     "phase": "Idle",
     "armed": "0",
@@ -174,21 +176,21 @@ class CorruptionTest(unittest.TestCase):
 
     def test_a_different_schema_version_is_refused(self) -> None:
         self.assertRefused(
-            sample_line().replace("EVS1", "EVS2", 1), SchemaVersionError, "schema version 2"
+            sample_line().replace("EVS2", "EVS1", 1), SchemaVersionError, "schema version 1"
         )
         self.assertRefused(
-            event_line().replace("EVE1", "EVE3", 1), SchemaVersionError, "schema version 3"
+            event_line().replace("EVE2", "EVE3", 1), SchemaVersionError, "schema version 3"
         )
 
     def test_an_unknown_prefix_is_refused(self) -> None:
         self.assertRefused(
-            sample_line().replace("EVS1", "EVX1", 1), SchemaVersionError, "not a record prefix"
+            sample_line().replace("EVS2", "EVX2", 1), SchemaVersionError, "not a record prefix"
         )
 
     def test_the_prefix_digit_and_the_version_field_must_agree(self) -> None:
-        # Both say 1, so this parses; changing only `ver` must not.
+        # Both say 2, so this parses; changing only `ver` must not.
         self.assertRefused(
-            sample_line(ver="2"), SchemaVersionError, "prefix says schema version 1"
+            sample_line(ver="1"), SchemaVersionError, "prefix says schema version 2"
         )
 
     def test_a_renamed_field_is_refused_not_absorbed(self) -> None:
@@ -231,6 +233,36 @@ class CorruptionTest(unittest.TestCase):
     def test_a_boolean_that_is_not_the_schema_character_is_refused(self) -> None:
         self.assertRefused(sample_line(armed="true"), FieldValueError, "single-character boolean")
 
+    def test_the_driver_fault_level_accepts_only_a_boolean_or_absence(self) -> None:
+        # A wired line carries a boolean; an absent line carries the marker. A
+        # third spelling - `not_installed` in the level field, say - is refused
+        # rather than quietly absorbed.
+        self.assertRefused(
+            sample_line(nfault_low="not_installed"), FieldValueError, "single-character boolean"
+        )
+
+    def test_an_absent_line_with_a_level_is_refused(self) -> None:
+        # The two fields describe one fact: a record may not claim the signal does
+        # not exist and carry a reading of it.
+        self.assertRefused(
+            sample_line(nfault="NotInstalled", nfault_low="0"),
+            FieldValueError,
+            "not installed but carries a level",
+        )
+
+    def test_an_installed_line_with_no_level_is_refused(self) -> None:
+        self.assertRefused(
+            sample_line(nfault="Installed", nfault_low="-"),
+            FieldValueError,
+            "installed but carries no level",
+        )
+
+    def test_the_absent_line_is_the_only_way_to_spell_an_unavailable_signal(self) -> None:
+        record = parse_line(sample_line(nfault="NotInstalled", nfault_low="-"))
+        assert isinstance(record, Sample)
+        self.assertEqual(record.driver_fault_capability, "NotInstalled")
+        self.assertIsNone(record.driver_fault_bar_low)
+
     def test_an_unknown_vocabulary_value_is_refused(self) -> None:
         self.assertRefused(sample_line(phase="Cruising"), FieldValueError, "not in the schema's vocabulary")
         self.assertRefused(event_line(event="SomethingNew"), FieldValueError, "not in the schema's vocabulary")
@@ -258,7 +290,7 @@ class CorruptionTest(unittest.TestCase):
 
     def test_an_unknown_schema_error_is_still_a_format_error(self) -> None:
         with self.assertRaises(TelemetryFormatError):
-            parse_line(sample_line().replace("EVS1", "EVS9", 1))
+            parse_line(sample_line().replace("EVS2", "EVS9", 1))
 
 
 class SentinelTest(unittest.TestCase):
@@ -325,9 +357,9 @@ class StreamTest(unittest.TestCase):
         self.assertIn("damaged.log:2", log.errors[0].message)
 
     def test_a_permissive_parse_still_reports_the_line_in_its_report(self) -> None:
-        log = parse_lines(["EVS2,ver=2"], continue_on_error=True)
+        log = parse_lines(["EVS1,ver=1"], continue_on_error=True)
         self.assertEqual(log.errors[0].line_number, 1)
-        self.assertIn("schema version 2", log.errors[0].message)
+        self.assertIn("schema version 1", log.errors[0].message)
 
     def test_parse_text_hashes_the_capture(self) -> None:
         log = parse_text(sample_line())

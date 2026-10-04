@@ -34,7 +34,13 @@ from typing import Final
 
 # The schema version, from `ev::kTelemetrySchemaVersion`. A log whose version is
 # not this one is refused rather than partially understood.
-SCHEMA_VERSION: Final[int] = 1
+#
+# Version 2 (D32): the driver-fault check was renamed, a sample gained the
+# `nfault` capability field, and `nfault_low` stopped being a boolean - it now
+# carries the missing marker when the vehicle has no external nFAULT line. A
+# version-1 `nfault_low=0` meant "sampled and read high", which is a claim the
+# assembled vehicle cannot make.
+SCHEMA_VERSION: Final[int] = 2
 
 # `EVS<version>` is one control tick; `EVE<version>` is a transition or an
 # operator action. The digit is the version, so a record is self-describing.
@@ -72,8 +78,8 @@ MAX_VOCABULARY_NAME_CHARS: Final[int] = 30
 
 # `EVS<v>,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,pos_m=..,pos_ok=..,
 #    vel_mps=..,vel_ok=..,vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,
-#    batt_counts=..,curr_counts=..,nfault_low=..,fault=..,authz=..,check=..,
-#    drop_s=..,drop_e=..`
+#    batt_counts=..,curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,
+#    check=..,drop_s=..,drop_e=..`
 SAMPLE_FIELDS: Final[tuple[str, ...]] = (
     "ver",
     "t_ms",
@@ -91,6 +97,7 @@ SAMPLE_FIELDS: Final[tuple[str, ...]] = (
     "effort_permille",
     "batt_counts",
     "curr_counts",
+    "nfault",
     "nfault_low",
     "fault",
     "authz",
@@ -215,8 +222,24 @@ EVENT_CODES: Final[tuple[str, ...]] = (
     "CommandRejected",
 )
 
+# `driverFaultCapabilityName()`: whether the vehicle has an external nFAULT line
+# at all. `NotInstalled` is this vehicle's value.
+DRIVER_FAULT_CAPABILITIES: Final[tuple[str, ...]] = (
+    "Installed",
+    "NotInstalled",
+)
+
+# `telemetryDriverFaultLevelName()`: a boolean when the line exists, and the
+# missing marker when it does not. Deliberately not a boolean vocabulary - a log
+# may not spell "no signal" as a healthy level.
+DRIVER_FAULT_LEVELS: Final[tuple[str, ...]] = ("0", "1", MISSING_FIELD)
+
 # `configurationCheckName()`, including the spelling of `Count` (which is not a
 # check: it is how "no failing check" is written into the `check` field).
+#
+# `DriverFaultConfigurationValid` is the D32 rename of
+# `DriverFaultPolarityVerified`: the check is now capability-aware, because this
+# vehicle has no external nFAULT line to measure a polarity for.
 CONFIG_CHECKS: Final[tuple[str, ...]] = (
     "ConfigurationValid",
     "CalibrationMeasured",
@@ -224,7 +247,7 @@ CONFIG_CHECKS: Final[tuple[str, ...]] = (
     "EffortCeilingsAgree",
     "CommandPolarityAgrees",
     "TickPolarityAgrees",
-    "DriverFaultPolarityVerified",
+    "DriverFaultConfigurationValid",
     "StopEvidenceSpansReversalStop",
     "StopEvidenceSpansFinalStop",
     "SafetyLimitsValid",
@@ -252,6 +275,8 @@ def all_vocabulary_names() -> tuple[str, ...]:
             | set(CONFIG_ERRORS)
             | set(EVENT_CODES)
             | set(CONFIG_CHECKS)
+            | set(DRIVER_FAULT_CAPABILITIES)
+            | set(DRIVER_FAULT_LEVELS)
         )
     )
 
@@ -275,7 +300,7 @@ UNSIGNED_FIELDS: Final[dict[str, int]] = {
 }
 
 # Written as a single character, `0` or `1` (`BoundedText::appendBool`).
-BOOL_FIELDS: Final[frozenset[str]] = frozenset({"armed", "pos_ok", "vel_ok", "nfault_low"})
+BOOL_FIELDS: Final[frozenset[str]] = frozenset({"armed", "pos_ok", "vel_ok"})
 
 # `appendFixed()` fields. `ovf` is a sentinel rather than a number, so these
 # parse to either a float (possibly NaN or infinite) or `None` for `ovf`.
@@ -290,7 +315,13 @@ ENUM_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "authz": AUTHZ_OUTCOMES,
     "check": CONFIG_CHECKS,
     "event": EVENT_CODES,
+    "nfault": DRIVER_FAULT_CAPABILITIES,
 }
+
+# The driver-fault level field. Not a boolean vocabulary: `not_installed`-style
+# absence is written as the missing marker, so a reader cannot read "no signal"
+# as "healthy".
+DRIVER_FAULT_LEVEL_FIELD: Final[str] = "nfault_low"
 
 # `detail` is not validated against one single vocabulary because it legitimately
 # carries a name from several of them (a fault name for `FaultLatched`, a phase

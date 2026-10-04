@@ -347,7 +347,16 @@ def _effort_section(samples: Sequence[Sample]) -> dict[str, Any]:
 def _raw_inputs_section(samples: Sequence[Sample]) -> dict[str, Any]:
     batteries = [float(sample.battery_counts) for sample in samples]
     currents = [float(sample.current_counts) for sample in samples]
-    low = [sample for sample in samples if sample.driver_fault_bar_low]
+    # Only a sample that actually carried a level can be low. When the vehicle has
+    # no external nFAULT line the level field is absent (``None``), so `low` is
+    # empty for a reason that is not a healthy driver - `nfault_capabilities`
+    # below says which reason, and `level_read_sample_count` says whether any
+    # level was read at all.
+    low = [sample for sample in samples if sample.driver_fault_bar_low is True]
+    capabilities = sorted({sample.driver_fault_capability for sample in samples})
+    level_read_sample_count = sum(
+        1 for sample in samples if sample.driver_fault_bar_low is not None
+    )
     return {
         "battery_counts": {
             **_stats(batteries),
@@ -359,9 +368,17 @@ def _raw_inputs_section(samples: Sequence[Sample]) -> dict[str, Any]:
             "first": int(currents[0]) if currents else None,
             "last": int(currents[-1]) if currents else None,
         },
+        "nfault_capabilities": capabilities,
         "nfault_low": {
             "sample_count": len(low),
+            "level_read_sample_count": level_read_sample_count,
             "first_t_abs_ms": low[0].t_abs_ms if low else None,
+            "note": (
+                "sample_count is how many samples read low; level_read_sample_count is "
+                "how many carried a level at all, and is 0 when the vehicle has no "
+                "external nFAULT line (see nfault_capabilities). An unavailable signal "
+                "is not a healthy driver."
+            ),
         },
         "units": "raw ADC counts and a raw logic level; no conversion is documented",
     }

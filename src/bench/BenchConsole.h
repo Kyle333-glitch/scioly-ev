@@ -5,6 +5,7 @@
 #include <BenchCommand.h>
 #include <BenchDrive.h>
 #include <BoundedText.h>
+#include <DriverFault.h>
 #include <Motion.h>
 #include <MotorArbitration.h>
 #include <SerialCommandParser.h>
@@ -396,15 +397,31 @@ inline void ticksLine() {
 }
 
 // B4 - the raw input readout. Levels and raw counts, never engineering units:
-// the active level of the trigger, what the driver's fault line is doing, and the
-// two ADC channels as counts. This is what H1B records.
+// the active level of the trigger and the two ADC channels as counts. This is
+// what H1B records.
+//
+// `nfault` and `nfault_low` say the truth about the driver's fault line rather
+// than printing a level: the external nFAULT signal is **not installed** on this
+// vehicle, so the readout reports `nfault=NotInstalled` and writes the level field
+// as the missing marker. It deliberately does **not** call `digitalRead()` on
+// `kMotorFaultBar` to "still show something" - a floating pin's level is not a
+// measurement of anything, and a bench readout that printed it as `nfault_low=0`
+// would be the single most misleading line this firmware could emit, because it
+// would read as a healthy driver. `SensorInputs.h` is where the pin is left
+// unconfigured and unsampled; this line reports that decision, it does not work
+// around it.
+//
+// On a vehicle that wires the line, the same fields report `nfault=Installed` and
+// the real level, which is what H1B Part 3 records.
 inline void inputsLine() {
     const sensorInputs::RawSample raw = sensorInputs::sample();
     ev::BoundedText text(serialTransport::port().workingBuffer(),
                          benchConfig::kReadoutLineCapacity);
     text.appendText("BENCH,inputs=1");
     text.field("trigger_low").appendBool(raw.startTriggerActive);
-    text.field("nfault_low").appendBool(raw.driverFaultBarLow);
+    text.field("nfault").appendText(ev::driverFaultCapabilityName(raw.driverFaultCapability));
+    text.field("nfault_low").appendText(
+        ev::telemetryDriverFaultLevelName(raw.driverFaultCapability, raw.driverFaultBarLow));
     text.field("batt_counts").appendUnsigned(raw.batteryCounts);
     text.field("curr_counts").appendUnsigned(raw.currentCounts);
     respond(text);

@@ -20,9 +20,16 @@ namespace ev {
 // * **No single boolean may summarize them.** A refused arm has to be
 //   attributable to the fact that failed, which is what `firstFailure()` and
 //   `failureMask()` exist for.
-// * **The vocabulary is frozen once a log can contain it.** `Name()` below is
+//   * **The vocabulary is frozen once a log can contain it.** `Name()` below is
 //   the wire spelling of each check, used by the operator responses and by the
-//   telemetry schema, so it may gain entries but must not rename one.
+//   telemetry schema, so it may gain entries but must not rename one. The one
+//   rename that has happened is recorded here and in `DEVELOPMENT_LOG.md` D32:
+//   `DriverFaultPolarityVerified` became `DriverFaultConfigurationValid` when the
+//   vehicle's external nFAULT line turned out not to be installed. A column
+//   named "polarity verified" would have claimed a measurement that does not
+//   exist on this vehicle; the capability-aware name reports what is actually
+//   required. It travelled with telemetry schema version 2, so no old log can be
+//   read as if it carried the new name.
 //
 // The order of the enumerators is the order of the checks as they are reported,
 // which is the order in `configurationBuildChecks()` in the vehicle layer: the
@@ -35,7 +42,7 @@ enum class ConfigurationCheckId : uint8_t {
     EffortCeilingsAgree,      // regulator ceiling == safety ceiling
     CommandPolarityAgrees,    // profile command direction == regulator effort mode
     TickPolarityAgrees,       // measured tick direction == command direction
-    DriverFaultPolarityVerified,  // the driver fault line has been measured
+    DriverFaultConfigurationValid,  // capability-aware: polarity verified if the line exists
     StopEvidenceSpansReversalStop,
     StopEvidenceSpansFinalStop,
     SafetyLimitsValid,        // validateSafetyLimits()
@@ -70,8 +77,8 @@ inline const char* configurationCheckName(ConfigurationCheckId id) {
             return "CommandPolarityAgrees";
         case ConfigurationCheckId::TickPolarityAgrees:
             return "TickPolarityAgrees";
-        case ConfigurationCheckId::DriverFaultPolarityVerified:
-            return "DriverFaultPolarityVerified";
+        case ConfigurationCheckId::DriverFaultConfigurationValid:
+            return "DriverFaultConfigurationValid";
         case ConfigurationCheckId::StopEvidenceSpansReversalStop:
             return "StopEvidenceSpansReversalStop";
         case ConfigurationCheckId::StopEvidenceSpansFinalStop:
@@ -106,7 +113,7 @@ struct ConfigurationBuildChecks {
     bool effortCeilingsAgree = false;
     bool commandPolarityAgrees = false;
     bool tickPolarityAgrees = false;
-    bool driverFaultPolarityVerified = false;
+    bool driverFaultConfigurationValid = false;
     bool stopEvidenceSpansReversalStop = false;
     bool stopEvidenceSpansFinalStop = false;
     bool safetyLimitsValid = false;
@@ -133,8 +140,8 @@ struct ConfigurationBuildChecks {
                 return commandPolarityAgrees;
             case ConfigurationCheckId::TickPolarityAgrees:
                 return tickPolarityAgrees;
-            case ConfigurationCheckId::DriverFaultPolarityVerified:
-                return driverFaultPolarityVerified;
+            case ConfigurationCheckId::DriverFaultConfigurationValid:
+                return driverFaultConfigurationValid;
             case ConfigurationCheckId::StopEvidenceSpansReversalStop:
                 return stopEvidenceSpansReversalStop;
             case ConfigurationCheckId::StopEvidenceSpansFinalStop:
@@ -183,8 +190,8 @@ struct ConfigurationBuildChecks {
             case ConfigurationCheckId::TickPolarityAgrees:
                 tickPolarityAgrees = value;
                 return;
-            case ConfigurationCheckId::DriverFaultPolarityVerified:
-                driverFaultPolarityVerified = value;
+            case ConfigurationCheckId::DriverFaultConfigurationValid:
+                driverFaultConfigurationValid = value;
                 return;
             case ConfigurationCheckId::StopEvidenceSpansReversalStop:
                 stopEvidenceSpansReversalStop = value;
@@ -223,7 +230,7 @@ struct ConfigurationBuildChecks {
     bool allPass() const {
         return configurationValid && calibrationMeasured && measuredValuesCiteEvidence &&
                effortCeilingsAgree && commandPolarityAgrees && tickPolarityAgrees &&
-               driverFaultPolarityVerified && stopEvidenceSpansReversalStop &&
+               driverFaultConfigurationValid && stopEvidenceSpansReversalStop &&
                stopEvidenceSpansFinalStop && safetyLimitsValid && controllerConfigValid &&
                estimatorConfigValid && profileLimitsValid && phaseConfigValid &&
                reversalConfigValid && runPolicyUsable;

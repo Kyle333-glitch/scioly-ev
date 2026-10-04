@@ -23,7 +23,7 @@ import unittest
 
 from tests.support import REPO_ROOT, metrics_for, sample_path, spec
 
-from evtelemetry import cli, report, synthetic
+from evtelemetry import cli, report, schema, synthetic
 
 
 def run_cli(argv: list[str]) -> tuple[int, str, str]:
@@ -134,7 +134,7 @@ class AnalyzeTest(unittest.TestCase):
         entry = manifest["inputs"][0]
         self.assertEqual(entry["sha256"], sha256(sample_path("synthetic_a.csv")))
         self.assertEqual(entry["samples"], metrics_for(spec("SYNTHETIC-A"))["counts"]["samples"])
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], schema.SCHEMA_VERSION)
         # No timestamp anywhere: a report must be reproducible byte for byte.
         self.assertNotIn("generated_at", manifest)
 
@@ -191,19 +191,19 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_a_future_schema_version_is_refused_with_a_clear_message(self) -> None:
         lines = [
-            line.replace("EVS1", "EVS2", 1) if line.startswith("EVS1") else line
+            line.replace("EVS2", "EVS1", 1) if line.startswith("EVS2") else line
             for line in self._good_lines()
         ]
         path = self._write(lines)
         code, _, err = run_cli(["analyze", path, "--out", self.out])
         self.assertEqual(code, 2)
-        self.assertIn("schema version 2", err)
+        self.assertIn("schema version 1", err)
         self.assertIn("capture.csv", err)
         self.assertFalse(os.path.exists(os.path.join(self.out, "manifest.json")))
 
     def test_a_truncated_record_is_refused(self) -> None:
         lines = self._good_lines()
-        index = next(i for i, line in enumerate(lines) if line.startswith("EVS1"))
+        index = next(i for i, line in enumerate(lines) if line.startswith("EVS2"))
         lines[index] = ",".join(lines[index].split(",")[:10])
         path = self._write(lines)
         code, _, err = run_cli(["analyze", path, "--out", self.out])
@@ -213,7 +213,7 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_a_renamed_column_is_refused_rather_than_misread(self) -> None:
         lines = [
-            line.replace("vel_cmd_mps", "vel_cmd") if line.startswith("EVS1") else line
+            line.replace("vel_cmd_mps", "vel_cmd") if line.startswith("EVS2") else line
             for line in self._good_lines()
         ]
         path = self._write(lines)
@@ -230,8 +230,8 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_continue_on_error_surveys_a_damaged_capture_and_says_so(self) -> None:
         lines = self._good_lines()
-        index = next(i for i, line in enumerate(lines) if line.startswith("EVS1"))
-        lines.insert(index, "EVS1,ver=1,t_ms=garbage")
+        index = next(i for i, line in enumerate(lines) if line.startswith("EVS2"))
+        lines.insert(index, "EVS2,ver=2,t_ms=garbage")
         path = self._write(lines)
         code, _, _ = run_cli(["analyze", path, "--out", self.out, "--continue-on-error"])
         self.assertEqual(code, 0)

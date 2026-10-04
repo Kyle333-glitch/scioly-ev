@@ -182,9 +182,17 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // ---------------------------------------------------------------- stage 3
     // Raw inputs. Nothing here is converted or interpreted: the counts are counts
     // and the levels are levels (`SOFTWARE_ARCHITECTURE.md` section 12).
+    //
+    // The external nFAULT line is not installed on this vehicle, so
+    // `sensorInputs::sample()` does not read the pin at all and the sample
+    // carries `NotInstalled` (`SensorInputs.h`). The counter below is guarded by
+    // the capability on purpose: an unguarded increment would count a floating
+    // pin's toggles as driver-fault evidence, which is a fabricated measurement
+    // rather than a missing one.
     orderGuard_.enter(ControlTickStage::SensorSnapshot);
     rawInputs_ = sensorInputs::sample();
-    if (rawInputs_.driverFaultBarLow) {
+    if (rawInputs_.driverFaultCapability == ev::DriverFaultCapability::Installed &&
+        rawInputs_.driverFaultBarLow) {
         ++cyclesWithDriverFaultLow_;
     }
 
@@ -193,22 +201,32 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // readiness comes from, and any fault this layer can name.
     //
     // The driver fault line is interpreted by `ev::observedDriverFault()`, which
-    // refuses to claim a fault while the line's polarity is unverified
-    // (`VERIFIED_STATE.md` #1, #2). With the shipped configuration that is what
-    // happens: the level is sampled, counted and reported as a raw level, and no
-    // fault is invented from it. The refusal is not a gap in the tick - it is the
-    // one honest answer available, because an assumed polarity would either turn a
-    // healthy driver into a latched fault or turn a real fault into a log entry
-    // nobody acts on. Once H1B has measured the polarity, promoting
-    // `kPlannedDriverFaultPolarity` gives this line an identity, and the authority
-    // latches it exactly as it latches any other fault. The
-    // `DriverFaultPolarityVerified` check is what keeps the vehicle unarmable until
-    // then, so "the fault input is invisible" can never be the state of an armed
-    // vehicle.
+    // is capability-aware (`lib/evcore/src/DriverFault.h`).
+    //
+    // **This vehicle has no external nFAULT line**
+    // (`vehicleConfig::kPlannedDriverFaultCapability` is `NotInstalled`), so the
+    // call below returns `FaultCode::None` unconditionally and for a different
+    // reason than an unverified polarity would: there is no signal to interpret.
+    // No level is fed to it as though monitoring existed - the level it receives
+    // is explicitly not a reading (`SensorInputs.h`). The DRV8874's own on-chip
+    // protection is unaffected; what is absent is the MCU's ability to observe a
+    // fault it reports, which is recorded in `docs/limitations.md` and is why
+    // external fault telemetry is unavailable on this hardware.
+    //
+    // On a vehicle that *does* wire the line, the same call refuses to claim a
+    // fault while the polarity is unverified (`VERIFIED_STATE.md` #1, #2): an
+    // assumed polarity would either turn a healthy driver into a latched fault or
+    // turn a real fault into a log entry nobody acts on. Once H1B has measured the
+    // polarity, promoting `kPlannedDriverFaultPolarity` gives the line an
+    // identity, and the authority latches it exactly as it latches any other
+    // fault. The `DriverFaultConfigurationValid` check is what keeps such a
+    // vehicle unarmable until then, so "the fault input is invisible" can never be
+    // the state of an armed vehicle that has one.
     orderGuard_.enter(ControlTickStage::FaultEvaluation);
     configurationChecks_ = vehicleConfig::configurationBuildChecks(announcedConfigValid_, run_);
     const ev::FaultCode observedFault =
-        ev::observedDriverFault(rawInputs_.driverFaultBarLow, vehicleConfig::plannedDriverFaultPolarity());
+        ev::observedDriverFault(rawInputs_.driverFaultCapability, rawInputs_.driverFaultBarLow,
+                                vehicleConfig::plannedDriverFaultPolarity());
 
     // ---------------------------------------------------------------- stage 5
     // The run policy, fed only this cycle's evidence. The distance it consumes is
@@ -337,10 +355,11 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.positionUsable = positionUsable_;
     snapshot.batteryCounts = rawInputs_.batteryCounts;
     snapshot.currentCounts = rawInputs_.currentCounts;
+    snapshot.driverFaultCapability = rawInputs_.driverFaultCapability;
     snapshot.driverFaultBarLow = rawInputs_.driverFaultBarLow;
     snapshot.startTriggerActive = rawInputs_.startTriggerActive;
     snapshot.driverFaultLowCycles = cyclesWithDriverFaultLow_;
-    snapshot.driverFaultPolarityVerified = configurationChecks_.driverFaultPolarityVerified;
+    snapshot.driverFaultConfigurationValid = configurationChecks_.driverFaultConfigurationValid;
     snapshot.phase = status.phase;
     snapshot.runCommand = status.intention.command;
     snapshot.intentionCurrent = intentionCurrent;
@@ -397,6 +416,7 @@ ev::TelemetrySample VehicleRuntime::buildSample() const {
     sample.effortPermille = snapshot.presentedPermille;
     sample.batteryCounts = snapshot.batteryCounts;
     sample.currentCounts = snapshot.currentCounts;
+    sample.driverFaultCapability = snapshot.driverFaultCapability;
     sample.driverFaultBarLow = snapshot.driverFaultBarLow;
     sample.fault = snapshot.fault;
     sample.outcome = snapshot.outcome;

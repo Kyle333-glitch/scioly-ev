@@ -177,14 +177,41 @@ constexpr ev::MotionDirection kPlannedPositiveCommandDirection = ev::MotionDirec
 constexpr ev::MotorMode kPlannedPositiveEffortMode = ev::MotorMode::DriveForward;
 constexpr ev::MotionDirection kPlannedPositiveTicksDirection = ev::MotionDirection::Forward;
 
-// The planned reading of the driver's nFAULT line. `Unverified` - the zero value -
-// is deliberate and is what this build ships: nobody has measured the line, so no
-// level is interpreted as a fault and the raw level is reported instead
-// (`VERIFIED_STATE.md` #1, #2). H1B measures which level the driver drives for
-// each line state; promoting this value to `ActiveLow` or `ActiveHigh` with a
-// citation is what turns the line into a latched fault, and
-// `DriverFaultPolarityVerified` refuses to arm the vehicle until that has
-// happened - a driver fault nobody interprets is a driver fault nobody stops for.
+// **The external DRV8874 nFAULT signal is NOT INSTALLED on this vehicle.** The
+// assembled vehicle does not wire the driver's fault output to the Nano, so
+// there is no line to measure, no polarity to establish and no external driver
+// fault for the MCU to observe. This constant states that, and it is the reason
+// the driver-fault configuration check no longer demands a polarity measurement
+// on this build.
+//
+// What this does NOT say: that the driver is unprotected. The DRV8874's on-chip
+// overcurrent, thermal and undervoltage protections are independent of this
+// signal and are untouched by this change; what is absent is only the MCU's
+// ability to *observe* a fault the driver reports. `docs/limitations.md` records
+// the consequence - external fault telemetry is unavailable, so no firmware path
+// can stop the vehicle for a driver fault on this hardware.
+//
+// This is a wiring fact stated by the team, not a measurement. It is deliberately
+// not a `Sourced` value: there is no `ValueSource` for "stated", and marking it
+// `Measured` would fabricate a measurement that does not exist. It is the
+// zero-risk direction of the two - `Installed` is the default, so a forgotten
+// assignment keeps the line required and unverified, which refuses arming rather
+// than silently dropping the gate.
+constexpr ev::DriverFaultCapability kPlannedDriverFaultCapability =
+    ev::DriverFaultCapability::NotInstalled;
+
+// The reading of the driver's nFAULT line. `Unverified` - the zero value - is
+// deliberate and it is **not** changed by the capability above: nobody measured
+// the line, and relabelling it `ActiveLow` would be inventing the measurement
+// this project's rules exist to prevent. With the line not installed, the
+// capability makes this value's verification *not applicable* rather than
+// satisfied (`ev::validateDriverFaultConfig()`), so nothing reads it and
+// `nfault=NotInstalled` is what telemetry reports.
+//
+// If the line is ever wired (a later build with the driver's nFAULT brought out),
+// the change is two edits: set `kPlannedDriverFaultCapability` back to
+// `Installed`, and measure the polarity (H1B) before arming - the configuration
+// check refuses the vehicle until that is done.
 constexpr ev::DriverFaultPolarity kPlannedDriverFaultPolarity =
     ev::DriverFaultPolarity::Unverified;
 
@@ -222,6 +249,13 @@ inline ev::Sourced<ev::MotorMode> provisionalEffortMode(ev::MotorMode mode) {
 inline ev::Sourced<ev::DriverFaultPolarity> plannedDriverFaultPolarity() {
     return ev::Sourced<ev::DriverFaultPolarity>(kPlannedDriverFaultPolarity,
                                                 ev::ValueSource::Provisional);
+}
+
+// The external nFAULT capability, as the runtime and the configuration check read
+// it. Not a `Sourced` value, and that is stated rather than implied: see
+// `kPlannedDriverFaultCapability`.
+inline ev::DriverFaultCapability plannedDriverFaultCapability() {
+    return kPlannedDriverFaultCapability;
 }
 
 // The final stop dwell is the event's Complete Stop (rule 8.p). It is a rule
@@ -421,11 +455,13 @@ inline bool allPromotedValuesCiteEvidence() {
 // false: the calibration, the limits, the gains and every polarity encoding are
 // provisional, so `calibrationMeasured`, `safetyLimitsValid`, `controllerConfigValid`,
 // `profileLimitsValid`, `phaseConfigValid` and `reversalConfigValid` all fail, and
-// `configurationValid` is false because no run has been announced. Two of the
-// checks are about facts rather than values and are false for their own reasons:
-// `driverFaultPolarityVerified` waits on H1B's line measurement, and
+// `configurationValid` is false because no run has been announced. One of the
+// checks is about a fact rather than a value and is false for its own reason:
 // `measuredValuesCiteEvidence` will bite on the first promotion that names no
-// evidence.
+// evidence. The driver-fault check is *not* one of the failing ones on this
+// vehicle: its external nFAULT line is not installed, so its polarity
+// verification is not applicable rather than outstanding
+// (`driverFaultConfigurationValid`).
 using ConfigurationBuildChecks = ev::ConfigurationBuildChecks;
 
 // Evaluates the checks against the running chain. `announcedConfigValid` is the
@@ -444,8 +480,10 @@ inline ConfigurationBuildChecks configurationBuildChecks(bool announcedConfigVal
     checks.configurationValid = announcedConfigValid;
     checks.calibrationMeasured = calibrationValues.isFullyMeasured();
     checks.measuredValuesCiteEvidence = allPromotedValuesCiteEvidence();
-    checks.driverFaultPolarityVerified =
-        ev::validateDriverFaultConfig(plannedDriverFaultPolarity()).ok;
+    checks.driverFaultConfigurationValid =
+        ev::validateDriverFaultConfig(plannedDriverFaultCapability(),
+                                      plannedDriverFaultPolarity())
+            .ok;
     checks.effortCeilingsAgree =
         ev::effortCeilingsAgree(controller.maxEffortPermille, limits.maxEffortPermille);
     checks.commandPolarityAgrees =

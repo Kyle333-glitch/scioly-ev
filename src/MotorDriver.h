@@ -100,6 +100,55 @@ inline uint16_t& lastDutyPermilleWritten() {
     return duty;
 }
 
+namespace detail {
+
+// The PH level this adapter last wrote. The single write path below needs it to
+// apply one rule: PH may only move when the drive level has just been commanded
+// to zero and the driver de-energized.
+inline bool& lastPhaseHighWritten() {
+    static bool high = false;
+    return high;
+}
+
+}  // namespace detail
+
+// ---------------------------------------------------------------------------
+// The one write path - and the PH-before-EN ordering rule
+// ---------------------------------------------------------------------------
+//
+// Every write of the three driver inputs goes through here, and the rule it
+// enforces is the one P-H1A's required work asks to verify: PH is not changed
+// while an energized drive output would make that unsafe.
+//
+// Without the rule, a command that goes from a powered drive straight to a stop
+// writes PH before EN: the writes happen in level order (nSLEEP, PH, EN), so a
+// `DriveForward` -> `Brake` transition - which the run's own FinalApproach ->
+// FinalBrake handoff really produces - changes PH low while EN still carries
+// the previous duty. That is an opposite-direction pulse the authority never
+// authorized, and it is the one direction change the safety boundary cannot
+// refuse, because it is created by write order rather than by a command.
+//
+// With the rule, a PH change first drives nSLEEP low and commands EN to zero
+// duty, then writes PH, and only then restores the target's nSLEEP and EN. The
+// rule is an ordering, not a timed guarantee: the driver's sleep-to-output-off
+// interval (`tSLEEP`) is not measured in this project, so the interval between
+// the de-energize write and the PH write is bounded by the part and is a
+// measurement item for H1A/H3 rather than something this comment may claim.
+inline void writeLevels(const ev::Drv8874Inputs& levels) {
+    if (levels.phaseHigh != detail::lastPhaseHighWritten()) {
+        // De-energize before the direction input moves: nSLEEP low, then EN
+        // commanded to zero duty, then PH.
+        digitalWrite(kMotorSleepBar, LOW);
+        analogWrite(kMotorEnable, 0);
+        digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
+        detail::lastPhaseHighWritten() = levels.phaseHigh;
+    }
+    digitalWrite(kMotorSleepBar, levels.nSleepHigh ? HIGH : LOW);
+    analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
+                                                       ev::kPlannedPwmResolutionBits));
+    lastDutyPermilleWritten() = levels.dutyPermille;
+}
+
 // The three driver inputs as the MCU itself sees them, plus the rule's verdict.
 //
 // Read through `digitalRead()` -> `R_IOPORT_PinRead()`: the level the MCU holds
@@ -149,26 +198,23 @@ inline void beginDisabled() {
     digitalWrite(kMotorSleepBar, LOW);
 
     pinMode(kMotorPhase, OUTPUT);
-    digitalWrite(kMotorPhase, LOW);
-
     pinMode(kMotorEnable, OUTPUT);
-    digitalWrite(kMotorEnable, LOW);
 
     // Pin the PWM scale explicitly instead of inheriting the core's default, so
     // the duty arithmetic in the plan and the timer's own resolution agree.
     analogWriteResolution(ev::kPlannedPwmResolutionBits);
-    analogWrite(kMotorEnable, 0);
-    lastDutyPermilleWritten() = 0U;
+
+    // The de-energized levels, through the one write path every other write
+    // uses. The tracked PH level starts low, so this cannot take the
+    // de-energize branch, and nSLEEP has already been driven low above.
+    writeLevels(ev::Drv8874Inputs{false, false, 0U});
 }
 
 // Writes the driver's de-energized levels. Safe to call from anywhere, at any
 // time, including from a control cycle that has already decided not to trust
 // itself: it cannot produce powered output.
 inline void failSafe() {
-    digitalWrite(kMotorSleepBar, LOW);
-    digitalWrite(kMotorPhase, LOW);
-    analogWrite(kMotorEnable, 0);
-    lastDutyPermilleWritten() = 0U;
+    writeLevels(ev::Drv8874Inputs{false, false, 0U});
 }
 
 // Applies one authorized command. `ev::drv8874InputsFor()` decides the levels;
@@ -183,12 +229,7 @@ inline void apply(const ev::AuthorizedMotorCommand& command) {
     if (motorPinsOwned()) {
         return;
     }
-    const ev::Drv8874Inputs levels = ev::drv8874InputsFor(command);
-    digitalWrite(kMotorSleepBar, levels.nSleepHigh ? HIGH : LOW);
-    digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
-    analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
-                                                       ev::kPlannedPwmResolutionBits));
-    lastDutyPermilleWritten() = levels.dutyPermille;
+    writeLevels(ev::drv8874InputsFor(command));
 }
 
 // Applies one bounded bench command (B2).
@@ -215,13 +256,7 @@ inline void apply(const ev::AuthorizedMotorCommand& command) {
 // whose next write de-energizes a bench command the bench code can no longer
 // reach.
 inline void applyBench(const ev::BenchDriveOutput& output) {
-    const ev::Drv8874Inputs levels =
-        ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille());
-    digitalWrite(kMotorSleepBar, levels.nSleepHigh ? HIGH : LOW);
-    digitalWrite(kMotorPhase, levels.phaseHigh ? HIGH : LOW);
-    analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
-                                                       ev::kPlannedPwmResolutionBits));
-    lastDutyPermilleWritten() = levels.dutyPermille;
+    writeLevels(ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille()));
 }
 
 }  // namespace motorDriver

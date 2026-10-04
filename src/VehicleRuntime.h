@@ -70,7 +70,9 @@
 //   1. EncoderSnapshot       one coherent read of the ISR-owned tick count
 //   2. OdometryAndVelocity   odometry, the velocity estimate, the two readiness
 //                            verdicts and the run-axis position they imply
-//   3. SensorSnapshot        the raw battery/current/nFAULT/trigger readings
+//   3. SensorSnapshot        the raw battery/current/trigger readings, and the
+//                            driver-fault capability (this vehicle has no
+//                            external nFAULT line to read)
 //   4. FaultEvaluation       the configuration-build verdicts the boundary's
 //                            readiness comes from, and this cycle's fault
 //   5. RunStateMachine       the run policy, fed only this cycle's evidence
@@ -145,17 +147,22 @@ struct TelemetrySnapshot {
     // Raw inputs. Counts and levels, never engineering units.
     uint16_t batteryCounts = 0U;
     uint16_t currentCounts = 0U;
+    // Whether the external nFAULT line exists on this vehicle. `NotInstalled` on
+    // this build, which is why the level below is not a reading of anything.
+    ev::DriverFaultCapability driverFaultCapability = ev::DriverFaultCapability::Installed;
     bool driverFaultBarLow = false;
     bool startTriggerActive = false;
-    // How many control ticks have seen the planned driver fault line low since
+    // How many control ticks have seen a *wired* driver fault line low since
     // boot. A count of a raw level, not a fault: see the tick's own note on the
-    // interpretation.
+    // interpretation. Stays zero while the line is not installed - the counter
+    // never counts a pin that is not a signal, so a non-zero value here is
+    // evidence only on a vehicle that has the line.
     uint32_t driverFaultLowCycles = 0U;
-    // True when the fault line's polarity has been measured, so the raw level
-    // above was interpreted rather than only recorded (`DriverFault.h`). False
-    // with the shipped configuration, where the level is reported and no fault is
-    // claimed from it.
-    bool driverFaultPolarityVerified = false;
+    // True when the external driver-fault configuration is satisfied: the line's
+    // polarity has been measured (Installed) or the line does not exist
+    // (NotInstalled, in which case there is no polarity to measure). Reported
+    // next to `driverFaultCapability` so the two cannot be read apart.
+    bool driverFaultConfigurationValid = false;
 
     // The run policy and the request this cycle presented.
     ev::RunPhase phase = ev::RunPhase::Idle;
@@ -432,11 +439,18 @@ private:
     sensorInputs::RawSample rawInputs_{};
     vehicleConfig::ConfigurationBuildChecks configurationChecks_{};
     bool positionUsable_ = false;
-    // Control ticks observed with the driver's nFAULT line low, since the current
-    // run started. Reset at a successful arm and at `reset`, deliberately: H1B
-    // Part 3 (ten deliberate ground-and-release cycles) and H9's trip both read
+    // Control ticks observed with a *wired* driver's nFAULT line low, since the
+    // current run started. Reset at a successful arm and at `reset`, deliberately:
+    // H1B Part 3 (ten deliberate ground-and-release cycles) and H9's trip both read
     // this as evidence about *that* test, and a since-boot total cannot tell this
     // test's activity from an earlier one's.
+    //
+    // On this vehicle the line is not installed, so nothing increments it: the
+    // tick's stage 3 increments this only when
+    // `vehicleConfig::kPlannedDriverFaultCapability` is `Installed`. The counter
+    // staying at zero here is *not* evidence of a healthy driver - there is no
+    // signal - which is why the capability travels beside it in the snapshot and
+    // why telemetry writes the level field as absent rather than as `0`.
     uint32_t cyclesWithDriverFaultLow_ = 0U;
 
     // The state of the vehicle layer itself.

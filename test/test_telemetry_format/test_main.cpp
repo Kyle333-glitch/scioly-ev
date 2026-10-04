@@ -33,6 +33,8 @@ const uint32_t kLongestAuthzNameChars = 27U;        // "DeniedUnsafeDirectionCha
 const uint32_t kLongestConfigErrorNameChars = 29U;  // "BottleLineDistanceOffInterval"
 const uint32_t kLongestEventNameChars = 16U;        // "TelemetryEnabled"
 const uint32_t kLongestCheckNameChars = 29U;        // "StopEvidenceSpansReversalStop"
+const uint32_t kLongestDriverFaultCapabilityChars = 12U;  // "NotInstalled"
+const uint32_t kLongestDriverFaultLevelChars = 1U;        // "-" when the line is absent
 
 // Every vocabulary name is written into a comma-separated line and then split on
 // `,` and the first `=` by the reader, so a name may contain neither a comma, a
@@ -74,6 +76,7 @@ ev::TelemetrySample recognizableSample() {
     sample.effortPermille = 740U;
     sample.batteryCounts = 812U;
     sample.currentCounts = 513U;
+    sample.driverFaultCapability = ev::DriverFaultCapability::Installed;
     sample.driverFaultBarLow = false;
     sample.fault = ev::FaultCode::None;
     sample.outcome = ev::AuthzOutcome::AuthorizedDrive;
@@ -100,6 +103,9 @@ ev::TelemetrySample widestSample() {
     sample.effortPermille = 65535U;
     sample.batteryCounts = 65535U;
     sample.currentCounts = 65535U;
+    // The widest spelling of the capability field, and the level field at its
+    // widest (a boolean, one character - the absent marker is the same width).
+    sample.driverFaultCapability = ev::DriverFaultCapability::NotInstalled;
     sample.driverFaultBarLow = true;
     sample.fault = ev::FaultCode::ProvisionalCalibration;
     sample.outcome = ev::AuthzOutcome::DeniedUnsafeDirectionChange;
@@ -135,9 +141,10 @@ void test_sample_line_pins_field_order_and_spelling(void) {
     const uint16_t length = ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity);
 
     TEST_ASSERT_EQUAL_STRING(
-        "EVS1,ver=1,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+        "EVS2,ver=2,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
         "pos_m=6.2140,pos_ok=1,vel_mps=0.7140,vel_ok=1,vel_cmd_mps=0.7000,rem_m=0.2860,"
-        "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,nfault_low=0,"
+        "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,"
+        "nfault=Installed,nfault_low=0,"
         "fault=None,authz=AuthorizedDrive,check=none,drop_s=0,drop_e=0",
         buffer);
     TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), length);
@@ -160,7 +167,7 @@ void test_event_line_pins_field_order_and_spelling(void) {
     const uint16_t length = ev::formatTelemetryEvent(event, buffer, ev::kTelemetryLineCapacity);
 
     TEST_ASSERT_EQUAL_STRING(
-        "EVE1,ver=1,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
+        "EVE2,ver=2,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
         "detail=ProvisionalCalibration,fault=ProvisionalCalibration,drop_s=3,drop_e=1",
         buffer);
     TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), length);
@@ -361,6 +368,67 @@ void test_a_record_that_does_not_fit_emits_nothing(void) {
     TEST_ASSERT_EQUAL_STRING("", buffer);
 }
 
+// The external nFAULT line is not installed on this vehicle, and a log may never
+// spell that as a healthy level. The two fields are written together: `nfault`
+// says the signal does not exist, and `nfault_low` carries the absent marker
+// rather than `0`.
+void test_absent_driver_fault_line_is_not_spelled_as_a_healthy_level(void) {
+    char buffer[ev::kTelemetryLineBufferBytes];
+    ev::TelemetrySample sample;
+    sample.driverFaultCapability = ev::DriverFaultCapability::NotInstalled;
+    // The value the vehicle layer holds for the level is whatever the unread
+    // field defaults to; the point is that the capability decides the spelling,
+    // not the level. Both boolean states must produce the same marker.
+    sample.driverFaultBarLow = false;
+
+    TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",nfault=NotInstalled,"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",nfault_low=-,"));
+    TEST_ASSERT_NULL(strstr(buffer, "nfault_low=0"));
+    TEST_ASSERT_NULL(strstr(buffer, "nfault_low=1"));
+
+    sample.driverFaultBarLow = true;
+    TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",nfault_low=-,"));
+    TEST_ASSERT_NULL(strstr(buffer, "nfault_low=0"));
+    TEST_ASSERT_NULL(strstr(buffer, "nfault_low=1"));
+
+    // A vehicle that has the line reports its capability and a real level, so
+    // the marker cannot be read as "no line exists" when one does.
+    sample.driverFaultCapability = ev::DriverFaultCapability::Installed;
+    sample.driverFaultBarLow = false;
+    TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",nfault=Installed,nfault_low=0,"));
+
+    sample.driverFaultBarLow = true;
+    TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",nfault=Installed,nfault_low=1,"));
+}
+
+// The capability vocabulary is wire-safe and its longest entry is the one the
+// worst-case derivation above uses.
+void test_driver_fault_capability_names_are_wire_safe(void) {
+    size_t longest = 0U;
+    for (uint8_t index = 0U;
+         index <= static_cast<uint8_t>(ev::DriverFaultCapability::NotInstalled); ++index) {
+        const char* name = ev::driverFaultCapabilityName(static_cast<ev::DriverFaultCapability>(index));
+        assertWireSafeName(name);
+        longest = longerOf(longest, name);
+    }
+    TEST_ASSERT_EQUAL_UINT32(kLongestDriverFaultCapabilityChars, static_cast<uint32_t>(longest));
+
+    // The level field's two spellings: a one-character boolean, or the absent
+    // marker. Neither widens the record beyond what the bound assumes.
+    TEST_ASSERT_EQUAL_STRING("-", ev::telemetryDriverFaultLevelName(
+                                      ev::DriverFaultCapability::NotInstalled, true));
+    TEST_ASSERT_EQUAL_STRING("0", ev::telemetryDriverFaultLevelName(
+                                      ev::DriverFaultCapability::Installed, false));
+    TEST_ASSERT_EQUAL_STRING("1", ev::telemetryDriverFaultLevelName(
+                                      ev::DriverFaultCapability::Installed, true));
+    TEST_ASSERT_EQUAL_UINT32(kLongestDriverFaultLevelChars,
+                             static_cast<uint32_t>(strlen(ev::kTelemetryMissingField)));
+}
+
 // The prefix's digit and the `ver` field are the same version, and both come from
 // the one constant. A reader that trusts either one learns the same thing.
 void test_prefix_and_version_field_agree(void) {
@@ -375,11 +443,11 @@ void test_prefix_and_version_field_agree(void) {
     ev::TelemetrySample sample;
 
     TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS1,ver=1,", 11U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS2,ver=2,", 11U));
 
     ev::TelemetryEvent event;
     TEST_ASSERT_TRUE(ev::formatTelemetryEvent(event, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE1,ver=1,", 11U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE2,ver=2,", 11U));
 }
 
 // The drain loop hands the formatter whatever the queue popped, so the dispatch
@@ -392,11 +460,11 @@ void test_record_formatting_dispatches_on_kind(void) {
     record.event.tMs = 99U;
 
     TEST_ASSERT_TRUE(ev::formatTelemetryRecord(record, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS1,", 5U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS2,", 5U));
 
     record.kind = ev::TelemetryRecordKind::Event;
     TEST_ASSERT_TRUE(ev::formatTelemetryRecord(record, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE1,", 5U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE2,", 5U));
     TEST_ASSERT_NOT_NULL(strstr(buffer, ",t_ms=99,"));
 }
 
@@ -413,5 +481,7 @@ int main(int, char**) {
     RUN_TEST(test_a_record_that_does_not_fit_emits_nothing);
     RUN_TEST(test_prefix_and_version_field_agree);
     RUN_TEST(test_record_formatting_dispatches_on_kind);
+    RUN_TEST(test_absent_driver_fault_line_is_not_spelled_as_a_healthy_level);
+    RUN_TEST(test_driver_fault_capability_names_are_wire_safe);
     return UNITY_END();
 }

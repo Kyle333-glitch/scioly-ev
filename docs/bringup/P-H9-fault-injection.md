@@ -11,10 +11,12 @@ changing while the motor is still driven** - the case that can make the zero-spe
 gate report a stop the vehicle is not making.
 **Bench instrumentation required:** none beyond the shipped interface for the
 state-machine faults; a current-limited supply and a means of briefly loading the
-driver for the electrical faults; and for the driver-fault part, the **measured
-polarity** from H1B - the firmware claims a `FaultCode::DriverFaultBar` only when
-`kPlannedDriverFaultPolarity` is `Measured`, so an unverified polarity makes this
-part unreadable rather than unsafe.
+driver for the electrical faults. **The driver-fault part has no subject on the
+assembled vehicle (D32):** the external nFAULT signal is not wired
+(`kPlannedDriverFaultCapability` is `NotInstalled`), so the firmware never claims
+a `FaultCode::DriverFaultBar` and there is no line to trip. That step applies only
+to a vehicle that wires the line and has measured its polarity; on this one it is
+recorded as not applicable rather than deferred.
 
 **Inject one fault at a time.** Each trial is a single cause with everything else
 nominal. Record the exact command sequence and the exact response.
@@ -64,7 +66,10 @@ to light up the code.
 
 ## Sub-tests - electrical faults
 
-1. **Driver `nFAULT` trip.** With the current limit deliberately low, provoke a
+1. **Driver `nFAULT` trip - NOT APPLICABLE to the assembled vehicle (D32):** the
+   external nFAULT signal is not installed, so there is no `nfault_low` reading to
+   record and no firmware response to observe. The step below is preserved for a
+   vehicle that wires the line. With the current limit deliberately low, provoke a
    trip (a brief stall or a low ITRIP setting) and record what `nfault_low` does,
    how long it stays low, whether the driver recovers by itself, and what the
    outputs do meanwhile. **The firmware currently produces no `FaultCode` from

@@ -28,20 +28,19 @@ direction, speed or distance result downstream means anything.
   `bench inputs`' `nfault_low` is a level anyone can read. If H1B was skipped or
   inconclusive, stop: a powered test with an uninterpreted fault line is the test
   this protocol's Step 0 exists to make safe.
-- **Whether the firmware is acting on `nFAULT` at all - check this before you rely
-  on it.** The firmware interprets *no* level as a fault while the configured
-  polarity is `Unverified`: `ev::observedDriverFault()` returns `FaultCode::None`
-  for every level, so the level is still sampled, counted (`driverFaultLowCycles`)
-  and reported (`nfault_low` here and in telemetry, `bench inputs`), but **no fault
-  is latched and no automatic stop happens**. H1B having *read* the level is not
-  the same as the firmware *acting* on it; the promotion of
-  `kPlannedDriverFaultPolarity` to `Measured` is what changes that. Read `checks`
-  before the first powered step: `DriverFaultPolarityVerified=1` means a driver
-  fault will latch `FaultCode::DriverFaultBar` and stop the vehicle;
-  `DriverFaultPolarityVerified=0` means the firmware is **not** watching the line.
-  Either way, this protocol's stop authority is the bench supply's **current
-  limit** and the **physical kill switch** - `bench stop` and B2's bounded expiry
-  stop a *bench command*, and neither is a response to a driver fault.
+- **The firmware is not watching an `nFAULT` line, and on this vehicle there is
+  no line to watch.** The external DRV8874 nFAULT signal is **not installed**
+  (`kPlannedDriverFaultCapability` is `NotInstalled`), so `ev::observedDriverFault()`
+  returns `FaultCode::None` unconditionally, `SensorInputs.h` does not sample the
+  pin, and telemetry reports `nfault=NotInstalled` with the level field marked
+  absent (`bench inputs` reports the same). **No fault is latched and no automatic
+  stop happens for a driver fault on this hardware** - the DRV8874's own on-chip
+  protection still acts, but the MCU cannot see it. This protocol's stop authority
+  is therefore the bench supply's **current limit** and the **physical kill
+  switch**; `bench stop` and B2's bounded expiry stop a *bench command*, and
+  neither is a response to a driver fault. (On a vehicle that wires the line, the
+  check reports `DriverFaultConfigurationValid=1` only once the polarity has been
+  measured, and a driver fault then latches `FaultCode::DriverFaultBar`.)
 - A bench build: `pio run -e bench -t upload`. The production image does not
   contain B2 or B3, and the bench image is not the vehicle image - record which
   one was flashed (`bench health` reports `image=bench`).

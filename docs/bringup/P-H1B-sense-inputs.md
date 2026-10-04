@@ -1,5 +1,8 @@
 # P-H1B - Battery, current, nFAULT and trigger verification
 
+> **Part 3 is not applicable to the assembled vehicle (D32):** the external
+> nFAULT signal is not wired. Parts 1, 2 and 4 still apply.
+
 **Primary class:** E (electrical gate).
 **Also contains:** S (how the firmware reports each raw input).
 **Order:** after H0 and H1A.
@@ -10,11 +13,24 @@ bench image); the battery, current and nFAULT raw values are also in the telemet
 sample, so either source may be recorded - but **say which one** in every reading,
 because only the bench image reports the trigger's raw level.
 
-**This protocol also unblocks arming.** The `DriverFaultPolarityVerified`
-configuration check is false for as long as the driver's fault output has an
-unverified polarity, and the arm gate refuses on it. That is deliberate: until
+> **Superseded in part (D32, 2026-10-03).** The assembled vehicle does **not**
+> wire the DRV8874's nFAULT output to the Nano. `vehicleConfig::
+> kPlannedDriverFaultCapability` is `NotInstalled`, the V5 pin map has no pin
+> for the line (`kMotorFaultBar` is `kNoPin`), `SensorInputs.h` does not
+> configure or sample any nFAULT pin, and the capability-aware
+> `DriverFaultConfigurationValid` check treats Part 3's polarity measurement as
+> **not applicable** rather than outstanding - so on this vehicle Part 3 has no
+> subject and cannot unblock anything. The rest of this protocol (Parts 1, 2 and 4) stands unchanged, and
+> the arming semantics below are preserved for a vehicle that *does* wire the
+> line. This note supersedes the protocol text; it does not rewrite it.
+
+**This protocol also unblocks arming.** The `DriverFaultConfigurationValid`
+configuration check is false for as long as a vehicle that *has* the line leaves
+its polarity unverified, and the arm gate refuses on it. That is deliberate: until
 Part 3 has been read, no firmware path may claim a driver fault (`DriverFault.h`),
-so an armed vehicle would be one whose fault input nobody reads.
+so an armed vehicle would be one whose fault input nobody reads. (On the assembled
+vehicle the line is not installed, so the check passes on the capability instead
+of on a measurement - see the note above.)
 
 **Scope.** This protocol establishes what each raw input reads. It deliberately
 does **not** establish the current scaling (there is no load with the motor
@@ -83,8 +99,9 @@ this protocol cannot supply.
 **If it passes:** set `kPlannedDriverFaultPolarity` in `src/VehicleConfig.h` from
 step 3, as a **`Measured`** value with a citation (the two levels recorded here and
 the capture under `data/evidence/`, per the promotion steps in
-`docs/bringup/README.md`). After that, `checks` should report
-`DriverFaultPolarityVerified=1`, and a fault claim on this line becomes a latched
+`docs/bringup/README.md`), **and** set `kPlannedDriverFaultCapability` back to
+`Installed`. After that, `checks` should report
+`DriverFaultConfigurationValid=1`, and a fault claim on this line becomes a latched
 `FaultCode::DriverFaultBar` that stops the vehicle - which P-H9 then observes end
 to end. A value that is `Measured` without a citation fails
 `MeasuredValuesCiteEvidence` and the arm gate still refuses.

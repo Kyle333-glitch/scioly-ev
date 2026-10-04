@@ -233,7 +233,9 @@ def summarize_run(metrics: dict[str, Any]) -> str:
         f"raw inputs:        counts only, no conversion documented - "
         f"battery {raw['battery_counts']['min']} .. {raw['battery_counts']['max']}; "
         f"current {raw['current_counts']['min']} .. {raw['current_counts']['max']}; "
-        f"nfault_low {raw['nfault_low']['sample_count']}"
+        f"nfault {','.join(raw['nfault_capabilities']) or 'none'}, "
+        f"low {raw['nfault_low']['sample_count']}/{raw['nfault_low']['level_read_sample_count']} "
+        f"levels read"
     )
     lines.append(
         f"faults:            latched events {faults['latched_event_count']}; "

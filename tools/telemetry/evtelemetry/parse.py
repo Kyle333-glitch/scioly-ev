@@ -164,7 +164,12 @@ class Sample:
     effort_permille: int
     battery_counts: int
     current_counts: int
-    driver_fault_bar_low: bool
+    # Whether the vehicle has an external nFAULT line at all (`nfault`), and the
+    # level when it does. When the line is not installed the level field carries
+    # the missing marker and parses to ``None``: a log may not spell "no signal"
+    # as a healthy level, so this is deliberately not a bool.
+    driver_fault_capability: str
+    driver_fault_bar_low: Optional[bool]
     fault: str
     authz: str
     check: str
@@ -289,6 +294,19 @@ def _parse_enum(field_name: str, value: str, **where: object) -> str:
             **where,  # type: ignore[arg-type]
         )
     return value
+
+
+def _parse_driver_fault_level(value: str, **where: object) -> Optional[bool]:
+    """The nFAULT level field: a boolean, or absent when the line is not installed.
+
+    The missing marker is accepted *only* as "no line exists" - it is not a third
+    truth value about a wired line. The caller pairs this with `nfault`, and
+    :func:`parse_line` refuses a sample whose two fields disagree, so a log can
+    never claim an installed line with no level or an absent line with one.
+    """
+    if value == schema.MISSING_FIELD:
+        return None
+    return _parse_bool(schema.DRIVER_FAULT_LEVEL_FIELD, value, **where)  # type: ignore[arg-type]
 
 
 def _parse_detail(value: str, **where: object) -> str:
@@ -423,6 +441,27 @@ def parse_line(
     fault = _parse_enum("fault", values["fault"], **where)
 
     if kind == "S":
+        driver_fault_capability = _parse_enum("nfault", values["nfault"], **where)
+        driver_fault_bar_low = _parse_driver_fault_level(values["nfault_low"], **where)
+        # The two fields describe one fact and must agree. A record that says the
+        # line is not installed *and* carries a level is claiming a reading from a
+        # signal it says does not exist; a record that says it is installed with
+        # no level is a gap where the schema says a sample has every field. Both
+        # are refused rather than resolved by preferring one field.
+        if driver_fault_capability == "NotInstalled" and driver_fault_bar_low is not None:
+            raise FieldValueError(
+                "the record says the external nFAULT line is not installed but carries a level",
+                expected=f"'{schema.MISSING_FIELD}' in '{schema.DRIVER_FAULT_LEVEL_FIELD}' "
+                "when 'nfault' is NotInstalled",
+                **where,  # type: ignore[arg-type]
+            )
+        if driver_fault_capability == "Installed" and driver_fault_bar_low is None:
+            raise FieldValueError(
+                "the record says the external nFAULT line is installed but carries no level",
+                expected=f"'0' or '1' in '{schema.DRIVER_FAULT_LEVEL_FIELD}' "
+                "when 'nfault' is Installed",
+                **where,  # type: ignore[arg-type]
+            )
         return Sample(
             line_number=line_number,
             order=order,
@@ -444,7 +483,8 @@ def parse_line(
             ),
             battery_counts=_parse_unsigned("batt_counts", values["batt_counts"], **where),
             current_counts=_parse_unsigned("curr_counts", values["curr_counts"], **where),
-            driver_fault_bar_low=_parse_bool("nfault_low", values["nfault_low"], **where),
+            driver_fault_capability=driver_fault_capability,
+            driver_fault_bar_low=driver_fault_bar_low,
             fault=fault,
             authz=_parse_enum("authz", values["authz"], **where),
             check=_parse_enum("check", values["check"], **where),

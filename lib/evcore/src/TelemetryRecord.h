@@ -4,6 +4,7 @@
 
 #include "CompetitionStateMachine.h"
 #include "ConfigurationChecks.h"
+#include "DriverFault.h"
 #include "Motion.h"
 #include "RunConfig.h"
 #include "SafetyAuthority.h"
@@ -50,14 +51,22 @@ namespace ev {
 // The schema version. Bump it when a field name, a field's meaning or the wire
 // vocabulary changes incompatibly; an analysis script can then refuse a log it
 // does not understand instead of misreading a column.
-constexpr uint8_t kTelemetrySchemaVersion = 1U;
+//
+// Version 2 (D32): the driver-fault check was renamed
+// (`DriverFaultPolarityVerified` -> `DriverFaultConfigurationValid`), a sample
+// gained the `nfault` capability field, and `nfault_low` stopped being a boolean
+// and became `not_installed` when the external line does not exist on the
+// vehicle. All three change what a column means, so a version-1 log must not be
+// read as if it carried them: `nfault_low=0` in a version-1 log meant "the line
+// was sampled and read high", which is a claim this vehicle cannot make.
+constexpr uint8_t kTelemetrySchemaVersion = 2U;
 
 // Record prefixes. The digit is the schema version, so a record is
 // self-describing: a log that was written by a firmware whose schema changed
 // cannot be mistaken for this one, even if the version is the only difference.
 // The `EV` root keeps the convention `AGENTS.md` section 16 illustrates.
-constexpr const char* kTelemetrySamplePrefix = "EVS1";
-constexpr const char* kTelemetryEventPrefix = "EVE1";
+constexpr const char* kTelemetrySamplePrefix = "EVS2";
+constexpr const char* kTelemetryEventPrefix = "EVE2";
 
 // A record that is missing fields carries this marker instead of a number or a
 // name, so a truncation is visible in the bytes rather than inferred from a
@@ -147,6 +156,24 @@ inline const char* telemetryMotorModeName(MotorMode mode) {
             return "DriveReverse";
     }
     return "?";
+}
+
+// The wire spelling of the nFAULT level field's value, which has three states a
+// reader must be able to tell apart.
+//
+// When the external line is not installed, the level field carries the schema's
+// own absent-value marker rather than a boolean. That is deliberate and it is the
+// existing convention for a value that does not exist (`OperatorResponse.h`: an
+// absent value is marked, not omitted). A `0` here would read as "the line was
+// sampled and it read high" - i.e. as a healthy driver - which is exactly the
+// claim this vehicle cannot make, so the marker is written next to
+// `nfault=NotInstalled` and the two together say "there is no signal".
+inline const char* telemetryDriverFaultLevelName(DriverFaultCapability capability,
+                                                bool levelLow) {
+    if (capability == DriverFaultCapability::NotInstalled) {
+        return kTelemetryMissingField;
+    }
+    return levelLow ? "1" : "0";
 }
 
 inline const char* telemetryFaultName(FaultCode code) {
@@ -320,7 +347,13 @@ struct TelemetrySample {
 
     uint16_t batteryCounts = 0U;    // raw ADC counts
     uint16_t currentCounts = 0U;    // raw ADC counts
-    bool driverFaultBarLow = false; // raw nFAULT level, uninterpreted
+    // Whether the external nFAULT line exists on this vehicle at all. Written
+    // next to the level below so a reader never has to infer availability from a
+    // level: on a vehicle whose line is not installed there is no level to read,
+    // and `nfault_low` says `not_installed` rather than reporting a floating pin
+    // as though it were healthy.
+    DriverFaultCapability driverFaultCapability = DriverFaultCapability::Installed;
+    bool driverFaultBarLow = false; // raw nFAULT level, uninterpreted (meaningful only when installed)
 
     FaultCode fault = FaultCode::None;
     // Explicitly the denied default, never the zero value of the enumerator: a

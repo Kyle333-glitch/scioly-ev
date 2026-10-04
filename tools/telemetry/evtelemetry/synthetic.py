@@ -49,6 +49,13 @@ __all__ = [
 
 SYNTHETIC_MARKER = "SYNTHETIC"
 
+# The synthetic fixture vehicle mirrors the assembled one: the external DRV8874
+# nFAULT signal is not wired, so every generated sample reports
+# `nfault=NotInstalled` and writes the level field as the missing marker. This is
+# deliberately not a boolean `False`: a fixture that emitted `nfault_low=0` would
+# train the tooling and its readers to read an unavailable signal as healthy.
+NFault_NOT_INSTALLED = "NotInstalled"
+
 # One header line per entry. Each is a single line on purpose: `generate_lines()`
 # returns lines, and an entry containing an embedded newline would make the
 # in-memory capture differ from the file it is written to.
@@ -198,7 +205,11 @@ class _Tick:
     effort_permille: int
     battery_counts: int
     current_counts: int
-    nfault_low: bool
+    # The capability and the level, mirroring the firmware's two fields. The
+    # fixture's vehicle has no external nFAULT line - the same configuration the
+    # assembled vehicle ships - so `nfault_low` is absent, never a boolean.
+    nfault_capability: str
+    nfault_low: Optional[bool]
     fault: str
     authz: str
     check: str
@@ -324,7 +335,8 @@ def _build_ticks(spec: SyntheticSpec) -> list[_Tick]:
                 effort_permille=effort,
                 battery_counts=max(0, min(65535, int(round(battery)))),
                 current_counts=max(0, min(65535, int(round(current)))),
-                nfault_low=False,
+                nfault_capability=NFault_NOT_INSTALLED,
+                nfault_low=None,
                 fault=fault,
                 authz=_authz_for(armed, fault, motor),
                 check="none",
@@ -459,7 +471,10 @@ def generate_lines(spec: SyntheticSpec) -> list[str]:
                     "effort_permille": str(tick.effort_permille),
                     "batt_counts": str(tick.battery_counts),
                     "curr_counts": str(tick.current_counts),
-                    "nfault_low": "1" if tick.nfault_low else "0",
+                    "nfault": tick.nfault_capability,
+                    "nfault_low": (
+                        "-" if tick.nfault_low is None else ("1" if tick.nfault_low else "0")
+                    ),
                     "fault": tick.fault,
                     "authz": tick.authz,
                     "check": tick.check,

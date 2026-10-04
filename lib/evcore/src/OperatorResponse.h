@@ -68,16 +68,16 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 //   CONFIG  = 170   the widest level name, three 13-character typed values, the
 //                   derived Bottle Start Point (one of three rule values), and
 //                   the longest rule error name
-//   CHECK   = 443   sixteen check names with a value each, three characters of
+//   CHECK   = 445   sixteen check names with a value each, three characters of
 //                   punctuation per name, and a five-digit mask; the widest form
-//                   is a report whose first failure is the longest check name
-//                   (and whose mask is therefore the widest that form can have,
-//                   since every check from that one on fails)
+//                   is a report whose first failure is one of the two longest
+//                   check names (and whose mask is therefore the widest that form
+//                   can have, since every check from that one on fails)
 //   TELEMETRY = 88  the widest stride (ten digits) next to the rate it produces
 //                   (six), and two ten-digit drop counters
 constexpr uint16_t kOperatorStatusLineWorstCaseChars = 357U;
 constexpr uint16_t kOperatorConfigEchoWorstCaseChars = 170U;
-constexpr uint16_t kOperatorChecksLineWorstCaseChars = 443U;
+constexpr uint16_t kOperatorChecksLineWorstCaseChars = 445U;
 constexpr uint16_t kOperatorTelemetryLineWorstCaseChars = 88U;
 
 // The largest response this module can produce. `config set`'s confirmation is

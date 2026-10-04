@@ -90,6 +90,19 @@ class NominalRunTest(unittest.TestCase):
         self.assertGreater(raw["battery_counts"]["max"], 0)
         self.assertEqual(raw["nfault_low"]["sample_count"], 0)
 
+    def test_an_absent_driver_fault_line_is_not_reported_as_a_healthy_level(self) -> None:
+        """The fixture vehicle has no external nFAULT line, like the assembled one.
+
+        The metric must distinguish "no level was read" from "a level was read and
+        it was high": `level_read_sample_count` is zero and the capability says
+        why, so a reader cannot conclude the driver is healthy from `sample_count`
+        being zero.
+        """
+        raw = self.metrics["raw_inputs"]
+        self.assertEqual(raw["nfault_capabilities"], ["NotInstalled"])
+        self.assertEqual(raw["nfault_low"]["level_read_sample_count"], 0)
+        self.assertIn("not a healthy driver", raw["nfault_low"]["note"])
+
     def test_no_fault_and_no_denied_drive_in_the_nominal_run(self) -> None:
         self.assertEqual(self.metrics["faults"]["latched_event_count"], 0)
         self.assertGreater(self.metrics["authorization"]["drive_authorized_sample_count"], 0)

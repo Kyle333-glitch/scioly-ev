@@ -27,10 +27,12 @@ forward direction has been defined mechanically.
 ## Setup, step A0 - wiring continuity, power off
 
 With all power removed, continuity-check every pin named in `src/PinMap.h`
-against the physical harness: encoder A/B, PH, EN, nSLEEP, nFAULT, trigger,
-battery sense, current sense. Record the table (MCU pin -> net -> connector ->
-device pin). A wrong `EN`/`PH` pin is a direction and speed surprise, which is
-why this is first and with power off. Re-check after any rewire.
+against the physical harness: encoder A/B, PH, EN, nSLEEP, trigger. The nFAULT
+line is not wired on this vehicle (D32), and the map's battery/current-sense
+constants are not installed on it either, so there is no harness line to check
+for them. Record the table (MCU pin -> net -> connector -> device pin). A wrong
+`EN`/`PH` pin is a direction and speed surprise, which is why this is first and
+with power off. Re-check after any rewire.
 
 ## Setup, step A1 - idle levels, driver asleep
 

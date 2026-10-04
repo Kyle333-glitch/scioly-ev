@@ -29,6 +29,10 @@ vehicle):
 Reference: TI DRV8874 product datasheet <https://www.ti.com/lit/ds/symlink/drv8874.pdf>
 (the PDF is not stored in this repository).
 
+On this vehicle **PMODE is tied to GND in the stated V5 harness**, so the PH/EN
+control mode is fixed by wiring rather than by firmware: `src/PinMap.h` has no
+PMODE constant, and nothing in the firmware drives or reads that pin.
+
 ## The planned input levels per command
 
 This is the table the firmware implements. The authoritative copy in code is
@@ -95,13 +99,26 @@ Notes:
 * the current-regulation configuration (fixed off-time vs cycle-by-cycle, ITRIP,
   the IMODE pin state) and whether the board has current limiting at all;
 * what `nFAULT` does when it asserts: whether the board pulls it up, when it
-  releases, and whether the driver retries automatically;
-* whether the firmware's `nFAULT` input is even connected to the driver's output.
+  releases, and whether the driver retries automatically.
 
-None of the above is guessed at in firmware. The firmware *does* sample `nFAULT`
-as a raw level, and it does **not** convert that level into a fault identity,
-because no identity can be derived from an unverified pin
-(see `DEVELOPMENT_LOG.md` D13).
+**Resolved for this vehicle (D32, 2026-10-03): the firmware's `nFAULT` input is
+NOT connected to the driver's output.** The assembled vehicle does not wire the
+DRV8874's fault output to the Nano, so there is no line to characterise and no
+external driver fault the MCU can observe. The firmware states that as a
+capability (`vehicleConfig::kPlannedDriverFaultCapability` is `NotInstalled`),
+does not sample the pin, and reports `nfault=NotInstalled` in telemetry rather
+than a level. The DRV8874's **on-chip** overcurrent, thermal and undervoltage
+protections are unaffected and still exist; what is absent is only the MCU's view
+of them. If the line is ever wired, this file's questions become live again and
+`kPlannedDriverFaultCapability` must be set back to `Installed` with the polarity
+measured (H1B) before arming.
+
+None of the above is guessed at in firmware. On a vehicle that wires the line, the
+firmware samples `nFAULT` as a raw level and does **not** convert that level into a
+fault identity, because no identity can be derived from an unverified pin
+(see `DEVELOPMENT_LOG.md` D13). On **this** vehicle the pin is not wired, so the
+firmware does not sample it at all and reports the capability as `NotInstalled`
+(see `DEVELOPMENT_LOG.md` D32).
 
 ## Bench tests that replace the plan with facts
 
@@ -126,11 +143,13 @@ motion. Nothing here is done until a wiring continuity check has been recorded.
    shaft in the vehicle's forward direction, and set
    `vehicleConfig::kPlannedPositiveCommandDirection` / `kPlannedPositiveEffortMode`
    from that one measurement (they are the same fact).
-5. **nFAULT behavior.** With the current limit deliberately low, provoke a trip
-   and record what `nFAULT` does, how long it stays low, whether the driver
-   recovers by itself, and what the outputs do meanwhile. Only after this is
-   recorded may the firmware map the raw level onto a fault identity and a stop
-   policy.
+5. **nFAULT behavior - NOT APPLICABLE to the assembled vehicle (D32).** The
+   signal is not wired, so there is nothing to measure here and no fault identity
+   for the firmware to map. On a vehicle that wires the line: with the current
+   limit deliberately low, provoke a trip and record what `nFAULT` does, how long
+   it stays low, whether the driver recovers by itself, and what the outputs do
+   meanwhile. Only after that is recorded may the firmware map the raw level onto
+   a fault identity and a stop policy.
 6. **PWM behavior.** Record the actual switching frequency at `EN` and the
    smallest duty at which the shaft moves from rest. Both are needed before the
    effort scale means anything.

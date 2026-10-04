@@ -24,8 +24,8 @@ namespace ev {
 //
 //   EVS1,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,pos_m=..,pos_ok=..,
 //     vel_mps=..,vel_ok=..,vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,
-//     batt_counts=..,curr_counts=..,nfault_low=..,fault=..,authz=..,check=..,
-//     drop_s=..,drop_e=..
+//     batt_counts=..,curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,
+//     check=..,drop_s=..,drop_e=..
 //
 //   EVE1,ver=..,t_ms=..,phase=..,armed=..,event=..,detail=..,fault=..,
 //     drop_s=..,drop_e=..
@@ -65,10 +65,11 @@ namespace ev {
 //   cmd(5+15 "RampDownForward") + armed(7+1) + pos_m(7+13) + pos_ok(8+1) +
 //   vel_mps(9+13) + vel_ok(8+1) + vel_cmd_mps(13+13) + rem_m(7+13) +
 //   motor(7+12 "DriveForward") + effort_permille(17+5) + batt_counts(13+5) +
-//   curr_counts(13+5) + nfault_low(12+1) + fault(7+22 "ProvisionalCalibration") +
+//   curr_counts(13+5) + nfault(8+12 "NotInstalled") +
+//   nfault_low(12+1 "-") + fault(7+22 "ProvisionalCalibration") +
 //   authz(7+27 "DeniedUnsafeDirectionChange") +
 //   check(7+29 "StopEvidenceSpansReversalStop") + drop_s(8+10) + drop_e(8+10)
-//   = 418
+//   = 438
 //
 // and an event by
 //
@@ -84,7 +85,12 @@ namespace ev {
 // every vocabulary table and format a record built from its longest entry, so a
 // longer name fails a test instead of quietly producing a line this module would
 // have to drop.
-constexpr uint16_t kTelemetrySampleWorstCaseChars = 418U;
+//
+// `nfault_low` is no longer always a boolean: it carries the schema's
+// absent-value marker when the vehicle has no external nFAULT line (D32), which
+// is why the sample gained the `nfault` availability field next to it. The
+// level's width is unchanged - `-` is one character, like `0` and `1`.
+constexpr uint16_t kTelemetrySampleWorstCaseChars = 438U;
 constexpr uint16_t kTelemetryEventWorstCaseChars = 180U;
 constexpr uint16_t kTelemetryWorstCaseChars =
     kTelemetrySampleWorstCaseChars > kTelemetryEventWorstCaseChars
@@ -150,7 +156,12 @@ inline uint16_t formatTelemetrySample(const TelemetrySample& sample, char* buffe
     text.field("effort_permille").appendUnsigned(sample.effortPermille);
     text.field("batt_counts").appendUnsigned(sample.batteryCounts);
     text.field("curr_counts").appendUnsigned(sample.currentCounts);
-    text.field("nfault_low").appendBool(sample.driverFaultBarLow);
+    // Availability first, then the level: `nfault` says whether the external line
+    // exists at all, and `nfault_low` carries `not_installed` when it does not.
+    // Both are written unconditionally, because a sample writes every field.
+    text.field("nfault").appendText(driverFaultCapabilityName(sample.driverFaultCapability));
+    text.field("nfault_low").appendText(
+        telemetryDriverFaultLevelName(sample.driverFaultCapability, sample.driverFaultBarLow));
     text.field("fault").appendText(telemetryFaultName(sample.fault));
     text.field("authz").appendText(telemetryAuthzOutcomeName(sample.outcome));
     text.field("check").appendText(configurationCheckName(sample.firstFailedCheck));

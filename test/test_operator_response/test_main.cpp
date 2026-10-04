@@ -247,7 +247,7 @@ void test_check_report_names_every_check(void) {
         "CHECK,all=0,count=16,first=ConfigurationValid,mask=65535,"
         "ConfigurationValid=0,CalibrationMeasured=0,MeasuredValuesCiteEvidence=0,"
         "EffortCeilingsAgree=0,CommandPolarityAgrees=0,TickPolarityAgrees=0,"
-        "DriverFaultPolarityVerified=0,StopEvidenceSpansReversalStop=0,"
+        "DriverFaultConfigurationValid=0,StopEvidenceSpansReversalStop=0,"
         "StopEvidenceSpansFinalStop=0,SafetyLimitsValid=0,ControllerConfigValid=0,"
         "EstimatorConfigValid=0,ProfileLimitsValid=0,PhaseConfigValid=0,"
         "ReversalConfigValid=0,RunPolicyUsable=0",
@@ -259,7 +259,7 @@ void test_check_report_names_every_check(void) {
         "CHECK,all=1,count=0,first=none,mask=0,"
         "ConfigurationValid=1,CalibrationMeasured=1,MeasuredValuesCiteEvidence=1,"
         "EffortCeilingsAgree=1,CommandPolarityAgrees=1,TickPolarityAgrees=1,"
-        "DriverFaultPolarityVerified=1,StopEvidenceSpansReversalStop=1,"
+        "DriverFaultConfigurationValid=1,StopEvidenceSpansReversalStop=1,"
         "StopEvidenceSpansFinalStop=1,SafetyLimitsValid=1,ControllerConfigValid=1,"
         "EstimatorConfigValid=1,ProfileLimitsValid=1,PhaseConfigValid=1,"
         "ReversalConfigValid=1,RunPolicyUsable=1",
@@ -394,14 +394,14 @@ void test_version_line_reports_identity_and_schema(void) {
     char buffer[ev::kSerialLineBufferBytes];
 
     TEST_ASSERT_TRUE(ev::formatVersionLine("ev-nano-r4-p7b", buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=ev-nano-r4-p7b,telemetry_schema=1", buffer);
+    TEST_ASSERT_EQUAL_STRING("VERSION,fw=ev-nano-r4-p7b,telemetry_schema=2", buffer);
 
     TEST_ASSERT_TRUE(ev::formatVersionLine(nullptr, buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=-,telemetry_schema=1", buffer);
+    TEST_ASSERT_EQUAL_STRING("VERSION,fw=-,telemetry_schema=2", buffer);
 
     // The schema number is the telemetry schema's, not a second copy of it.
-    TEST_ASSERT_TRUE(strstr(buffer, "telemetry_schema=1") != nullptr);
-    TEST_ASSERT_EQUAL_UINT8(1U, ev::kTelemetrySchemaVersion);
+    TEST_ASSERT_TRUE(strstr(buffer, "telemetry_schema=2") != nullptr);
+    TEST_ASSERT_EQUAL_UINT8(2U, ev::kTelemetrySchemaVersion);
 }
 
 // The declared worst case is the real one, per response family. A table entry
