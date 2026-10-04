@@ -257,6 +257,77 @@ void test_a_stop_request_ramps_the_target_down_without_crossing_zero(void) {
     TEST_ASSERT_TRUE(target.targetVelocityMps() == 0.0);
 }
 
+// D35: the plan's cruise output is Derived, never Measured. A cited Derived
+// cruise shapes a target; an uncited Derived or a placeholder does not, and the
+// plan's inputs still require Measured (a Derived input is refused).
+ev::Sourced<double> derivedCruise(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::Derived,
+                               "derived: planRunTiming() from measured limits and the announced "
+                               "Target Time (rules2027 8.i)");
+}
+
+ev::MotionProfileLimits limitsWithCruise(ev::Sourced<double> cruise) {
+    return ev::MotionProfileLimits(
+        cruise, measured(1.20), measured(0.50), measured(1.00), measured(0.05),
+        ev::Sourced<ev::MotionDirection>(ev::MotionDirection::Forward,
+                                         ev::ValueSource::Measured));
+}
+
+void test_a_computed_cruise_is_derived_never_measured(void) {
+    const ev::Sourced<double> cruise = derivedCruise(0.50);
+    TEST_ASSERT_FALSE(cruise.isMeasured());
+    TEST_ASSERT_TRUE(cruise.isDerived());
+    TEST_ASSERT_TRUE(cruise.citesEvidence());
+    TEST_ASSERT_TRUE(ev::cruiseProvenanceIsEstablished(cruise));
+
+    // Without a citation it is refused exactly like a placeholder.
+    const ev::Sourced<double> uncited(0.50, ev::ValueSource::Derived);
+    TEST_ASSERT_FALSE(uncited.citesEvidence());
+    TEST_ASSERT_FALSE(ev::cruiseProvenanceIsEstablished(uncited));
+    TEST_ASSERT_FALSE(provisional(0.50).isDerived());
+    TEST_ASSERT_FALSE(ev::cruiseProvenanceIsEstablished(provisional(0.50)));
+
+    // A genuinely measured cruise still passes, so the old path is not narrowed.
+    TEST_ASSERT_TRUE(ev::cruiseProvenanceIsEstablished(measured(0.50)));
+}
+
+void test_profile_limits_accept_a_cited_derived_cruise_only(void) {
+    TEST_ASSERT_TRUE(ev::validateMotionProfileLimits(limitsWithCruise(derivedCruise(0.50))).ok);
+
+    // The profile really shapes from it: a travel request produces a target.
+    ev::MotionProfileTarget target;
+    const ev::MotionProfileCommand shaped = ev::nextTargetVelocity(
+        target.inputsFor(ev::MotionProfileIntent::Travel, ev::MotionDirection::Forward, 5.0, 20U),
+        limitsWithCruise(derivedCruise(0.50)));
+    TEST_ASSERT_TRUE(shaped.status == ev::MotionProfileStatus::Ok);
+    TEST_ASSERT_TRUE(shaped.targetVelocityMps > 0.0);
+
+    // Uncited Derived and Provisional cruises are refused.
+    TEST_ASSERT_FALSE(ev::validateMotionProfileLimits(
+                          limitsWithCruise(ev::Sourced<double>(0.50, ev::ValueSource::Derived)))
+                          .ok);
+    TEST_ASSERT_FALSE(
+        ev::validateMotionProfileLimits(limitsWithCruise(provisional(0.50))).ok);
+
+    // Other limits remain Measured-only: a Derived brake offset is not accepted.
+    const ev::MotionProfileLimits derivedOffset(
+        measured(0.50), measured(1.20), measured(0.50), measured(1.00),
+        ev::Sourced<double>(0.05, ev::ValueSource::Derived,
+                            "derived: not a real derivation"),
+        ev::Sourced<ev::MotionDirection>(ev::MotionDirection::Forward,
+                                         ev::ValueSource::Measured));
+    TEST_ASSERT_FALSE(ev::validateMotionProfileLimits(derivedOffset).ok);
+}
+
+void test_plan_inputs_still_require_measured_limits(void) {
+    // A Derived cruise ceiling is not a measured input: the plan refuses it.
+    const ev::RunTimingPlanInputs derivedCeiling(
+        9.50, announced(20.0), derivedCruise(1.20), measured(1.20), measured(0.50),
+        measured(1.00), measured(0.10), measured(0.20), measured(30.0));
+    expectRefused(ev::RunTimingPlanStatus::LimitsAreNotUsable,
+                  ev::planRunTiming(derivedCeiling));
+}
+
 // The delay is a per-announcement value bounded by the policy: a plan that waits
 // longer than the policy permits is refused before anything is sequenced.
 void test_the_announced_delay_is_bounded_by_the_policy(void) {
@@ -320,6 +391,9 @@ int main(int, char**) {
     RUN_TEST(test_a_ramp_down_is_classified_apart_from_a_stop);
     RUN_TEST(test_a_stop_request_ramps_the_target_down_without_crossing_zero);
     RUN_TEST(test_the_announced_delay_is_bounded_by_the_policy);
+    RUN_TEST(test_a_computed_cruise_is_derived_never_measured);
+    RUN_TEST(test_profile_limits_accept_a_cited_derived_cruise_only);
+    RUN_TEST(test_plan_inputs_still_require_measured_limits);
 
     return UNITY_END();
 }

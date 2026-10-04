@@ -42,7 +42,9 @@ namespace ev {
 //   brake offset, the safety velocity ceiling and the sign polarity all arrive
 //   as `Sourced<T>` values. Anything not `ValueSource::Measured` produces a
 //   zero target rather than a shaped one - no measured limit exists yet, so no
-//   shaping value is written down here.
+//   shaping value is written down here - with one exception: the cruise may be
+//   a cited `ValueSource::Derived` plan output (`cruiseProvenanceIsEstablished()`),
+//   because the run's timing plan computes it from measured inputs (D35).
 // * It has no friction, motor, driver or battery model. The only physics in it
 //   are the kinematic relations between distance, speed, acceleration and time,
 //   all evaluated with caller-supplied limits.
@@ -657,7 +659,7 @@ struct DirectionalMotionProfileLimits {
 
 enum class MotionProfileLimitsError : uint8_t {
     None = 0,
-    ValuesAreNotMeasured,
+    ValuesAreNotMeasured,  // cruise not Measured/cited-Derived, or another limit not Measured
     NonFiniteValue,
     NonPositiveLimit,               // cruise, ceiling, accel or decel not > 0
     NegativeBrakeOffset,
@@ -670,9 +672,23 @@ struct MotionProfileLimitsValidation {
     MotionProfileLimitsError error;
 };
 
+// True when a cruise may shape a target: measured on this vehicle, or computed
+// by the run's timing plan from measured inputs and cited as such
+// (`ValueSource::Derived` with evidence). Mirrors
+// `dwellProvenanceIsEstablished()` and `optionalDelayProvenanceIsEstablished()`:
+// a computed number is never relabelled Measured, and an uncited Derived value
+// is refused exactly like a placeholder. All other limits remain Measured-only.
+inline bool cruiseProvenanceIsEstablished(const Sourced<double>& cruise) {
+    if (cruise.isMeasured()) {
+        return true;
+    }
+    return cruise.source == ValueSource::Derived && cruise.citesEvidence();
+}
+
 inline MotionProfileLimitsValidation validateMotionProfileLimits(
     const MotionProfileLimits& limits) {
-    if (!limits.cruiseVelocityMps.isMeasured() || !limits.velocityCeilingMps.isMeasured() ||
+    if (!cruiseProvenanceIsEstablished(limits.cruiseVelocityMps) ||
+        !limits.velocityCeilingMps.isMeasured() ||
         !limits.accelLimitMps2.isMeasured() || !limits.decelLimitMps2.isMeasured() ||
         !limits.brakeOffsetM.isMeasured() || !limits.positiveCommandDirection.isMeasured()) {
         return {false, MotionProfileLimitsError::ValuesAreNotMeasured};
