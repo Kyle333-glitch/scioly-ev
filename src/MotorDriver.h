@@ -259,5 +259,29 @@ inline void applyBench(const ev::BenchDriveOutput& output) {
     writeLevels(ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille()));
 }
 
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+// ---------------------------------------------------------------------------
+// TEMPORARY - H1A electrical-gate diagnostic (remove after the H1A evidence)
+// ---------------------------------------------------------------------------
+//
+// Holds the plan's Brake level combination - the driver awake (nSLEEP high)
+// with EN at zero duty - so the H1A session can measure PH/EN/nSLEEP with a
+// meter while the motor is disconnected. It goes through `writeLevels` like
+// every other write, so the PH rule above still holds, and its levels come from
+// the same planned table (`ev::drv8874InputsForRequest`) as every authorized
+// command, so measuring this measures the plan's Brake mapping.
+//
+// It commands no effort and no direction: EN is at zero duty, so it cannot
+// drive. It is compiled only into `env:bench` (the build define), the console
+// verb that reaches it lives in `src/bench/`, and `src/main.cpp` refuses to
+// compile the vehicle image if the define ever leaks.
+//
+// It is not a shipping capability. The evidence it exists for is the H1A
+// capture, and it is removed once that is recorded.
+inline void applyH1aAwakeEnLow() {
+    writeLevels(ev::drv8874InputsForRequest(ev::MotorMode::Brake, 0U));
+}
+#endif  // EV_BENCH_H1A_DIAGNOSTIC
+
 }  // namespace motorDriver
 }  // namespace evhw

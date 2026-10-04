@@ -18,6 +18,23 @@ static_assert(!evhw::kWatchdogEnablementRequested,
               "the production image must not request watchdog enablement; build "
               "env:bench-watchdog for the H0W qualification (P-H0W)");
 
+// The H1A electrical-gate diagnostic (`bench h1a-brake`) is a temporary,
+// bench-only instrument: it can force the driver's awake-EN-low combination,
+// which is a state the production run path reaches only through its own stop
+// logic. It must never reach the vehicle image, and this guard makes the build
+// say so instead of a comment.
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+#error "EV_BENCH_H1A_DIAGNOSTIC is bench-only (H1A) and must never be defined for the vehicle image"
+#endif
+
+// The tournament-only emergency image (`env:emergency`, removed in D35) must
+// never leak into the vehicle image. It was a standalone entry point with its
+// own build filter, and it is recoverable from the D35 preservation snapshot;
+// no define may turn this entry point into it.
+#if defined(EV_EMERGENCY_IMAGE) || defined(DEV_EMERGENCY_IMAGE)
+#error "emergency image defines are removed (D35) and must never be defined for the vehicle image"
+#endif
+
 // ---------------------------------------------------------------------------
 // Firmware entry point: the cooperative shell
 // ---------------------------------------------------------------------------

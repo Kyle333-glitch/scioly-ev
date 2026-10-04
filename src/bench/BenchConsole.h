@@ -98,6 +98,8 @@ namespace benchConfig {
 
 // The highest effort any bench command may ask for, permille of full scale. Small
 // on purpose: the first powered test is the first time the drivetrain moves.
+// D35: reverted the temporary 300-permille tournament override back to 150; a
+// higher ceiling needs a recorded reason, not a bring-up override.
 constexpr uint16_t kMaxEffortPermille = 150U;
 
 // The longest a single bench command may last, milliseconds.
@@ -113,6 +115,14 @@ constexpr uint32_t kStallWindowMs = 1000U;
 // Commands allowed per arm. Not a rate limit: a bound on how long a confused
 // console can keep asking for effort without a fresh, deliberate arm.
 constexpr uint32_t kMaxCommandsPerArm = 8U;
+
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+// TEMPORARY - the ceiling for the H1A awake-EN-low hold (`bench h1a-brake`).
+// Longer than the drive ceiling on purpose: the hold is static - no effort, EN
+// at zero duty - and it exists so a meter can be read without chasing a 500 ms
+// window. It still expires on its own, and `bench stop` ends it.
+constexpr uint32_t kH1aHoldMaxMs = 30000U;
+#endif
 
 // The capacity every readout in this console is composed against.
 //
@@ -198,6 +208,26 @@ inline uint32_t& lostResponses() {
     static uint32_t count = 0U;
     return count;
 }
+
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+// TEMPORARY - H1A electrical-gate diagnostic (remove after the H1A evidence).
+// The state of the bounded awake-EN-low hold; what it is and why it exists is
+// documented at `applyH1aAwakeHold()` below.
+inline bool& h1aHoldActive() {
+    static bool active = false;
+    return active;
+}
+
+inline uint32_t& h1aHoldExpiresAtMs() {
+    static uint32_t expiresAtMs = 0U;
+    return expiresAtMs;
+}
+
+inline uint32_t& h1aHoldsIssued() {
+    static uint32_t count = 0U;
+    return count;
+}
+#endif
 
 }  // namespace detail
 
@@ -564,6 +594,12 @@ inline void helpLine() {
     text.appendText("BENCH,help=1");
     text.field("verbs")
         .appendText("health drive arm stop reset resetsrc wdt ticks inputs pins");
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    // The temporary H1A verb names itself here so a session capture cannot miss
+    // that this image contains a non-shipping instrument.
+    text.field("h1a_verbs")
+        .appendText("h1a-brake (temporary H1A electrical gate, removed after H1A)");
+#endif
     respond(text);
 }
 
@@ -592,6 +628,16 @@ inline void applyDrive(const ev::BenchTokens& tokens, uint32_t nowMs) {
         return;
     }
 
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    // At most one bench instrument may hold the driver. The diagnostic refuses a
+    // drive while it holds; this refuses a drive while the hold is applied.
+    if (detail::h1aHoldActive()) {
+        ++detail::refusedLines();
+        refuseLine("H1AHoldInProgress");
+        return;
+    }
+#endif
+
     const ev::BenchCommandRefusal refusal =
         detail::drive().command(nowMs, request.mode, request.permille, request.durationMs);
     if (refusal != ev::BenchCommandRefusal::None) {
@@ -606,6 +652,13 @@ inline void applyDrive(const ev::BenchTokens& tokens, uint32_t nowMs) {
 // `bench stop` - the abort. De-energizes now and latches until `bench reset`.
 inline void applyStop() {
     detail::drive().abort();
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    // `bench stop` means stopped, including the temporary H1A hold.
+    if (detail::h1aHoldActive()) {
+        detail::h1aHoldActive() = false;
+        motorDriver::failSafe();
+    }
+#endif
     ackLine("bench_stop");
     driveLine();
 }
@@ -614,9 +667,97 @@ inline void applyStop() {
 // disarmed: re-arming is a separate decision.
 inline void applyReset() {
     detail::drive().reset();
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    if (detail::h1aHoldActive()) {
+        detail::h1aHoldActive() = false;
+        motorDriver::failSafe();
+    }
+#endif
     ackLine("bench_reset");
     driveLine();
 }
+
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+// ---------------------------------------------------------------------------
+// TEMPORARY - the H1A awake-EN-low hold (`bench h1a-brake [ms]`)
+// ---------------------------------------------------------------------------
+//
+// P-H1A needs the driver's awake-EN-low combination (the plan's `Brake` levels)
+// held still while the operator measures PH/EN/nSLEEP with a meter. The bounded
+// bench drive cannot produce it - `ev::BenchDrive` accepts only a nonzero-effort
+// fwd/rev command - and the production run path cannot be armed, so this verb
+// exists for that measurement only. It is compiled into `env:bench` alone and
+// is removed once H1A is recorded.
+//
+// It is bounded (its own expiry, checked on the pass clock), deliberate
+// (`bench arm` is required, exactly as for the drive), screened by the same
+// `ev::benchApplyVerdict()` - a latched fault, a violated tick order, an armed
+// run or a run under way each end it - and it commands no effort: nSLEEP high,
+// PH low, EN at zero duty. The physical kill switch is still the primary stop,
+// and the motor must be disconnected for the H1A measurement it exists for.
+//
+// `bench h1a-brake` with no argument prints the hold's state instead.
+inline void h1aHoldLine(uint32_t nowMs) {
+    const int32_t remaining = static_cast<int32_t>(detail::h1aHoldExpiresAtMs() - nowMs);
+    ev::BoundedText text(serialTransport::port().workingBuffer(),
+                         benchConfig::kReadoutLineCapacity);
+    text.appendText("BENCH,h1a=1");
+    text.field("awake_en_low").appendBool(detail::h1aHoldActive());
+    text.field("remaining_ms")
+        .appendUnsigned(remaining > 0 ? static_cast<uint32_t>(remaining) : 0U);
+    text.field("issued").appendUnsigned(detail::h1aHoldsIssued());
+    text.field("ceiling_ms").appendUnsigned(benchConfig::kH1aHoldMaxMs);
+    respond(text);
+}
+
+inline void applyH1aAwakeHold(const ev::BenchTokens& tokens, uint32_t nowMs) {
+    if (tokens.count == 2U) {
+        h1aHoldLine(nowMs);
+        return;
+    }
+    if (tokens.count != 3U) {
+        ++detail::refusedLines();
+        refuseLine("Usage: bench h1a-brake <ms>");
+        return;
+    }
+    uint32_t durationMs = 0U;
+    if (!ev::parseUnsignedDecimal(tokens.token(2), tokens.tokenLength(2), durationMs)) {
+        ++detail::refusedLines();
+        refuseLine("DurationNotADecimal");
+        return;
+    }
+    if (durationMs == 0U) {
+        ++detail::refusedLines();
+        refuseLine("DurationZero");
+        return;
+    }
+    if (durationMs > benchConfig::kH1aHoldMaxMs) {
+        ++detail::refusedLines();
+        refuseLine("DurationAboveCeiling");
+        return;
+    }
+    if (detail::h1aHoldActive()) {
+        ++detail::refusedLines();
+        refuseLine("H1AHoldInProgress");
+        return;
+    }
+    if (detail::drive().output().isDriving()) {
+        ++detail::refusedLines();
+        refuseLine("H1ADriveActive");
+        return;
+    }
+    if (detail::drive().state() != ev::BenchDriveState::Armed) {
+        ++detail::refusedLines();
+        refuseLine("H1ANotArmed");
+        return;
+    }
+    detail::h1aHoldActive() = true;
+    detail::h1aHoldExpiresAtMs() = nowMs + durationMs;
+    ++detail::h1aHoldsIssued();
+    ++detail::acceptedLines();
+    h1aHoldLine(nowMs);
+}
+#endif  // EV_BENCH_H1A_DIAGNOSTIC
 
 // One complete line, dispatched. A line that is not a bench verb is handed back to
 // the production operator interface, so `status`, `checks`, `help` and the
@@ -628,6 +769,24 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
     if (tokens.count == 0U) {
         return;  // an empty line answers nothing, exactly as the operator path does
     }
+
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    // The temporary H1A verb is recognized here, before `ev::benchVerbFor()`: it
+    // stays out of `lib/` (and therefore out of the table both images share) on
+    // purpose - it is not a bench capability, it is one measurement's instrument.
+    // An over-long line is still refused before anything acts on it.
+    if (tokens.count >= 2U &&
+        ev::benchTokenEquals(tokens.token(0), tokens.tokenLength(0), "bench") &&
+        ev::benchTokenEquals(tokens.token(1), tokens.tokenLength(1), "h1a-brake")) {
+        if (tokens.overflow) {
+            ++detail::refusedLines();
+            refuseLine("TooManyTokens");
+            return;
+        }
+        applyH1aAwakeHold(tokens, nowMs);
+        return;
+    }
+#endif
 
     const ev::BenchVerb verb = ev::benchVerbFor(tokens);
     if (verb == ev::BenchVerb::None) {
@@ -768,18 +927,44 @@ inline void beginPass(uint32_t nowMs, const VehicleRuntime& runtime) {
         driveLine();
     }
 
+    bool benchOutputActive = instrument.output().isDriving();
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    // The temporary H1A hold is the bench's other output. It expires here, on
+    // the pass clock, so it can never outlive its own bound; at most one of the
+    // two instruments is active at a time (`applyDrive`/`applyH1aAwakeHold`).
+    if (detail::h1aHoldActive()) {
+        if (static_cast<int32_t>(nowMs - detail::h1aHoldExpiresAtMs()) >= 0) {
+            detail::h1aHoldActive() = false;
+            h1aHoldLine(nowMs);
+        } else if (!instrument.output().isDriving()) {
+            benchOutputActive = true;
+        }
+    }
+#endif
+
     const ev::BenchApplyVerdict verdict =
-        ev::benchApplyVerdict(instrument.output().isDriving(), runtime.armed(),
-                              runtime.faultLatched(), runtime.runUnderway(),
-                              runtime.orderViolationDetected());
+        ev::benchApplyVerdict(benchOutputActive, runtime.armed(), runtime.faultLatched(),
+                              runtime.runUnderway(), runtime.orderViolationDetected());
 
     PassArbitration arbitration;
     arbitration.refusal = verdict.refusal;
     arbitration.ownsMotor = verdict.mayApply;
-    if (instrument.output().isDriving() && !verdict.mayApply) {
-        instrument.abort();
-        arbitration.ownsMotor = false;
-        refuseLine(ev::benchApplyRefusalName(verdict.refusal));
+    if (!verdict.mayApply) {
+        if (instrument.output().isDriving()) {
+            instrument.abort();
+            arbitration.ownsMotor = false;
+            refuseLine(ev::benchApplyRefusalName(verdict.refusal));
+        }
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+        else if (detail::h1aHoldActive()) {
+            // Something outranks the diagnostic (a latched fault, a violated
+            // tick order, an armed run or a run under way): the hold ends and
+            // the pins are left to the tick's own write this pass.
+            detail::h1aHoldActive() = false;
+            refuseLine(ev::benchApplyRefusalName(verdict.refusal));
+            h1aHoldLine(nowMs);
+        }
+#endif
     }
 
     motorDriver::setMotorPinsOwned(arbitration.ownsMotor);
@@ -810,11 +995,24 @@ inline void applyOutput(const PassOutcome& outcome) {
             instrument.abort();
             refuseLine("OrderViolation");
         }
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+        if (detail::h1aHoldActive()) {
+            detail::h1aHoldActive() = false;
+            refuseLine("OrderViolation");
+        }
+#endif
         motorDriver::setMotorPinsOwned(false);
         return;
     }
 
     if (arbitration.ownsMotor) {
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+        if (detail::h1aHoldActive()) {
+            motorDriver::applyH1aAwakeEnLow();
+            motorDriver::setMotorPinsOwned(false);
+            return;
+        }
+#endif
         motorDriver::applyBench(instrument.output());
     }
     motorDriver::setMotorPinsOwned(false);
