@@ -5623,3 +5623,175 @@ distance, minimum cruise, bottle lead/advance/margin, polarity facts. Hence
 physical steps per `P-H14`: continuity/pin map, then command polarity. Structurally
 clean and build/test clean; **not yet competition-ready** pending measured
 calibration.
+
+## D36 - 2026-10-04 - Documentation - Reconcile post-tournament physical bring-up evidence
+
+**Trigger.** The final report on the clean integration (`integration/d35-clean`)
+was read against documentation still written for the pre-hardware era, and three
+present-tense claims were false as of 2026-10-02:
+
+- `docs/limitations.md` - "**no motor supply was ever connected**, so the board has
+  never moved anything under firmware control";
+- `VERIFIED_STATE.md` - "No motor, motor driver, encoder, battery or drivetrain
+  hardware was connected or tested, so every hardware fact below is still
+  UNVERIFIED";
+- `README.md` - "The vehicle still has no measured behavior of its own: no motor,
+  encoder, sensor, trigger, battery or bottle mechanism behavior has been observed
+  on hardware".
+
+This entry records what the 2026-10-02 bring-up and the 2026-10-02/03 tournament
+actually established. The accompanying edits correct **only** factual status
+claims: no firmware source, no test, no configuration constant and no provenance
+gate was touched.
+
+**Observed informally - physically witnessed, but NOT evidence (confirmed by the
+team after the event).** Everything below is recorded so the fact of observation is
+not lost; none of it changes a row.
+
+1. The physical harness was rewired to the stated V5 assignment: encoder A D2,
+   encoder B D4, DRV PH D8, DRV EN/PWM D9, DRV nSLEEP D10, trigger D12, PMODE tied
+   to GND, nFAULT not installed.
+2. The motor hummed and spun under firmware control at low effort - the first
+   motion of this vehicle under firmware control.
+3. Forward and reverse motor commands were both physically exercised.
+4. Encoder ticks changed during actual wheel/motor movement: forward produced
+   increasing ticks, reverse produced decreasing ticks.
+5. The physical pencil trigger worked.
+6. The tournament-only emergency image (its own entry point and build
+   environment, present in the post-tournament tree and deleted in D35) was
+   flashed and **physically drove the vehicle autonomously forward and backward
+   at the tournament**.
+
+**Why none of this can mark a row VERIFIED - the rule, quoted.**
+`VERIFIED_STATE.md` `## The rule`: "A hardware or physical fact may be marked
+**VERIFIED** only when it is supported by direct **on-target or physical
+evidence** that has been recorded (command or test procedure plus raw
+observation/data), and the promotion is logged in `DEVELOPMENT_LOG.md`." The same
+file excludes, verbatim, "**recollection or verbal description**", sets
+"**Default status is UNVERIFIED**", and its `## How to promote a fact` step 1
+says the protocols "change no row until they pass", step 2 says "Record the raw
+measurement or observation, not just a conclusion", and step 3 requires an
+"evidence pointer". For 2026-10-02/03 there is no capture, no pre-registration,
+no `data/evidence/` directory and no protocol run to an acceptance rule, so the
+raw observation/data does not exist, no pointer can be carried, and what survives
+is the team's account - the excluded category. Being logged here (requirement 3)
+does not satisfy requirements 1 and 2. **Decision: rows #3 and #4 stay
+UNVERIFIED**, and the observations are recorded as OBSERVED / informal physical
+observations. `AGENTS.md` line 186 ("Never report hardware behavior as verified
+unless it was actually observed or measured") states a necessary condition only;
+`VERIFIED_STATE.md`'s rule is the stricter, governing one.
+
+**Provisional - observed, but not a formal calibration.**
+
+- A manual forward rollout counted **~1494 encoder ticks over an *intended* ~2.0 m**,
+  giving **~1.339 mm/tick** as a rough figure. The travel was intended, not
+  measured; the push was not repeated; no spread exists. It promotes nothing.
+- Low effort was enough to move the vehicle; the minimum useful effort was never
+  measured or recorded.
+- Speed, braking and reversal calibration remain untouched guesses.
+
+**Still unverified - all twelve rows, including #3 and #4.** #1 continuity of every
+harness connection (no test performed); #2 the driver's level-to-output truth table;
+#3 motor polarity (sign witnessed informally, uncaptured); #4 encoder direction
+sign (sign witnessed informally, uncaptured); #5 encoder signal quality; #6 rollout
+as a calibration; #7 sensor scaling (battery and current sensing are not
+installed); #8 control gains; #9 braking; #10 wheel slip; #11 bottle interaction;
+#12 dead-wheel question. Also still unverified: formal mm/tick calibration, Target
+Time accuracy, repeatability, any loaded behavior of the production run state
+machine, and nFAULT external telemetry (the line is not installed).
+
+**Row changes (`VERIFIED_STATE.md`): none.** #3 and #4 stay **UNVERIFIED**; their
+Evidence cells now carry the observation labelled "**OBSERVED, informal - not
+evidence under 'The rule'**", and their "What would verify it" cells keep the
+original acceptance methods (H3 for #3, H2 hand-rotation for #4). #1, #2, #5 and
+#6 gain the same informal-observation notes and all stay UNVERIFIED (#6 records
+the ~1494-tick / intended-~2.0 m push as provisional). The availability paragraph
+now says what was seen is "observed, not verified" and that no row was promoted. A
+new section, "Informal physical observations, 2026-10-02 bring-up and tournament
+(D36) - OBSERVED, NOT VERIFIED", opens with "This section promotes nothing" and
+closes with "All twelve hardware rows remain UNVERIFIED". Nothing was promoted to
+`Measured`: every `Sourced` value in `src/VehicleConfig.h` is unchanged and still
+`Provisional`, so `arm` still refuses.
+
+**Documentation corrected (status claims only).**
+
+- `VERIFIED_STATE.md` - the availability paragraph (D31's "board gone" reframed as
+  a period fact and a *current* availability constraint, and what was seen there
+  labelled "observed, not verified"); evidence cells for rows #1-#6 annotated as
+  informal observations with **no status change**; the new
+  "OBSERVED, NOT VERIFIED" observations section; the emergency-image note on the
+  "one writer" row; and one false absolute ("no bench instrument has been run" -
+  the same file records `bench pins`, `bench resetsrc` and `bench wdt` as
+  on-target readings from H0/H0W). The `#1-#3` cross-references were checked and
+  left as written: with #3 still UNVERIFIED they are correct.
+- `docs/limitations.md` - section A (all twelve rows stated UNVERIFIED, the
+  observations labelled informal, and the false "never moved" sentence superseded),
+  the board-availability paragraph (the owed stages are owed because they were not
+  done, not because they are unperformable), the encoder entry (direction observed
+  informally; row #4 UNVERIFIED; counts/rev and gearing still open), a new bullet
+  on the tournament's emergency image, section F (the provisional rollout; the
+  polarity encodings observed but not evidence and not a promotion; the
+  production-path scope of the shaping/braking/reversal entry), the H0W Step 8
+  entry ("cannot be run" / "owed and unperformable" -> owed and blocked on a
+  loaded run path), and section G (H0/H0W scope, the image-identity "cannot be
+  reflashed" wording, and the missing evidence directory with "not enough to mark
+  any row VERIFIED").
+- `README.md` - the `docs/bringup/` line, the "Next" stage entry (observation, not
+  evidence; no row moved), "It cannot move" -> the *production image* cannot be
+  commanded to move, and the current-state paragraph ("every hardware row in
+  `VERIFIED_STATE.md` still reads UNVERIFIED").
+- `SOFTWARE_ARCHITECTURE.md` - sections 10 and 11: a note added in each that the
+  uncaptured 2026-10-02 observation is OBSERVED-not-verified and changes nothing.
+  The original status wording (encoder direction and polarity facts UNVERIFIED,
+  `#1-#3` for the driver levels, no `lib/` assumption, no `Measured` without a
+  citation, the arm refusal) was restored byte-for-byte and stands unchanged.
+- `docs/bringup/README.md` - "once the vehicle hardware exists" and "when the
+  board arrives" wording, a note beside the H0/H0W paragraph recording the
+  2026-10-02 informal entry and that all twelve rows stay UNVERIFIED, and a note
+  under the coverage table that #3/#4 carry only an uncaptured observation until
+  H3/H2 record one.
+- `docs/hardware/motor-driver-drv8874.md` - #3 stated as having only an uncaptured
+  observation and **staying UNVERIFIED**; the `DriveForward`/`DriveReverse` rows
+  keep "**Unverified.**" and add the observation as an observation, not a level
+  measurement.
+
+**Unchanged deliberately.** `data/prereg/` (a pre-registration is fixed before
+its measurement), `data/evidence/` (the D31 and H0/H0W records were true of those
+sessions), the protocol files under `docs/bringup/` (procedures, not status),
+`AGENTS.md`, and all firmware source and tests. D31's and D35's in-log sentences
+stay as history; this entry supersedes them only where they were read as claims
+about hardware history: D31's "the board is gone ... unperformable with the
+equipment the project has" (out of hand then, in hand again on 2026-10-02), D35's
+"(no hardware, board gone)" parenthetical as a statement about hardware, and
+D35's "First physical steps per `P-H14`: continuity/pin map, then command
+polarity" (command polarity has only an informal observation, still UNVERIFIED;
+continuity does not even have that). D35's
+own host/build verification stands.
+
+**Process note on this entry.** This entry was drafted, then corrected within the
+same uncommitted task, before any commit: the draft first recorded rows #3 and #4
+as promoted to VERIFIED, which the quoted rule does not allow. Amending an
+uncommitted draft is not a rewrite of history; had it been committed, the
+correction would have been appended as a new entry instead.
+
+**Emergency image, stated once.** It was tournament-only, it **did** physically
+operate the vehicle forward and backward at the tournament, and D35 removed it
+from the active tree (source, test, `[env:emergency]`). It is recoverable only
+from `recovery/d32-d34-v5-snapshot`, and `src/main.cpp` refuses to compile its
+define into the vehicle image. It is not the production run state machine, and
+no telemetry, run record or result from it exists in this repository.
+
+**Evidence limit, stated once.** There is **no** `data/evidence/` directory, no
+pre-registration and no serial capture for 2026-10-02/03 - there is no raw record
+to re-read. Everything above is a single un-instrumented sighting, recorded from
+the team's confirmed account. It is enough to record that it was seen (and so to
+stop the documentation asserting the opposite as fact); it is **not enough to mark
+any row VERIFIED**, not a promotion of any calibration, not a distribution, and
+not a measurement. The protocols that would produce evidence (H1A, H1B, H2, H4,
+H0W Step 8, H5+) remain owed, and until one runs and is recorded, every hardware
+row stays UNVERIFIED.
+
+**Verification (documentation only).** `git diff --check` clean; `git status`
+shows only `.md` files; no code file changed, so no rebuild was run. The tree
+intentionally no longer equals `cleanup/d35-post-tournament`'s tree - it differs
+by exactly these documentation files. Nothing committed, merged or pushed.

@@ -189,7 +189,9 @@ depend on facts tracked in `VERIFIED_STATE.md`:
   cited as a driver fact; section 15 fixes the ownership rule;
 - encoder interpretation beyond the decoding scheme fixed in section 11:
   counts per revolution, gearing, and which count direction is physical forward
-  travel;
+  travel (an uncaptured observation of the direction exists from 2026-10-02,
+  recorded as OBSERVED-not-verified in `VERIFIED_STATE.md` D36; the fact stays
+  UNVERIFIED, so it stays on this list);
 - the effective distance per encoder tick (rollout). The conversion *arithmetic*
   is fixed in section 12, but no ticks-to-metres factor may be written down
   until a rollout measurement exists;
@@ -234,7 +236,9 @@ that the value is an unverified, configurable placeholder.
   `00 -> 10 -> 11 -> 01 -> 00` counts as `Positive`. This is a software
   convention, not a physical fact. Nothing in `lib/` may assume which convention
   corresponds to forward travel; that mapping is UNVERIFIED
-  (`VERIFIED_STATE.md` #4).
+  (`VERIFIED_STATE.md` #4). The uncaptured 2026-10-02 observation (D36) changes
+  nothing here: without a recorded procedure and raw data it is not evidence, #4
+  stays UNVERIFIED, and this rule stands as written.
 - The module reports raw encoder ticks only, as `int32_t` to match
   `SensorSnapshot::motorEncoderTicks`. Counts per revolution, gearing, wheel
   geometry and any ticks-to-displacement conversion are forbidden in this module

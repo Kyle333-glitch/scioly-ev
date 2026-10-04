@@ -51,7 +51,8 @@ measurements override assumptions.
   pending hardware fact, each with prerequisites, held and varied variables, the
   measurements and repetitions, safe-stop conditions, the acceptance rule, and
   which `VERIFIED_STATE.md` entry it may update. Pre-written procedures, not
-  evidence, and not run.
+  evidence: H0 and H0W have been run and recorded (D25, D28), and the rest have
+  not.
 
 ## Building
 
@@ -194,8 +195,15 @@ recorded in `DEVELOPMENT_LOG.md`.
   `docs/limitations.md` records.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
-  electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are now done, so what
-  remains of the bring-up is the powered and electrical part, starting with P-H1A.
+  electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are done. The powered
+  part was entered informally on 2026-10-02 - the harness was reworked to the V5
+  assignment, the motor ran under firmware at low effort in both directions, the
+  encoder's sign and a forward manual rollout were observed, and the trigger
+  actuated - but no protocol was run to its acceptance rule and no capture was
+  recorded, so it is an observation rather than evidence and no
+  `VERIFIED_STATE.md` row moved (`DEVELOPMENT_LOG.md` D36). What remains is the
+  formal electrical and
+  calibration work, starting with P-H1A's continuity check.
 
 Do not build later-stage vehicle behavior before the earlier stage has been
 validated.
@@ -209,7 +217,8 @@ control tick in a frozen stage order. After each pass it services the serial
 port: a staged reply goes out first, then at most one received command is applied
 and answered, then the telemetry queue drains.
 
-It cannot move: every calibration value, safety limit and gain in
+The production vehicle image cannot be commanded to move: every calibration value,
+safety limit and gain in
 `src/VehicleConfig.h` is a `Provisional` placeholder, the regulator refuses to
 enable, no run has been announced, and the run policy stays in `Idle`. The serial
 interface can report `status`, `checks`, `version` and the held configuration,
@@ -227,8 +236,19 @@ and its latched fault have been demonstrated at the bench. H0W additionally need
 the watchdog enabled, which is a separate bench environment - `pio run -e
 bench-watchdog` - rather than an edit to a header both images compile.
 
-The vehicle still has no measured behavior of its own: no motor, encoder, sensor,
-trigger, battery or bottle mechanism behavior has been observed on hardware. Upload,
-boot, greeting, the serial link and the watchdog path *have* been observed on target,
-USB only with the motor supply off (H0, D25; H0W, D26-D28); see `VERIFIED_STATE.md`
-for which rows exist and what they are worth.
+The vehicle has moved, but only informally, and nothing about it was measured. On
+2026-10-02 the motor hummed and spun under firmware at low effort, forward and
+reverse were both exercised, encoder ticks rose in forward travel and fell in
+reverse, a manual forward push counted ~1494 ticks over an intended ~2.0 m, and the
+pencil trigger actuated; at the 2026-10-02/03 tournament a separate, tournament-only
+emergency image (since deleted, D35) drove the vehicle forward and backward
+autonomously. None of that was captured and no protocol was run to its acceptance
+rule, so it is an **informal observation, not evidence**: **every hardware row in
+`VERIFIED_STATE.md` still reads UNVERIFIED**, no calibration was promoted - every
+value in `src/VehicleConfig.h` is still `Provisional`, so the production image
+has never been armed for a run - and no run record exists for it. Sensor, battery
+and bottle-mechanism behavior remain unobserved; battery/current sensing and the
+nFAULT line are not installed at all. Upload, boot, greeting, the serial link and
+the watchdog path *have* been observed on target, USB only with the motor supply
+off (H0, D25; H0W, D26-D28); see `VERIFIED_STATE.md` for which rows exist and what
+they are worth, and `docs/limitations.md` for what is still open.

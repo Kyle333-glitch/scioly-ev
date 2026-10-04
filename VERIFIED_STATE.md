@@ -34,22 +34,37 @@ value depends on one, it is configurable and clearly marked as a placeholder
 
 ## Current hardware availability
 
-The Nano R4 controller is now available, and was used for the on-target session
-recorded at the end of this file (H0, 2026-09-28: USB only, no motor supply
-connected). No motor, motor driver, encoder, battery or drivetrain hardware was
-connected or tested, so every hardware fact below is still UNVERIFIED, and no
-motion-related behavior may be written as though these were known.
+The Nano R4 controller was used for the on-target sessions recorded at the end of
+this file (H0, 2026-09-28 and the H0W sessions, 2026-09-28/29: USB only, no motor
+supply connected). Those sessions still say nothing about the vehicle.
+
+The unit was taken away at the end of D31 (2026-09-29) and was in hand again on
+**2026-10-02, for the pre-tournament bring-up and the tournament itself
+(2026-10-02/03)**. That is when the motor supply was first connected, the harness
+was reworked to the stated V5 assignment, and the vehicle was moved under firmware
+control. What was seen there is recorded in "Informal physical observations,
+2026-10-02 bring-up and tournament" below - **observed, not verified**: no row was
+promoted, because nothing from those sessions satisfies "The rule" at the top of
+this file (no recorded command or procedure, no raw observation/data, no evidence
+pointer). Every hardware row below is therefore still UNVERIFIED, as listed in
+`docs/limitations.md`.
+
+**Whether the board is in hand *now* is a present-day availability constraint** to
+check before planning any stage. A board that is not available limits *when* a
+stage can be run; it is never evidence that the hardware work recorded above did
+not happen. The earlier "the board is gone" wording (D31, D35) meant only "not in
+hand at that moment", and it is superseded on that point (D36).
 
 ## Hardware facts
 
 | # | Fact | Status | Evidence | What would verify it |
 |---|------|--------|----------|----------------------|
-| 1 | Wiring and pin assignments | UNVERIFIED | none | Continuity check against a recorded wiring table; observed correct behavior per pin |
-| 2 | Motor driver modes / truth table | UNVERIFIED | none | Driver powered with the drivetrain unloaded; each input combination observed and tabulated |
-| 3 | Motor polarity (sign of a positive command) | UNVERIFIED | none | Low conservative PWM command; observed wheel direction recorded |
-| 4 | Encoder direction sign (forward vs reverse counting) | UNVERIFIED | none | Hand-rotated wheel in each direction; raw count sign recorded |
-| 5 | Encoder signal quality (noise, missed/extra counts) | UNVERIFIED | none | Repeated manual revolutions with count comparison; scope or count-delta check |
-| 6 | Rollout (effective distance per encoder tick) | UNVERIFIED | none | Measured travel over multiple revolutions on a real surface, averaged |
+| 1 | Wiring and pin assignments | UNVERIFIED | none recorded. Functionally exercised 2026-10-02 (informal observation, D36 - not evidence under "The rule"): the harness was physically rewired to the stated V5 assignment and the roles that were exercised behaved as their roles require (the encoder counted, the motor drove, the trigger input responded). Functional observation only - **no continuity test was performed** | Continuity check against a recorded wiring table; observed correct behavior per pin |
+| 2 | Motor driver modes / truth table | UNVERIFIED | none. Drive forward/reverse were exercised end to end on 2026-10-02 (informal observation, D36 - not evidence), but no input combination was metered | Driver powered with the drivetrain unloaded; each input combination observed and tabulated |
+| 3 | Motor polarity (sign of a positive command) | UNVERIFIED | **OBSERVED, informal - not evidence under "The rule"** (D36): on 2026-10-02 at low effort a forward command moved the vehicle forward and a reverse command moved it backward, both directions exercised; no capture, no procedure, no raw data and no evidence pointer exist for it, so the row is unchanged. No PH/EN/nSLEEP level was metered either (that remains row #2) | Low conservative PWM command with the observed wheel direction recorded (H3); a recorded procedure plus raw observation/data, with the evidence pointer this row can name |
+| 4 | Encoder direction sign (forward vs reverse counting) | UNVERIFIED | **OBSERVED, informal - not evidence under "The rule"** (D36): on 2026-10-02, during wheel/motor movement, forward travel produced increasing ticks and reverse produced decreasing ticks, and a forward manual push counted ~1494 ticks; witnessed but uncaptured, so the row is unchanged | Hand-rotated wheel in each direction with the raw count sign recorded (H2); a recorded procedure plus raw observation/data, with the evidence pointer this row can name. Signal quality (#5), counts per revolution and gearing also remain open |
+| 5 | Encoder signal quality (noise, missed/extra counts) | UNVERIFIED | Ticks were produced while the wheel turned (2026-10-02, informal observation, D36), but no noise, double-count or missed-count assessment was made | Repeated manual revolutions with count comparison; scope or count-delta check |
+| 6 | Rollout (effective distance per encoder tick) | UNVERIFIED | None measured. **OBSERVED, informal - not evidence** (2026-10-02, D36): ~1494 ticks against an *intended* ~2.0 m forward push, i.e. ~1.339 mm/tick as a rough figure - one unrepeated push with no measured travel and no preserved capture, so it is not a calibration and nothing was promoted | Measured travel over multiple revolutions on a real surface, averaged |
 | 7 | Sensor scaling (any sensor to engineering units) | UNVERIFIED | none | Reference measurement compared against reported value at several points |
 | 8 | Control gains / tuning values | UNVERIFIED | none | Tuning against recorded closed-loop response data |
 | 9 | Braking behavior and stopping distance | UNVERIFIED | none | Repeated measured stopping distance at recorded speeds |
@@ -74,9 +89,52 @@ external driver-fault rows above have no measurement path on this hardware. No
 **The V5 pin map is likewise a statement, not a measurement (D33):**
 `src/PinMap.h` now names the pins the team reports the V5 harness connects
 (encoder A D2, encoder B D4, PH D8, EN D9, nSLEEP D10, trigger D12; PMODE tied
-to GND in hardware; the nFAULT line has no pin). Row #1 above is not updated by
+to GND in hardware; the nFAULT line has no pin). Row #1 above is not verified by
 it - the map is what a continuity check (H1A step A0) would verify, and it stays
-UNVERIFIED until that check is recorded.
+UNVERIFIED until that check is recorded. The harness **was** physically reworked
+to this assignment on 2026-10-02 and the exercised roles behaved accordingly
+(functional observation, D36), which is still not continuity.
+
+### Informal physical observations, 2026-10-02 bring-up and tournament (D36) - OBSERVED, NOT VERIFIED
+
+**This section promotes nothing.** It records what was seen so the fact of
+observation is not lost, and it satisfies no row. Under "The rule" at the top of
+this file a VERIFIED mark needs recorded evidence - a command or test procedure
+plus raw observation/data - with an evidence pointer to carry, and these sessions
+have **no capture, no pre-registration and no `data/evidence/` directory**: there
+is no raw serial log to re-read. What exists is a single un-instrumented sighting
+recorded from the team's confirmed account, which the rule names in its excluded
+set ("recollection or verbal description"), and no protocol in `docs/bringup/` was
+run to its acceptance rule ("change no row until they pass"). Nothing in `src/` was
+changed by it either: every calibration constant and `Sourced` value is still
+`Provisional`, no `Measured` label was applied anywhere, and the arm gate still
+refuses.
+
+| Observed (informal; changes no row) | Bearing on rows |
+|---|---|
+| The harness was rewired to the stated V5 assignment: encoder A D2, encoder B D4, DRV PH D8, DRV EN/PWM D9, DRV nSLEEP D10, trigger D12, PMODE tied to GND, nFAULT not installed | Row #1 stays UNVERIFIED - functional observation only, **no continuity testing was performed** |
+| The motor hummed and spun under firmware control at low effort | No numbered row. Replaces the "no motor supply / never moved" wording with an observation; it is still not evidence |
+| Forward and reverse motor commands were both physically exercised | **Row #3 stays UNVERIFIED** - observed informally, uncaptured |
+| Encoder ticks changed while the wheel/motor moved: forward increased them, reverse decreased them | **Row #4 stays UNVERIFIED** - observed informally, uncaptured |
+| A manual forward rollout counted ~1494 ticks over an *intended* ~2.0 m | Row #6 stays UNVERIFIED - provisional only, not a calibration |
+| The physical pencil trigger actuated (it worked) | No numbered row; the trigger's raw idle/active *levels* were not recorded, so H1B Part 4 is still owed |
+| The tournament-only emergency image - a separate standalone entry point, deleted from the active tree in D35 - was flashed and drove the vehicle autonomously forward and backward at the tournament | Not the production image, and not evidence: it says nothing about the run state machine, and no telemetry or run data from it exists here |
+
+**Provisional / observed but not formal:** the ~1494 ticks over an intended ~2.0 m
+and the resulting ~1.339 mm/tick estimate; the fact that low effort sufficed to move
+the vehicle (the minimum useful effort was never measured); speed, braking and
+reversal calibration.
+
+**All twelve hardware rows remain UNVERIFIED** after those sessions: #1
+(continuity of every connection), #2 (level-to-output truth table), #3 (sign
+observed informally, no recorded raw data), #4 (sign observed informally, no
+recorded raw data), #5 (signal quality), #6 (rollout as a calibration),
+#7 (sensor scaling - battery and current sensing are not installed), #8 (gains),
+#9 (braking), #10 (wheel slip), #11 (bottle interaction), #12 (dead-wheel
+question); plus formal mm/tick calibration, Target Time accuracy, repeatability,
+and any loaded behavior of the production run state machine. nFAULT external
+telemetry remains unavailable (line not installed). Collected in
+`docs/limitations.md`.
 
 ## Software and toolchain facts
 
@@ -89,12 +147,12 @@ say nothing about the vehicle.
 | Host logic tests build and run with the `native` environment | VERIFIED | `pio test -e native` 552/552 SUCCESS (D35; 32 suites, including 2 new optional-delay and 3 new derived-cruise regression tests; `test/test_emergency_run` removed with the emergency image). D34 had no green host run and was unverified until this cleanup/rebuild (see `DEVELOPMENT_LOG.md` D35). |
 | The vehicle-layer runtime shell and the hardware boundary compile and link into the firmware (driver adapter, encoder interrupt, raw inputs, scheduler, tick order, watchdog adapter) | VERIFIED | `pio run` succeeds with `src/` compiled (see `DEVELOPMENT_LOG.md` D13). This is a build fact only. |
 | The watchdog adapter's library links into the firmware image | VERIFIED | `arm-none-eabi-nm` on `firmware.elf` lists the WDT symbols (see `DEVELOPMENT_LOG.md` D13). Linking is **not** evidence that the watchdog starts, counts, refreshes or resets. |
-| Nothing but the driver adapter writes the planned motor pins | VERIFIED | A static search over `src/` for the three planned pin names matches only `src/PinMap.h` (the definitions) and `src/MotorDriver.h` (the writes), and the bench tree reaches the pins through `MotorDriver.h`'s `applyBench()` rather than writing them itself. The vehicle image does not contain the bench tree at all - see the `env:bench` row below (see `DEVELOPMENT_LOG.md` D13, D19 and D35). The tournament-only `src/emergency/EmergencyMain.cpp` (which had called `writeLevels()` directly) was deleted in D35. A search is evidence about the source, not about the hardware. |
+| Nothing but the driver adapter writes the planned motor pins | VERIFIED | A static search over `src/` for the three planned pin names matches only `src/PinMap.h` (the definitions) and `src/MotorDriver.h` (the writes), and the bench tree reaches the pins through `MotorDriver.h`'s `applyBench()` rather than writing them itself. The vehicle image does not contain the bench tree at all - see the `env:bench` row below (see `DEVELOPMENT_LOG.md` D13, D19 and D35). The tournament-only `src/emergency/EmergencyMain.cpp` (which called `writeLevels()` directly - a second writer while it existed) was deleted in D35; it had been flashed for the 2026-10-02/03 tournament and did physically drive the vehicle forward and backward there (`DEVELOPMENT_LOG.md` D36). A search is evidence about the source, not about the hardware. |
 | The driver's fault output is interpreted only from a measured polarity, and an absent signal is never interpreted at all | VERIFIED | `lib/evcore/src/DriverFault.h` maps a raw level to `FaultCode::DriverFaultBar` only when the capability is `Installed` **and** the configured polarity is `Measured`; the shipped `kPlannedDriverFaultCapability` is `NotInstalled` (the assembled vehicle does not wire the line), `kPlannedDriverFaultPolarity` stays `Unverified`, and the capability-aware `DriverFaultConfigurationValid` check requires a measured polarity only on a vehicle that has the line (see `DEVELOPMENT_LOG.md` D19 and D32). This is a logic fact: **which level the line drives for each state is UNVERIFIED and, on this vehicle, unmeasurable** (rows #1, #2 above). |
 | The pure core compiles for the ARM target | VERIFIED | `arm-none-eabi-g++ -std=gnu++11 -Wall -Wextra -fsyntax-only` over all `lib/evcore/src` headers: exit 0. The only diagnostics are the expected `#pragma once in main file` artifacts of checking headers standalone (one per header); any other diagnostic is a real warning to investigate. |
-| The bench image builds, and the vehicle image contains none of it | VERIFIED | `pio run -e bench` SUCCESS (D35: RAM 6492/32768, Flash 78680/262144) and `pio run -e nano_r4` SUCCESS (D35, above), and a symbol search over the two `firmware.elf` files finds the bench console's symbols in the bench image and none in the vehicle image (see `DEVELOPMENT_LOG.md` D19 and D35); the two environments are disjoint by `build_src_filter` in `platformio.ini`. The tournament-only `[env:emergency]` no longer exists (`pio run -e emergency` reports unknown env; `src/emergency/` and `test/test_emergency_run/` deleted in D35, recoverable from the preservation snapshot). This is a build-and-link fact only: no bench instrument has been run, and nothing here says the readouts or the bench drive behave correctly on the board. |
+| The bench image builds, and the vehicle image contains none of it | VERIFIED | `pio run -e bench` SUCCESS (D35: RAM 6492/32768, Flash 78680/262144) and `pio run -e nano_r4` SUCCESS (D35, above), and a symbol search over the two `firmware.elf` files finds the bench console's symbols in the bench image and none in the vehicle image (see `DEVELOPMENT_LOG.md` D19 and D35); the two environments are disjoint by `build_src_filter` in `platformio.ini`. The tournament-only `[env:emergency]` no longer exists (`pio run -e emergency` reports unknown env; `src/emergency/` and `test/test_emergency_run/` deleted in D35, recoverable from the preservation snapshot). This is a build-and-link fact only: this row claims no instrument reading (the `bench pins`, `bench resetsrc` and `bench wdt` readings recorded in the on-target sections below came from the H0/H0W-era images), and nothing here says the readouts or the bench drive behave correctly on the board. |
 | The vehicle image contains no bench-named symbol, and enabling the watchdog for a bench qualification cannot change it | VERIFIED | `arm-none-eabi-nm` over `.pio/build/nano_r4/firmware.elf` filtered for `bench|hang|emergency|Emergency|h1a` matches nothing (D35); over `.pio/build/bench/firmware.elf` it matches the console, the bench drive, the hang hook and the grammar (plus the retained bench-only H1A diagnostic), and over `.pio/build/bench-watchdog/firmware.elf` it matches bench but no H1A and no emergency. Watchdog enablement is derived from the build define `EV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED`, which only `[env:bench-watchdog]` sets, and `src/main.cpp` has a `static_assert` that refuses to compile the vehicle image if the define is ever present (see `DEVELOPMENT_LOG.md` D20) plus a D35 `#error` guard refusing `EV_EMERGENCY_IMAGE`/`DEV_EMERGENCY_IMAGE` in the vehicle image. Build facts only: nothing here says the bench instruments or the watchdog behave correctly on the board. |
-| Only one writer commands the motor pins per pass, and the bench writer is gated on a host-tested predicate | VERIFIED | `src/MotorDriver.h` skips the tick's write while the bench layer holds the pins (`motorDriver::setMotorPinsOwned()`), and the bench layer sets that only where `ev::benchApplyVerdict()` (`lib/evcore/src/MotorArbitration.h`) permits - refusing on a latched fault, a violated control-tick order, an armed run or a run under way; `VehicleRuntime` exposes `faultLatched()`, `runUnderway()` and `orderViolationDetected()` for it, and `test_bench_arbitration` covers the predicate including the two states that are `!armed` while the motor is *not* free (see `DEVELOPMENT_LOG.md` D20). This is a logic-and-build fact. `failSafe()` deliberately ignores the flag, and whether the DRV8874's pins are commanded as intended is UNVERIFIED (rows #1-#3). |
+| Only one writer commands the motor pins per pass, and the bench writer is gated on a host-tested predicate | VERIFIED | `src/MotorDriver.h` skips the tick's write while the bench layer holds the pins (`motorDriver::setMotorPinsOwned()`), and the bench layer sets that only where `ev::benchApplyVerdict()` (`lib/evcore/src/MotorArbitration.h`) permits - refusing on a latched fault, a violated control-tick order, an armed run or a run under way; `VehicleRuntime` exposes `faultLatched()`, `runUnderway()` and `orderViolationDetected()` for it, and `test_bench_arbitration` covers the predicate including the two states that are `!armed` while the motor is *not* free (see `DEVELOPMENT_LOG.md` D20). This is a logic-and-build fact. `failSafe()` deliberately ignores the flag, and whether the DRV8874's pins are commanded as intended is UNVERIFIED (rows #1-#3; the sign of a commanded forward/reverse was only observed informally on 2026-10-02 and is not evidence, so #3 remains in this set, and no level was metered). |
 | The driver-fault-low cycle counter is per run, not since boot, and counts nothing while the line is absent | VERIFIED | `VehicleRuntime::cyclesWithDriverFaultLow_` (`src/VehicleRuntime.cpp`) is cleared on a successful `arm` and by `reset`, so H1B Part 3 and H9 read their own test's activity rather than a since-boot total (see `DEVELOPMENT_LOG.md` D20); it is incremented only when the capability is `Installed`, so an unread pin's toggles are never counted as fault evidence (D32). A source fact only: the counter's value on hardware has not been observed, and on this vehicle it stays zero because there is no signal. |
 | The watchdog timeout rule is enforced at compile time | VERIFIED | `lib/evcore/src/WatchdogPlan.h` holds the rule (a timeout must be strictly longer than both the boot-to-first-refresh gap and the worst healthy refresh interval, plus margin) and `src/WatchdogCheckpoint.h` asserts the requested constants against it, so a build that requests enablement with a timeout that cannot survive boot fails to compile; `test_watchdog_plan` pins the arithmetic. **The two gaps are now measurements, not placeholders** (`kBootToFirstRefreshBudgetMs = 0`, `kWorstRefreshIntervalBudgetMs = 14`, `kWatchdogPlanMarginMs = 100` pre-registered, `kWatchdogTimeoutMs = 114` - D27), and the assertion applies the whole rule plus an equality check against `requiredWatchdogTimeoutMs()`. This row stays a source-and-logic fact; the measurements themselves are the H0W row below. |
 | The operator interface and the telemetry consumer compile and link into the firmware (command parser, operator policy, response formatter, telemetry schema/formatter/queue, line transport) | VERIFIED | `pio run` succeeds with `src/` compiled (see `DEVELOPMENT_LOG.md` D14), and the pure modules are covered by host tests (`test_serial_command_parser`, `test_operator_policy`, `test_operator_response`, `test_telemetry_format`, `test_telemetry_queue`). This is a build-and-logic fact only; no host was connected. |

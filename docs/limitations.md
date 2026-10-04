@@ -20,24 +20,44 @@ that stage records its evidence.
 
 ---
 
-## A. Nothing about the vehicle itself
+## A. What the vehicle itself still does not establish
 
-The whole table of hardware facts in `VERIFIED_STATE.md` (rows #1-#12) is
-**UNVERIFIED**: wiring and pin assignments, the motor driver's truth table, motor
-polarity, encoder direction sign and signal quality, rollout, sensor scaling,
-control gains, braking behavior, wheel slip, and the bottle interaction. H0 and
-D22/D23 used USB only - **no motor supply was ever connected**, so the board has
-never moved anything under firmware control.
+The 2026-10-02 bring-up and the 2026-10-02/03 tournament were **observed** to move
+the vehicle under firmware control: forward and reverse were both exercised, the
+encoder's ticks rose forward and fell in reverse, the physical trigger actuated,
+and a separate tournament-only emergency image drove the vehicle forward and
+backward at the tournament. These are **informal physical observations (OBSERVED),
+not evidence**: nothing was captured, no protocol was run to its acceptance rule,
+and no raw data or evidence pointer exists - all of which `VERIFIED_STATE.md`'s
+rule requires, while its excluded set names "recollection or verbal description".
+**All twelve rows of `VERIFIED_STATE.md` therefore remain UNVERIFIED**, including
+#3 motor polarity and #4 encoder direction sign, whose signs were witnessed
+informally (D36); also #1 wiring and pin assignments (no continuity check), #2 the
+motor driver's truth table, #5 encoder signal quality, #6 rollout, #7 sensor
+scaling, #8 control gains, #9 braking behavior, #10 wheel slip, #11 bottle
+interaction and #12 the dead-wheel question.
 
-**As of D31 the board itself is gone.** The Nano R4 was taken away at the end of
-the D31 session, which was also the session that produced the last capture; the
-unit now holds the **bench** image (`b6b1c455...`) and cannot be reflashed by this
-project (`data/evidence/D31-2026-09-29/README.md`). Every entry in this file that
-is removed "by evidence" now has **no path to that evidence**: the stages that
-need the board - H0W Step 8, H1A's driver-output measurement, and every loaded-run
-protocol from H5 on - are not deferred, they are unperformable with the equipment
-the project has. Source can still be changed, reviewed, host-tested and
-committed; none of it can promote a `VERIFIED_STATE.md` row.
+The earlier wording here - that no motor supply had ever been connected, so the
+board had never moved anything under firmware control - was written in the H0/H0W
+era and is superseded. Those sessions *were* USB only with the supply off, and they
+still say nothing about the vehicle; but the supply was connected and the vehicle
+was driven on 2026-10-02, so the general claim was false from that date.
+
+**Board availability is a current constraint, not a claim about history.** The
+Nano R4 was taken away at the end of the D31 session (2026-09-29), where it was
+left holding the **bench** image (`b6b1c455...`) and could not be reflashed by this
+project - that is what `data/evidence/D31-2026-09-29/README.md` records, and it was
+true then. The unit was in hand again on 2026-10-02/03 for the bring-up and the
+tournament (`VERIFIED_STATE.md`, D36), so "the board is gone" must never be read as
+"no hardware work happened". Whether it is in hand *now* is the thing to check
+before planning a stage; while it is not, source can still be changed, reviewed,
+host-tested and committed, but no `VERIFIED_STATE.md` row can be promoted.
+
+What the 2026-10-02/03 sessions did **not** do is still owed, and it is owed
+because it was not done - not because it cannot be done: H1A's continuity and
+driver-output measurement, H1B's input-level record, H2's recorded repetitions,
+H4's formal rollout, H0W Step 8 under a loaded run, and every loaded-run protocol
+from H5 on. No capture from those sessions exists in this repository (section G).
 
 - Evidence of the limit: `VERIFIED_STATE.md` hardware table; `data/evidence/P-H0-2026-09-28/README.md` ("What this session does NOT establish").
 - Removed by: H1A onward, row by row, each with recorded raw observations.
@@ -71,9 +91,11 @@ Consequences that are easy to forget:
   itself; the MCU simply cannot observe that it did.
   H1B Part 3 and H9's driver-fault trip have **no subject** on this vehicle
   (`docs/bringup/P-H1B-sense-inputs.md`, `docs/bringup/P-H9-fault-injection.md`).
-- **The encoder's mechanical interpretation is unknown**: counts per revolution,
-  gearing, and which count direction is physical forward travel
-  (`SOFTWARE_ARCHITECTURE.md` section 10). The decoding *scheme* is fixed in
+- **The encoder's mechanical interpretation is only partly known**: counts per
+  revolution and gearing are still unknown, while the count *direction* was
+  **observed informally** on 2026-10-02 - forward travel increases the count,
+  reverse decreases it (row #4 stays UNVERIFIED; `VERIFIED_STATE.md` D36,
+  `SOFTWARE_ARCHITECTURE.md` section 10). The decoding *scheme* is fixed in
   section 11; its numbers are not.
 - **The encoder input's pull-up setting is a bench placeholder** and one of the
   first things H2 must check (`src/EncoderInput.h`).
@@ -103,6 +125,16 @@ Consequences that are easy to forget:
   (`isRunRampDownCommand()`), instead of coasting. What that does to a real
   drivetrain - and how far it travels - is H7's measurement, not something the
   code change establishes.
+- **The tournament ran on an emergency image that is no longer in the tree (D36).**
+  A standalone, tournament-only firmware image (its own entry point and build
+  environment) was flashed and physically drove the vehicle autonomously forward
+  and backward at the 2026-10-02/03 tournament. D35 deleted it from the active tree
+  (source, test and `[env:emergency]`); it is recoverable only from the
+  preservation snapshot (`recovery/d32-d34-v5-snapshot`), and `src/main.cpp`
+  refuses to compile its define into the vehicle image. What it did was observed,
+  not instrumented - no telemetry or run record from it exists in this repository -
+  it is not the production run state machine, and nothing about production
+  behavior, calibration or repeatability follows from it.
 
 ## B. Implemented, host-tested, but never observed on the board
 
@@ -298,12 +330,14 @@ or what remains provisional about the numbers it justified.
   near-zero configuration (threshold, dwell) is still provisional, and nothing has
   run on a wheel (`src/VehicleConfig.h`, `lib/evcore/src/NearZeroVerifier.h`).
 
-- **H0W Step 8 cannot be run.** It needs a loaded run path to soak under - which
-  H7/H10 have not produced - and it now also needs a board. Its criteria are
-  pre-registered (`data/prereg/P-H0W-step8-2026-09-29.md`) and its status is
-  **owed and unperformable**, not merely owed. The timeout therefore stays
-  **bench-qualified and provisional** for the loaded run path indefinitely, at the
-  unchanged `kWatchdogTimeoutMs = 114` (realized 174 ms, D30).
+- **H0W Step 8 has not been run.** It needs a loaded run path to soak under -
+  which H7/H10 have not produced, because the production image has never run
+  loaded - and it needs the board in hand (section A: availability is a
+  constraint, not a verdict). Its criteria are pre-registered
+  (`data/prereg/P-H0W-step8-2026-09-29.md`) and its status is **owed**, blocked
+  on a loaded run path that does not exist yet. The timeout therefore stays
+  **bench-qualified and provisional** for the loaded run path, at the unchanged
+  `kWatchdogTimeoutMs = 114` (realized 174 ms, D30).
 
 ## F. Placeholders and unbuilt enforcement points
 
@@ -312,10 +346,22 @@ or what remains provisional about the numbers it justified.
   effort ceiling, cruise/accel/decel, every regulator gain, every phase timeout,
   every near-zero threshold and dwell, the final-approach distance, and the three
   encodings of the polarity fact. None is a measurement
-  (`VERIFIED_STATE.md` #3, #4, #6, #8, #9). The single exception is
+  (`VERIFIED_STATE.md` #6, #8, #9). The polarity sign behind those three
+  encodings was **observed informally** on 2026-10-02 (#3, #4) but is **not
+  evidence and not a promotion**: no constant changed and no row moved - both
+  rows stay UNVERIFIED because nothing from that session was captured - so the
+  configuration still reports them as placeholders (D36). The single exception is
   `kMaxDwellGapMs` (D28), the near-zero verifier's gap limit, which is now a cited
   `Measured` value: it bounds how much dwell may be credited, it does not by itself
   make a stop verifiable, and H0W Step 8 has to re-take it under load.
+- **The rollout observation of 2026-10-02 is provisional, not a calibration (D36).**
+  A manual forward push counted roughly **1494 encoder ticks over an *intended*
+  ~2.0 m**, i.e. ~1.339 mm/tick as a rough figure. The travel was intended rather
+  than measured, the push was not repeated and no spread exists, so
+  `kPlannedDistancePerEncoderTickM` stays `Provisional`, row #6 stays UNVERIFIED,
+  and the figure may not be used as a calibration. Removed by: P-H14 step 4 (H4) -
+  tape-measured travel, five runs each direction, spread and mean within the
+  pre-registered tolerance.
 - **A "Measured" promotion requires a citation** (`Sourced::citesEvidence()`), and
   `MeasuredValuesCiteEvidence` reports false while placeholders remain. This is a
   deliberate limit: it is the check that stops a provisional number from
@@ -340,9 +386,15 @@ or what remains provisional about the numbers it justified.
   regulator's and shaper's responsibilities and refusal behavior, but not which
   estimator window is usable, not one gain, and not whether any candidate is good
   enough for an event run (`SOFTWARE_ARCHITECTURE.md` section 10).
-- **Target shaping, braking and reversal have never run on a wheel**, so no
-  runway, stopping distance or reversal behavior is known; the braking offsets
-  that would compensate for it are placeholders (`VERIFIED_STATE.md` #9).
+- **Target shaping, braking and reversal have never run on a wheel through the
+  production image**, so no runway, stopping distance or reversal behavior is known;
+  the braking offsets that would compensate for it are placeholders
+  (`VERIFIED_STATE.md` #9). What did move on the floor was the tournament's separate
+  emergency image, which drove the vehicle forward and backward autonomously (D36) -
+  a standalone entry point, not the run state machine, since removed in D35 - and
+  the low-effort motion of the 2026-10-02 bring-up (which image commanded that is
+  not recorded here). Neither is a production run, and neither established a
+  stopping distance.
 
 - **The bench console's readouts had no compile-time bound, and its widest one does
   not fit.** Derived field by field from `healthLine()` in D31, the worst case is
@@ -432,12 +484,27 @@ or what remains provisional about the numbers it justified.
   running; D31 left the bench image** (`b6b1c455...`) - the image whose own
   documentation says it must never be mistaken for the vehicle image, and which
   contains `bench drive`, a command that applies effort outside a run. The board is
-  no longer reachable and cannot be reflashed by this project, so a unit that is
-  ever powered again should be treated as a bench rig until `bench health` reports
-  `image=bench`, which settles it.
-- **Anything measured with the board alone has no motor supply, no driver, no
-  encoder and no drivetrain connected**, so the highest load ever applied to the
-  firmware is its own serial path.
+  reachable only intermittently - it left the project after D31 and was flashed
+  again for the 2026-10-02/03 sessions (section A) - so a unit that is ever powered
+  again should be treated as an unknown image until `bench health` reports
+  `image=bench`, which settles it. Note that the tournament's emergency image has
+  since been deleted from this tree: an image that is no longer in the source can
+  never be confirmed from the source.
+- **The H0/H0W sessions were measured with the board alone: no motor supply, no
+  driver, no encoder and no drivetrain connected**, so the highest load those
+  sessions applied to the firmware is its own serial path. The 2026-10-02/03
+  sessions did connect the drivetrain (section A), but produced no captures.
+- **The 2026-10-02/03 bring-up and tournament left no evidence directory.** There is
+  no `data/evidence/`, no pre-registration, no serial capture and no repetition
+  count for them; what they established is recorded once, in `DEVELOPMENT_LOG.md`
+  D36, from the team's confirmed account after the event. Each observation there is
+  therefore a single un-instrumented sighting: enough to record that it was seen
+  (and so to stop this register asserting the opposite as fact), but **not enough
+  to mark any row VERIFIED, not enough to promote a calibration**, and no number
+  from those sessions may be read as a distribution. The formal protocols that
+  would produce the evidence - H1A, H1B, H2, H4 and the loaded-run stages - are
+  still owed, and until one of them runs and is recorded, **every hardware row in
+  `VERIFIED_STATE.md` stays UNVERIFIED**.
 
 ## How to remove an entry
 

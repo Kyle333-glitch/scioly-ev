@@ -8,8 +8,14 @@ known fact. It is not a wiring record and it is not evidence about the vehicle.
 
 `VERIFIED_STATE.md` governs: a datasheet, a product page, a vendor example and a
 successful compile do not make anything verified. Rows **#1** (wiring and pin
-assignments), **#2** (driver truth table) and **#3** (motor polarity) stay
-UNVERIFIED until the bench tests at the bottom of this page are run and recorded.
+assignments) and **#2** (driver truth table) stay UNVERIFIED until the bench tests
+at the bottom of this page are run and recorded. Row **#3** (motor polarity) has
+only an uncaptured physical observation: on 2026-10-02 a forward command moved the
+vehicle forward and a reverse command moved it backward at low effort - witnessed,
+but with no procedure, no raw data and no evidence pointer, which
+`VERIFIED_STATE.md`'s rule requires. So **#3 stays UNVERIFIED as well**
+(`VERIFIED_STATE.md` #3, D36, OBSERVED-not-verified), and the table below is still
+a plan for the electrical part.
 
 ## The device and the interface this plan assumes
 
@@ -44,8 +50,8 @@ writes the pins is `evhw::motorDriver` in `src/MotorDriver.h`.
 | `Disabled` | LOW | LOW | LOW (0 duty) | Driver asleep, outputs de-energized. The safe state, and the state startup initializes to. |
 | `Coast` | LOW | LOW | LOW (0 duty) | Same de-energized state. The plan cannot name a distinct coast combination yet. |
 | `Brake` | HIGH | LOW | LOW (0 duty) | Driver enabled with no drive level applied. **Which electrical state this is (brake or coast) is not claimed and is measured first.** |
-| `DriveForward` | HIGH | HIGH | duty | Planned: PH high means the physical forward direction. **Unverified.** |
-| `DriveReverse` | HIGH | LOW | duty | Planned: PH low means reverse. **Unverified.** |
+| `DriveForward` | HIGH | HIGH | duty | Planned: PH high means the physical forward direction. **Unverified.** A forward command informally moved the vehicle forward on 2026-10-02 (uncaptured, D36 - an observation, not evidence). |
+| `DriveReverse` | HIGH | LOW | duty | Planned: PH low means reverse. **Unverified.** A reverse command informally moved it backward on 2026-10-02 (uncaptured, D36 - an observation, not evidence). |
 
 Notes:
 

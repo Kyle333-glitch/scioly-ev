@@ -2,11 +2,10 @@
 
 **Status: PRE-WRITTEN PROCEDURES. Not evidence.**
 
-These files are the plan for what will be measured once the vehicle hardware
-exists. Nothing here is an observation, nothing here changes a status in
-`VERIFIED_STATE.md`, and no number in this directory describes the vehicle. A
-protocol becomes evidence only when a person has run it on the real hardware and
-its raw observations are recorded.
+These files are the plan for what will be measured on the vehicle. Nothing here is
+an observation, nothing here changes a status in `VERIFIED_STATE.md`, and no number
+in this directory describes the vehicle. A protocol becomes evidence only when a
+person has run it on the real hardware and its raw observations are recorded.
 
 **Hard stop.** Every protocol below is executed by a person with the hardware in
 front of them. None is executed by a coding agent, and this stage stops before
@@ -19,12 +18,24 @@ motor supply off and disconnected - by the operator, and their raw captures are 
 The protocol files themselves remain the plan, and nothing in this directory is
 evidence.
 
+**On 2026-10-02, ahead of the tournament, the powered part was entered informally**
+(D36): the harness was reworked to the stated V5 assignment, the motor ran under
+firmware at low effort in both directions, the encoder's direction sign and a
+forward manual rollout (~1494 ticks over an intended ~2.0 m) were observed, and the
+pencil trigger actuated. **No protocol was run to its acceptance rule and no capture
+exists for that session**, so those observations live in `DEVELOPMENT_LOG.md` D36
+and `VERIFIED_STATE.md` as **OBSERVED, not evidence**, not in this directory, and no
+row moved: all twelve rows of `VERIFIED_STATE.md` stay **UNVERIFIED**. Continuity
+(H1A), the input-level record (H1B), the recorded encoder repetitions (H2) and the
+formal rollout (H4) are still owed.
+
 ## Why this exists
 
-The firmware, the operator interface and the analysis tooling are built and
-unverified on hardware. When the board arrives, the first hour should be spent
-measuring, not designing tests. Each protocol here isolates one unknown, names
-the exact commands and readings, and says what may be recorded if it passes.
+The firmware, the operator interface and the analysis tooling are built; the
+vehicle's physical facts are only partly known. When the board is next in hand, the
+first hour should be spent measuring, not designing tests. Each protocol here
+isolates one unknown, names the exact commands and readings, and says what may be
+recorded if it passes.
 
 ## The three check classes
 
@@ -321,3 +332,8 @@ inconclusive.
 These rows were added when the corresponding protocol passed; the existing numbered
 rows are never relabelled by these protocols, only promoted with their own recorded
 evidence (`VERIFIED_STATE.md`).
+
+Rows **#3** and **#4** carry only an uncaptured physical observation from
+2026-10-02 (OBSERVED, recorded in `VERIFIED_STATE.md` D36); both rows stay
+**UNVERIFIED** until H3 and H2 are run to their acceptance rules, with repetitions
+and a raw capture.
