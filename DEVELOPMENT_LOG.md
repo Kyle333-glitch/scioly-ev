@@ -5151,3 +5151,475 @@ unchanged at 519.
   are now permanently blocked on hardware.** They are not deferred; they are
   unperformable with the equipment this project has, and no amount of further
   source work changes that.
+
+---
+## D32 - 2026-10-03 - Configuration - The external DRV8874 nFAULT signal is not installed, and the firmware now says so
+
+**The fact this entry records**
+
+The assembled vehicle does **not** connect the DRV8874's `nFAULT` output to the
+Nano. The pin the firmware had planned for it (`kMotorFaultBar`, D4) is therefore
+not an input at all. This is a statement by the team about the vehicle's wiring,
+**not a measurement**: nobody put a meter on anything, no polarity was ever
+established, and no fabricated measurement was introduced to make the build pass.
+
+**Why the previous state was wrong**
+
+The firmware had been built around the assumption that the line would eventually
+be measured. Two consequences followed:
+
+1. `DriverFaultPolarityVerified` (the configuration-build check) required a
+   `Measured` polarity before the vehicle could be armed. On a vehicle with no
+   line that requirement is **impossible to satisfy** - there is nothing to
+   measure - so production arming was blocked forever by a fact about a signal the
+   vehicle does not have. The check was not reporting a missing measurement; it
+   was asserting a requirement that did not apply.
+2. `SensorInputs::sample()` read D4, and `VehicleRuntime` incremented
+   `cyclesWithDriverFaultLow_` from that level, so a floating pin's toggles were
+   recorded as driver-fault activity - a fabricated measurement rather than a
+   missing one.
+
+The deeper problem was the modelling, not the value: "which level means fault" and
+"is there a line to read" are different facts, and the code had only the first.
+
+**The design**
+
+A capability type, separate from the polarity type:
+
+```cpp
+enum class DriverFaultCapability : uint8_t {
+    Installed = 0,     // the line exists; polarity must be measured before arming
+    NotInstalled = 1,  // the line does not exist; polarity verification is not applicable
+};
+```
+
+`Installed` is the **zero value** on purpose: a forgotten assignment leaves the
+line required and unverified, which refuses arming. The unsafe direction - a build
+that silently drops the external fault gate because a field was never set - is not
+reachable by default.
+
+**Validation semantics** (`ev::validateDriverFaultConfig(capability, polarity)`):
+
+| Capability | Polarity | Verdict |
+|---|---|---|
+| `Installed` | `Measured` + `ActiveLow`/`ActiveHigh` | pass |
+| `Installed` | `Unverified` (or `Measured` + `Unverified`) | refuse: `PolarityNotVerified` |
+| `NotInstalled` | any value | pass - verification is **not applicable** |
+
+**What "NotInstalled" is, and is not**
+
+It is a wiring fact stated by the team for this build, not a measurement, and it
+is deliberately **not** a `Sourced` value: there is no `ValueSource` for "stated",
+and marking it `Measured` would have been the exact fabrication this project's
+rules exist to prevent. `kPlannedDriverFaultPolarity` stays `Unverified`; it was
+**not** relabelled. The DRV8874's on-chip overcurrent, thermal and undervoltage
+protections are untouched - what is absent is only the MCU's ability to observe a
+fault the driver reports.
+
+**Runtime behavior on this vehicle**
+
+- `SensorInputs::begin()` does not configure `kMotorFaultBar`, and `sample()` does
+  not `digitalRead` it. The pin is left alone rather than pulled up so something
+  can still be read.
+- `RawSample` carries the capability with the level, so a consumer cannot mistake
+  "not installed" for "read high".
+- `cyclesWithDriverFaultLow_` is incremented only when the capability is
+  `Installed`. On this vehicle it stays zero - which is **not** evidence of a
+  healthy driver, which is why the capability travels beside it.
+- `ev::observedDriverFault(capability, levelLow, polarity)` returns
+  `FaultCode::None` unconditionally when `NotInstalled`, and is unchanged when
+  `Installed`: the same call still refuses to claim a fault from an unverified
+  polarity and still returns `FaultCode::DriverFaultBar` once the polarity is
+  measured.
+
+**Telemetry (schema version 1 -> 2)**
+
+A sample gained `nfault` (`Installed` / `NotInstalled`) next to `nfault_low`, and
+`nfault_low` is no longer always a boolean: when the line is not installed it
+carries the schema's absent marker `-`. A `0` would have read as "sampled and
+high", i.e. as a healthy driver - the exact claim this vehicle cannot make. The
+parser refuses a record that says the line is installed with no level, and refuses
+one that says it is not installed while carrying a level. `VERSION` now reports
+`telemetry_schema=2`, and `EVS2`/`EVE2` prefixes make an old log unmistakable.
+The bench `bench inputs` readout reports the same two fields.
+
+**Configuration check rename**
+
+`DriverFaultPolarityVerified` -> `DriverFaultConfigurationValid`. A column named
+"polarity verified" would have claimed a measurement that does not exist on this
+vehicle; the capability-aware name reports what is actually required. It is a
+schema-visible rename and it travelled with the version bump, so no version-1 log
+can be read as if it carried the new name. Its position in the check ordering is
+unchanged, so no other check's `firstFailure()` ordering moved.
+
+**Why the design is the one chosen**
+
+1. **Capability, not a deleted gate.** Deleting the check would have made a
+   vehicle that *does* wire the line armable with an uninterpreted fault input -
+   the exact hazard the check exists for. The gate is now conditioned on a fact
+   instead of removed.
+2. **The polarity value was not touched.** It stays `Unverified`/`Provisional`.
+   Nothing was promoted, and no citation was invented.
+3. **The pin is not sampled, not merely ignored.** Reading D4 and discarding the
+   value would still be a firmware that samples a signal it does not have; leaving
+   it unconfigured is the honest version.
+4. **A capability type, not a `bool`.** The codebase's configuration style is
+   strongly typed and documented; a bare `bool driverFaultWired` would have been a
+   second vocabulary for a fact that already had one.
+
+**Files changed**
+
+- `lib/evcore/src/DriverFault.h` - `DriverFaultCapability`, its name table,
+  capability-aware `validateDriverFaultConfig(capability, polarity)`, and
+  `observedDriverFault(capability, levelLow, polarity)`. The polarity-level
+  predicate `driverFaultLevelIndicatesFault()` is unchanged.
+- `lib/evcore/src/ConfigurationChecks.h` - the check id renamed to
+  `DriverFaultConfigurationValid`, with the rename documented in the header.
+- `lib/evcore/src/TelemetryRecord.h` - `kTelemetrySchemaVersion = 2`, prefixes
+  `EVS2`/`EVE2`, `TelemetrySample::driverFaultCapability`, and
+  `telemetryDriverFaultLevelName()`.
+- `lib/evcore/src/TelemetryFormat.h` - writes `nfault` then `nfault_low`;
+  worst-case sample bound 418 -> 438 characters, re-derived in the comment.
+- `lib/evcore/src/OperatorResponse.h` - CHECK worst case 443 -> 445.
+- `src/VehicleConfig.h` - `kPlannedDriverFaultCapability = NotInstalled`,
+  `plannedDriverFaultCapability()`, and `configurationBuildChecks()` reading the
+  capability-aware validation. No calibration value changed.
+- `src/SensorInputs.h` - the pin is configured and sampled only when the line is
+  installed; `RawSample` carries the capability.
+- `src/PinMap.h` - `kMotorFaultBar` documented as a spare on this build.
+- `src/VehicleRuntime.h` / `.cpp` - the guarded counter, the capability-aware
+  `observedDriverFault` call, and the snapshot/sample fields.
+- `src/bench/BenchConsole.h` - `bench inputs` reports `nfault` and an absent
+  level rather than a floating pin's level.
+- `test/test_driver_fault/test_main.cpp` - new, 8 cases.
+- `test/test_telemetry_format/test_main.cpp`, `test/test_operator_response/`,
+  `test/test_parse.py`, `test/test_metrics.py`, `test/test_cli.py`,
+  `test/test_schema_mirror.py` (unchanged logic, new vocabulary),
+  `tools/telemetry/evtelemetry/{schema,parse,metrics,report,synthetic}.py`,
+  regenerated `tools/telemetry/samples/*.csv`.
+- `README.md`, `SOFTWARE_ARCHITECTURE.md`, `VERIFIED_STATE.md`,
+  `docs/limitations.md`, `docs/hardware/motor-driver-drv8874.md`,
+  `docs/bringup/P-H1B-sense-inputs.md`, `docs/bringup/P-H3-first-low-duty-drive.md`,
+  `docs/bringup/P-H9-fault-injection.md` - superseding notes; historical
+  pre-registration text was preserved and annotated rather than rewritten.
+
+**Verification**
+
+- `pio test -e native`: **529/529** (was 519; `test_driver_fault` adds 8, and the
+  two new telemetry cases add 2). `test_driver_fault` pins installed+verified,
+  installed+unverified, not-installed+unverified, the conservative default, the
+  vocabulary, and that not-installed can never observe a fault from either level -
+  including when the polarity happens to be verified, which is the case a check
+  that forgot to consult the capability would let through.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry`:
+  **116/116**, including the schema-mirror drift check that re-reads the firmware
+  headers.
+- `pio run -e nano_r4`, `pio run -e bench`: SUCCESS with no warnings. The vehicle
+  image hash changed, as expected - this is a code change, not a comment.
+- **Not verified: anything on hardware.** The board is gone (`docs/limitations.md`)
+  and no physical test was performed or is possible. Every row in
+  `VERIFIED_STATE.md` keeps the status it had; the wiring fact above is stated,
+  not promoted.
+
+**Remaining production blockers (unchanged by this work)**
+
+`ConfigurationValid`, `CalibrationMeasured`, `SafetyLimitsValid`,
+`ControllerConfigValid`, `ProfileLimitsValid`, `PhaseConfigValid`,
+`ReversalConfigValid` and `RunPolicyUsable` are all still false with the shipped
+provisional configuration. `DriverFaultConfigurationValid` is the one check this
+work changes, and it changes by making the requirement match the hardware rather
+than by weakening it. Nothing here was done to "make production pass", and no
+other gate was touched.
+
+---
+## D33 - 2026-10-03 - Configuration - The pin map is standardized to the stated V5 harness
+
+**The fact this entry records**
+
+The team reports the vehicle is standardized on the reviewed V5 wiring map. That
+is a statement about the intended/as-built harness, **not a measurement**: no
+continuity check has been performed, row #1 of `VERIFIED_STATE.md` stays
+UNVERIFIED, and nothing here is promoted.
+
+| Role | Previous planned pin | V5 pin |
+|---|---|---|
+| Motor encoder A | D2 | D2 (unchanged), interrupt channel 0 |
+| Motor encoder B | D3 | **D4** (level read only; no interrupt channel in this core's table) |
+| DRV8874 PH | D9 | **D8** (plain digital output) |
+| DRV8874 EN/PWM | D6 | **D9** (the firmware's only PWM consumer) |
+| DRV8874 nSLEEP | D7 | **D10** |
+| DRV8874 nFAULT | D4 (spare; line not installed) | **no pin** (`kNoPin`); capability stays `NotInstalled` |
+| Start trigger | D10 | **D12** |
+| DRV8874 PMODE | - | not MCU-controlled; tied to GND in the harness |
+
+**No pin-role conflicts.** D4 is no longer any kind of nFAULT input (it is
+encoder B, and the nFAULT line has no pin at all - `kMotorFaultBar` is the
+explicit `kNoPin` sentinel, with a `static_assert` in `src/SensorInputs.h` that
+refuses a build with `kPlannedDriverFaultCapability == Installed` and no pin
+behind it). D10 is no longer the trigger (it is nSLEEP), D12 is the trigger, D9
+is the PWM/EN output and D8 is a plain PH output.
+
+**Framework capability check** (installed Renesas core 1.9.0,
+`variants/NANOR4/`, from the framework's own pin table): D2 = P105 carries
+`PIN_INTERRUPT|CHANNEL_0` (encoder A interrupt valid); D4 = P103 has no
+interrupt entry (fine for the level-only B read, and a warning that an interrupt
+attached there would silently attach nothing); D9 = P303 carries PWM channel
+7-B (valid `analogWrite`); D8 = P304, D10 = P112 and D12 = P110 are plain
+digital I/O. This is a framework-table reading, not a board measurement.
+
+**Deliberately unchanged:** the `DriverFaultCapability::NotInstalled` design
+(`lib/evcore/src/DriverFault.h` untouched); every calibration value and its
+provenance (`src/VehicleConfig.h` untouched); the PH/EN plan
+(`lib/evcore/src/MotorDriverPlan.h` untouched); the temporary 300-permille bench
+ceiling; all production safety/configuration gates. Battery and current sensing
+remain not installed: their constants stay planned raw-count placeholders (no
+conversion, no hardware presence claimed).
+
+**Files changed:** `src/PinMap.h` (the map), `src/SensorInputs.h` (the
+compile-time guard and the not-installed wording), `docs/limitations.md`,
+`VERIFIED_STATE.md`, `SOFTWARE_ARCHITECTURE.md`, `README.md`,
+`docs/bringup/P-H1A-driver-electrical.md`, `docs/bringup/P-H1B-sense-inputs.md`,
+`docs/hardware/motor-driver-drv8874.md`, `DEVELOPMENT_LOG.md` (this entry).
+
+**Verification** (host/build only - the board is gone, no physical test was
+performed or possible):
+
+- `pio test -e native`: **529/529**.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry`:
+  **116/116** (without `-t tools/telemetry` the package-relative imports do not
+  resolve).
+- `pio run -e nano_r4`: SUCCESS, clean rebuild, no warnings (67152 B).
+- `pio run -e bench`: SUCCESS, no warnings (74004 B).
+- `pio run -e bench-watchdog`: SUCCESS, no warnings (73432 B).
+
+**Not verified / next stage**
+
+- **Nothing on hardware.** No continuity check, no idle levels, no driver truth
+  table; the map is what H1A step A0 would verify. Production and the bench
+  images compile the same `src/PinMap.h`, so both now carry the V5 map; neither
+  was uploaded (the board is not available).
+
+---
+
+## D34 - 2026-10-03 - Production closure - five audit findings, and the run now
+plans its own time
+
+Phase 13 (production competition-readiness closure). Bench bring-up is done
+(motor moves under bench control, both directions tested, the encoder counts, the
+trigger works), so the work is software closure against the current tree. Five
+findings were re-checked against the tree first; all five were still present.
+Nothing was promoted: no value was relabelled `Measured`, and no calibration
+number was invented.
+
+**1. The final stop's dwell was unvalidatable.** `validateNearZeroConfig()`
+required `ValueSource::Measured` for all three of its values, while the run's
+final stop is the event's Complete Stop (rule 8.p) and arrives as `RuleDerived` -
+so with an otherwise complete calibration the run policy could never be usable and
+no run could start. Fixed in `NearZeroVerifier.h`:
+`dwellProvenanceIsEstablished()` accepts a measured dwell **or** a `RuleDerived`
+dwell that cites its rule (`citesEvidence()`), and the dwell gets its own refusal
+(`NearZeroConfigError::DwellIsNotEstablished`). The threshold and the update-gap
+limit are still measured-only. The dwell was **not** relabelled `Measured`, and an
+*uncited* rule value is refused exactly like a placeholder.
+
+**2. The bottle phases could never exit.**
+`bottleContactDetected`/`captureComplete`/`pushComplete` were hard-coded `false` in
+the vehicle layer, so `Approach` could only end in `PhaseTimeout`. Implemented in
+the one place that can honestly produce it: `lib/evcore/src/BottleEvidence.h`
+derives the three facts from the run-axis position and the announced geometry -
+contact at a configured lead before the Bottle Start Point (rule 7.c.ii.(5)),
+capture complete after a configured advance beyond contact, push complete at the
+turn-around position (the Target Point plus the announced Bottle Line Distance,
+rule 8.j) plus a configured margin. **This is a deliberate deviation from section
+14's wording**, recorded in that section and in the module header: the mechanism
+exists and has no detection of its own, so the inference is implemented with the
+claim stated plainly - it is the firmware's position-derived *belief*, every
+distance must be `Measured` before a run may be announced, and the bottle's real
+behavior still has to be checked against an independent observation (P-H8) before
+`VERIFIED_STATE.md` #11 may be promoted. No sensor was invented and no sensor
+evidence is faked.
+
+**3. Target Time did nothing.** It was stored, validated and echoed, and no motion
+path read it. Now the announcement boundary plans the run:
+`ev::planRunTiming()` (`MotionProfile.h`) turns the announced Target Time, the
+announced geometry (the whole course: out to the turn-around and back) and the
+measured limits into a **planned cruise** - the slowest cruise whose estimated
+travel fits the announced time, never above the configured/safety ceiling - and a
+**deliberate delay** that spends the slack the run cannot spend by travelling,
+bounded by the policy's maximum delay and by the configured maximum run duration.
+An announced time shorter than the fastest admissible travel is **refused**
+(`AnnounceRefusal::TargetTimeUnreachable`, with the plan's own status as the
+detail) rather than met by exceeding a limit. The plan reaches the control path
+through `runProfileLimits_` (the per-run cruise) and
+`CompetitionStateMachine::plannedDelayS()` (the OptionalDelay phase), so a
+changing Target Time changes the commanded motion. The Target Time and the
+geometry remain operator inputs (`config set`), never source constants.
+
+**4. Both legs used the forward brake offset.** `profileLimitsForOneDirection()`
+now takes the direction and selects `kPlannedForwardBrakeOffsetM` or
+`kPlannedReverseBrakeOffsetM`; the per-run planned-cruise builder
+(`profileLimitsWithCruise()`) does the same.
+
+**5. A ramp-down was a dead stop.** `RunMotionCommand::RampDown*` was mapped
+straight onto a non-powered `Disabled` request, so the profile's computed
+deceleration ramp was never commanded and the "ramp-down" was a coast. The vehicle
+layer now keeps regulating toward the shaped target for a ramp
+(`ev::isRunRampDownCommand()`), while `Brake*` still maps to the deliberate
+non-powered hold and every fault/stop path still fails to `Disabled`. The
+regulator's one-sided effort limit keeps a ramp from ever asking for powered effort
+the other way.
+
+**Operator workflow (no recompilation).** `reset` -> `config set level=<...>
+distance=<m> time=<s> bottle_line=<m>` -> `config check` -> `announce` -> `arm` ->
+physical trigger -> run -> `status`. `announce` now answers with the plan:
+`OK,cmd=announce,plan=Planned,cruise_mps=...,delay_s=...,total_s=...,margin_s=...`.
+
+**Configuration gates.** No new check id (`ConfigurationCheckId` and the uint16
+mask are unchanged) and no telemetry schema change: the new values live in
+`RunPhaseConfig` (minimum planned cruise, the three bottle distances) and are
+validated by `validateRunPhaseConfig()`, so `PhaseConfigValid`/`RunPolicyUsable`
+still refuse arming while they are placeholders. The maximum deliberate delay is
+RuleDerived (the rule's maximum Target Time).
+
+**New placeholders (all Provisional, none promoted):**
+`kPlannedMinimumCruiseMps = 0.10`,
+`kPlannedBottleContactLeadM = 0.0`, `kPlannedBottleCaptureAdvanceM = 0.0`,
+`kPlannedBottlePushMarginM = 0.0`. The Phase-14 procedure that establishes them,
+and every other value, is `docs/bringup/P-H14-calibration-checklist.md`.
+
+**Files changed:** `lib/evcore/src/NearZeroVerifier.h`, `MotionProfile.h`,
+`RunAxis.h`, `BottleEvidence.h` (new), `CompetitionStateMachine.h`,
+`OperatorPolicy.h`, `OperatorResponse.h`; `src/VehicleConfig.h`,
+`src/VehicleRuntime.h`, `src/VehicleRuntime.cpp`; `SOFTWARE_ARCHITECTURE.md`
+(sections 13 and 14), `docs/limitations.md`,
+`docs/bringup/P-H14-calibration-checklist.md` (new), the test fixtures
+(`test_competition_state`, `test_motion_chain`, `test_scenario`,
+`test_near_zero_verifier`, `test_operator_policy`, `test_operator_response`) and
+two new suites (`test_bottle_evidence`, `test_run_timing`), and this entry.
+
+**Not verified / next stage.** Nothing on hardware: every number above is still a
+placeholder, `checks` still reports `all=0`, and the plan's arithmetic has never
+been compared with a realised Run Time. The first physical step is step 0 of
+`docs/bringup/P-H14-calibration-checklist.md` (continuity and the pin map), then
+step 2 (command polarity), which is what unlocks the rest.
+
+---
+
+## D35 - 2026-10-03 - Post-tournament cleanup - emergency removed, D32-D34 repaired and rebuilt
+
+**Preservation first.** The dirty post-tournament tree was snapshotted before any
+cleanup, as required. `git switch -c recovery/d32-d34-v5-snapshot`, `git add -A`
+(staged 57 files; `.pio/`, `data/raw/`, `.freebuff/`, `__pycache__/` verified
+unstaged via ignore rules), commit `2b1f45c5aa4f644670335eeb781a0ba1bd6684ad`
+`snapshot: working tree at post-tournament audit (D32-D34 + emergency image)`.
+Cleanup branch `cleanup/d35-post-tournament` was created from that snapshot; all
+work below is on it. `main` untouched, nothing pushed, nothing uploaded. D34 had
+been **unverified** until this cleanup/rebuild: it did not compile and had no
+green host run.
+
+**1. Emergency image removed (tournament-only, recoverable from the snapshot).**
+Deleted `src/emergency/EmergencyConfig.h`, `src/emergency/EmergencyRun.h`,
+`src/emergency/EmergencyMain.cpp` (whole `src/emergency/` directory) and
+`test/test_emergency_run/test_main.cpp` (whole suite). Removed `[env:emergency]`
+plus its comment block and `build_src_filter = +<emergency/> +<EncoderInput.cpp>`
+/ `build_flags = -DEV_EMERGENCY_IMAGE=1` from `platformio.ini`; the `env:native`
+comment block now directly precedes `[env:native]`. `pio run -e emergency` now
+reports unknown env. Added a defensive guard in `src/main.cpp` refusing
+`EV_EMERGENCY_IMAGE`/`DEV_EMERGENCY_IMAGE` in the vehicle image, mirroring the
+H1A guard. No emergency env, source, test, or define remains in the active tree.
+
+**2. Compile fix (smallest correct).** `src/VehicleConfig.h`
+`runTimingPlanInputs()` took `double announcedTargetTimeS`, shadowing the helper
+`announcedTargetTimeS(double)` it calls on the next line, so
+`announcedTargetTimeS(announcedTargetTimeS)` could not compile. Renamed the
+parameter to `announcedTargetTimeSValue` and call
+`announcedTargetTimeS(announcedTargetTimeSValue)`. D34 Target-Time planning
+semantics unchanged.
+
+**3. Rule-derived optional-delay gate.** `maximumOptionalDelayS` is legitimately
+`RuleDerived` (rule 8.i maximum Target Time, cited), but
+`validateRunPhaseConfig()` required `isMeasured()`, so `PhaseConfigValid` could
+never pass. Added `optionalDelayProvenanceIsEstablished()` in
+`lib/evcore/src/CompetitionStateMachine.h`, mirroring
+`dwellProvenanceIsEstablished()` for the final-stop dwell: Measured passes;
+cited RuleDerived passes; Provisional or uncited RuleDerived fails. No value
+relabeled Measured. Regression tests in `test/test_competition_state`:
+`test_cited_rule_derived_optional_delay_passes` and
+`test_uncited_and_provisional_optional_delay_fail` (plus measured still passes).
+
+**4. Derived-cruise provenance (choice documented).** `plannedCruiseValue()` had
+labeled the computed timing-plan cruise `Measured`, which is false: it is
+arithmetic from measured inputs, not a vehicle measurement. Chose the dedicated
+`ValueSource::Derived = 3` solution (minimal, explicit): added `Derived` plus
+`isDerived()` in `lib/evcore/src/Units.h` (`citesEvidence()` already requires a
+citation for it); added `cruiseProvenanceIsEstablished()` in
+`lib/evcore/src/MotionProfile.h` (Measured or cited Derived) and made only the
+cruise field of `validateMotionProfileLimits()` use it - every other limit stays
+Measured-only, and `planRunTiming()` inputs still require Measured (a Derived
+input is refused). `src/VehicleConfig.h::plannedCruiseValue()` now returns
+`Derived` with the derivation cited. The alternative (keeping plan outputs
+outside `Sourced<T>`) would have retyped `MotionProfileLimits` and every caller;
+Derived keeps the provenance in the type with a two-line predicate. Regression
+tests in `test/test_run_timing`: `test_a_computed_cruise_is_derived_never_measured`,
+`test_profile_limits_accept_a_cited_derived_cruise_only`,
+`test_plan_inputs_still_require_measured_limits`. No calibration gate weakened:
+shipped `profileLimits()` cruise is still Provisional, so production still
+refuses to arm.
+
+**5. Hygiene.** Split the merged comment in
+`lib/evcore/src/ConfigurationChecks.h` (`failureMask() ... for.` now ends its
+line; the frozen-vocabulary bullet starts its own). No other formatting.
+
+**6. Bench ceiling.** Reverted the temporary tournament override in
+`src/bench/BenchConsole.h` from 300 back to `kMaxEffortPermille = 150U`. No test
+or documented requirement needs 300; production ceiling
+`kPlannedMaxEffortPermille` untouched. H1A `bench h1a-brake` retained: strictly
+bench-only (`src/bench/` + `EV_BENCH_H1A_DIAGNOSTIC` guard), bounded
+(`kH1aHoldMaxMs = 30000U`, expiry on pass clock, `bench stop`/`reset` end it),
+production leakage guard intact (`src/main.cpp` `#error`), and removal now would
+discard a still-useful preregistered diagnostic. No H1A code in production.
+
+**7. D32/D33/D34 preserved, subject to tests.** D32 DriverFaultCapability
+NotInstalled + capability-aware telemetry/validation untouched except via the
+provenance fixes above; D33 V5 pin map (D2/D4/PH D8/EN D9/nSLEEP D10/trigger D12,
+nFAULT `kNoPin`) and MotorDriver single-write-path with de-energize-before-PH
+untouched; D34 final-stop dwell RuleDerived, BottleEvidence, planRunTiming,
+run-scoped cruise/delay, separate brake offsets, RampDown, PlannedDelayNotUsable
+all preserved. Only cleanup-attributable defects fixed, each with regression
+coverage.
+
+**8. Environment separation (D35 evidence, not assertion).**
+`pio project config` shows `nano_r4: +<*> -<bench/>`, `bench: +<*> -<main.cpp>`,
+`bench-watchdog: +<*> -<main.cpp>`, no `emergency`. Objects:
+`nano_r4/src` = EncoderInput/main/VehicleRuntime only;
+`bench/src` = EncoderInput/VehicleRuntime/bench/BenchMain only. `nm`:
+`nano_r4/firmware.elf` matches nothing for `bench|hang|emergency|Emergency|h1a`;
+`bench/firmware.elf` matches bench console/drive/hang/grammar plus retained H1A,
+no emergency, single `setup`/`loop`; `bench-watchdog/firmware.elf` matches bench,
+no H1A, no emergency, single `setup`/`loop`.
+
+**Verification (measured, host/build only; no hardware, board gone).**
+
+- `pio test -e native`: **552/552 SUCCESS** (32 suites; D35 adds 5).
+- `pio run -e nano_r4`: **SUCCESS**, RAM 19.2% (6292/32768), Flash 27.4%
+  (71836/262144), no warnings.
+- `pio run -e bench`: **SUCCESS**, RAM 19.8% (6492/32768), Flash 30.0%
+  (78680/262144), no warnings.
+- `pio run -e bench-watchdog`: **SUCCESS**, RAM 19.8% (6476/32768), Flash 29.8%
+  (78108/262144), no warnings.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry`:
+  **116/116 OK**.
+- No `emergency` env remains. Nothing uploaded.
+
+**Remaining production blockers (no evidence fabricated).** All calibration still
+Provisional: distance per tick, forward/reverse brake offsets, velocity ceilings,
+run duration, battery, cruise/accel/decel, feedforward/P/I/integral, reversal and
+final-stop thresholds (final dwell is cited RuleDerived, threshold still
+Provisional), approach/capture/push/reverse/final timeouts, final-approach
+distance, minimum cruise, bottle lead/advance/margin, polarity facts. Hence
+`ConfigurationValid`, `CalibrationMeasured`, `SafetyLimitsValid`,
+`ControllerConfigValid`, `ProfileLimitsValid`, `PhaseConfigValid`,
+`ReversalConfigValid`, `RunPolicyUsable` remain false; `checks all=0`. First
+physical steps per `P-H14`: continuity/pin map, then command polarity. Structurally
+clean and build/test clean; **not yet competition-ready** pending measured
+calibration.

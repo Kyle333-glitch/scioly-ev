@@ -44,16 +44,33 @@ committed; none of it can promote a `VERIFIED_STATE.md` row.
 
 Consequences that are easy to forget:
 
-- **`src/PinMap.h` is a placeholder set, not a wiring record.** It was chosen
-  against the installed framework's pin table for the capability each role needs
-  and has never been checked against a physical harness (`VERIFIED_STATE.md` #1,
+- **`src/PinMap.h` carries the team's stated V5 harness map, and it is not a
+  verified wiring record.** The role-to-pin numbers come from the team's
+  statement of the intended/as-built harness; each role's framework capability
+  was checked against the installed framework's pin table; and the map has never
+  been checked against a physical harness (`VERIFIED_STATE.md` #1,
   `SOFTWARE_ARCHITECTURE.md` section 10).
-- **The driver fault line is not interpreted.** `kPlannedDriverFaultPolarity` is
-  `Unverified`, so no level is treated as a fault; the raw level is reported
-  instead, and `DriverFaultPolarityVerified` keeps the vehicle unarmable until
-  H1B measures which level the driver drives (`src/VehicleConfig.h`,
-  `lib/evcore/src/DriverFault.h`). A driver fault nobody interprets is a driver
-  fault nobody stops for.
+- **The external DRV8874 nFAULT signal is NOT INSTALLED on this vehicle.** The
+  driver's fault output is not wired to the Nano, so there is no line to read, no
+  polarity to measure and no external driver fault the MCU can observe. The
+  firmware states this explicitly: `vehicleConfig::kPlannedDriverFaultCapability`
+  is `NotInstalled`, the V5 pin map has no pin for the line (`kMotorFaultBar` is
+  `kNoPin`), `SensorInputs.h` does not configure or sample any nFAULT pin, and
+  the capability-aware `DriverFaultConfigurationValid` check treats polarity
+  verification as *not applicable* rather than outstanding
+  (`src/VehicleConfig.h`, `lib/evcore/src/DriverFault.h`).
+  **Consequence: external fault telemetry is unavailable.** No firmware path can
+  stop the vehicle for a driver fault on this hardware, and the raw level is not
+  reported as a level at all - telemetry writes `nfault=NotInstalled` and marks
+  the level field absent, because a floating pin is not a healthy driver. This is
+  a wiring fact stated by the team, **not** a measurement: no polarity was ever
+  established, `kPlannedDriverFaultPolarity` stays `Unverified`, and nothing may
+  be relabelled as measured.
+  **What still exists independently:** the DRV8874's on-chip overcurrent, thermal
+  and undervoltage protections are untouched by this. The driver still protects
+  itself; the MCU simply cannot observe that it did.
+  H1B Part 3 and H9's driver-fault trip have **no subject** on this vehicle
+  (`docs/bringup/P-H1B-sense-inputs.md`, `docs/bringup/P-H9-fault-injection.md`).
 - **The encoder's mechanical interpretation is unknown**: counts per revolution,
   gearing, and which count direction is physical forward travel
   (`SOFTWARE_ARCHITECTURE.md` section 10). The decoding *scheme* is fixed in
@@ -62,7 +79,30 @@ Consequences that are easy to forget:
   first things H2 must check (`src/EncoderInput.h`).
 - **The bottle-pushing mechanism does not exist yet**, so how a contact or a
   finished push is detected - and whether it can be detected at all - is
-  undecided (`VERIFIED_STATE.md` #11, `SOFTWARE_ARCHITECTURE.md` section 10).
+  undecided (`VERIFIED_STATE.md` #11, `SOFTWARE_ARCHITECTURE.md` section 10)
+  *(superseded in part by D34: the run's forward phases now exit on
+  position-derived evidence from `BottleEvidence.h`, with every distance a
+  `Measured`-required placeholder - see the entry below. The mechanism's real
+  behavior, and therefore row #11, is still unverified.)*
+- **The run's bottle evidence is the firmware's belief, not an observation** (D34).
+  This vehicle has no bottle sensor, so contact, capture and push are derived from
+  the run-axis position and the announced geometry (`lib/evcore/src/BottleEvidence.h`).
+  The three distances are Provisional placeholders, so no run may be announced
+  until they are measured, and even then the derivation says only where the
+  firmware believed the vehicle was. Removed by: P-H8 recording independently
+  observed bottle positions (witness mark, observer or camera) against the
+  believed ones, and the constants promoted with that evidence.
+- **The run's timing plan has never been compared with a realised Run Time** (D34).
+  `aim: planRunTiming()` chooses the run's cruise and deliberate delay from the
+  announced Target Time and geometry, but every limit it uses is still a
+  placeholder, so nothing has been observed. Removed by: P-H14 step 12 - several
+  announced Target Times on a marked course, with the planned cruise/delay from the
+  `OK,cmd=announce` line and the realised Run Time recorded together.
+- **The regulated ramp-down has never been observed on a vehicle** (D34). The run
+  now keeps regulating toward the shaped target while the profile ramps it to zero
+  (`isRunRampDownCommand()`), instead of coasting. What that does to a real
+  drivetrain - and how far it travels - is H7's measurement, not something the
+  code change establishes.
 
 ## B. Implemented, host-tested, but never observed on the board
 

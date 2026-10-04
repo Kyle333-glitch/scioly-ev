@@ -138,7 +138,8 @@ Telemetry is a **consumer** of the control loop, never a participant in it.
   The schema that freezes the prefixes, the field set and the spelling of every
   enumerated value is `ev::TelemetryRecord`
   (`lib/evcore/src/TelemetryRecord.h`), versioned by
-  `ev::kTelemetrySchemaVersion`: `EVS<version>` is one control tick, `EVE<version>`
+  `ev::kTelemetrySchemaVersion` (currently 2, after the D32 driver-fault
+  capability change): `EVS<version>` is one control tick, `EVE<version>`
   a transition or an operator action.
 - **All or nothing.** A record that does not fit the line buffer is not emitted as
   a shortened line - truncation would eat exactly the tail fields a post-mortem
@@ -173,9 +174,10 @@ The following are **not** decided and must not be pre-built or guessed. They
 depend on facts tracked in `VERIFIED_STATE.md`:
 
 - fixed hardware configuration: pin assignments, wiring, logic levels. The
-  centralized provisional map in `src/PinMap.h` is a placeholder set, not a
-  wiring record: it is chosen against the installed framework's own pin table for
-  the capability each role needs, it is UNVERIFIED (`VERIFIED_STATE.md` #1), and
+  centralized map in `src/PinMap.h` carries the team's stated V5 harness pins and
+  is not a wiring record: each role's pin was checked against the installed
+  framework's own pin table for the capability the role needs, no continuity
+  check has been performed, and the map is UNVERIFIED (`VERIFIED_STATE.md` #1);
   section 15 fixes what it may and may not be used for;
 - the motor driver's *electrical* behavior and truth table. What is now decided
   is narrower: a **planned** input mapping exists in one place,
@@ -406,8 +408,21 @@ another's, and none is a run state machine.
     claim about where the vehicle is, and not a stop command.
   - Target Time and an optional intentional delay are carried explicitly, and the
     estimated travel duration and its margin against Target Time are reported.
-    Nothing acts on that margin: spending slack, waiting, or going faster is a run
-    strategy decision that has not been made.
+    **The strategy that spends the margin is now decided (D34):**
+    `ev::planRunTiming()` in this module is the run layer's timing owner - it takes
+    the announced Target Time, the announced geometry (the whole course: out to
+    the turn-around and back) and the measured limits, and produces the cruise the
+    run is shaped with (the *slowest* cruise whose estimated travel fits the
+    announced time, never above the configured or safety ceiling, never below the
+    configured planned-cruise floor) and the deliberate pre-travel delay that
+    spends the remaining slack. An announced Target Time shorter than the fastest
+    admissible travel is refused at the announcement boundary, never met by
+    exceeding a limit. The chosen values reach the control path as the run's
+    `MotionProfileLimits` and as `CompetitionStateMachine::plannedDelayS()`; the
+    bounded `MotionTimingIntent`/`motionTimingSummary()` estimate remains the
+    vocabulary for a caller that has limits but no announced run, and both use the
+    one `travelDurationS()` arithmetic so they cannot disagree about a trip. The
+    Target Time and the geometry stay announced (operator-typed) inputs.
   - Every limit is `Sourced`; a non-measured or malformed limit produces a zero
     target rather than a shaped one.
   - The run's target/time contract has exactly one owner: `MotionProfileInputs`
@@ -633,9 +648,22 @@ dwell interval? It combines exactly the three facts the safety contract names -
   a wait that nothing can end. A positive bound that converts to zero whole
   milliseconds expires immediately rather than becoming an unbounded wait.
 - **The bottle interaction waits for evidence, and a bound that expires is a
-  fault.** Contact, capture and push are not inferred from distance or from
-  elapsed time; each of their phases waits for the vehicle layer's evidence under
-  its own configured bound, and a bound that expires raises `PhaseTimeout`. The
+  fault.** Each of their phases waits for the vehicle layer's evidence under its
+  own configured bound, and a bound that expires raises `PhaseTimeout`. **That
+  evidence is distance-derived, deliberately and with the claim stated (D34).**
+  This vehicle's mechanism has no detection of its own, so
+  `ev::deriveBottleEvidence()` (`BottleEvidence.h`) derives contact, capture and
+  push from the run-axis position and the announced geometry - a lead distance
+  before the Bottle Start Point, a capture advance beyond contact, and the
+  turn-around position plus a configured margin. Every distance arrives as
+  `Sourced` configuration and must be `Measured` before the run policy is usable,
+  so the inference never rests on a placeholder; and it is the firmware's
+  position-derived *belief*, not an observation of the bottle. The
+  bottle-interaction row (`VERIFIED_STATE.md` #11) stays UNVERIFIED until P-H8
+  records independently observed bottle positions against it. This supersedes the
+  earlier "not inferred from distance or from elapsed time" wording, which was
+  written when no mechanism existed; contact, capture and push are still never
+  inferred from *elapsed time*. The
   same rule covers the reverse leg's closing distance and the final stop.
 - **The reversal is requested through the reversal contract, never
   re-implemented.** `Push` begins a reversal sequence on the way into
@@ -774,15 +802,21 @@ is the implementation of the wiring obligations sections 12-14 recorded
   coherent instant; on this core an aligned `int32` read is itself atomic, so the
   section is about coherence between fields, not about tearing.
 - **Raw inputs stay raw, and an unverified input is not invented into a fault.**
-  The battery, current, nFAULT and trigger inputs are sampled as ADC counts and
-  logic levels and are consumed as such (section 12). The driver's fault output is
-  interpreted by one module, `lib/evcore/src/DriverFault.h`, from a configured
-  polarity: while that polarity is `Unverified` - the shipped state - no level
-  becomes a `FaultCode` and the raw level is reported and counted instead. The
-  refusal is a configuration fact with a name, not a gap: the
-  `DriverFaultPolarityVerified` check keeps the vehicle unarmable until H1B has
-  measured the line, so an armed vehicle can never be one whose fault input nobody
-  reads. Reason recorded in `DEVELOPMENT_LOG.md` D13 and D19.
+  The battery, current and trigger inputs are sampled as ADC counts and logic
+  levels and are consumed as such (section 12). The driver's fault output is
+  interpreted by one module, `lib/evcore/src/DriverFault.h`, and that module is
+  **capability-aware**: `DriverFaultCapability` says whether the external nFAULT
+  signal exists on the vehicle at all, and the interpretation is a function of the
+  capability *and* the polarity. On the assembled vehicle the line is **not
+  installed** (`NotInstalled`), so `SensorInputs.h` does not configure or sample
+  the pin, no level is consumed, and telemetry writes `nfault=NotInstalled` with
+  the level field absent - an unavailable signal is never spelled as a healthy
+  level. On a vehicle that *does* wire the line, the behavior is unchanged from
+  what it was: while the polarity is `Unverified` no level becomes a `FaultCode`
+  and the raw level is reported and counted instead, and the capability-aware
+  `DriverFaultConfigurationValid` check keeps the vehicle unarmable until H1B has
+  measured it. So an armed vehicle can never be one whose fault input nobody
+  reads. Reason recorded in `DEVELOPMENT_LOG.md` D13, D19 and D32.
 - **The watchdog has one checkpoint, one centralized setting, and one open.**
   Only a main-loop pass that finished - and whose control tick, if one ran,
   completed in the frozen stage order - may refresh the watchdog. The refresh
@@ -827,9 +861,13 @@ is the implementation of the wiring obligations sections 12-14 recorded
   Two checks are about provenance rather than arithmetic. `MeasuredValuesCiteEvidence`
   is false for as long as a promoted (non-placeholder) value names no evidence, so
   the edit that lets a value authorize motion is also the edit that has to point at
-  the measurement (`Sourced::citesEvidence()`). `DriverFaultPolarityVerified` is
-  false until the driver's fault line has been measured - see the raw-inputs
-  contract above.
+  the measurement (`Sourced::citesEvidence()`). `DriverFaultConfigurationValid` is
+  false until a vehicle that *has* the driver's fault line has measured its
+  polarity; on a vehicle whose external nFAULT signal is not installed, polarity
+  verification is not applicable and the check reports the capability instead - see
+  the raw-inputs contract above. It was named `DriverFaultPolarityVerified` until
+  D32, when the vehicle's wiring made the old name a claim about a signal that does
+  not exist.
 - **The operator interface is a consumer of the same chain, and only a consumer.**
   `serviceSerial()` runs in the loop's low-priority section, after the watchdog
   checkpoint: it moves staged bytes out, reads received bytes, applies at most one

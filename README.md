@@ -28,8 +28,8 @@ measurements override assumptions.
 ## Project layout
 
 - `src/` - vehicle firmware. The only place allowed to use Arduino headers. It
-  holds the cooperative runtime shell (`VehicleRuntime.*`), the provisional pin
-  map (`PinMap.h`), the motor driver adapter (`MotorDriver.h`), the encoder
+  holds the cooperative runtime shell (`VehicleRuntime.*`), the stated V5 harness
+  pin map (`PinMap.h`), the motor driver adapter (`MotorDriver.h`), the encoder
   interrupt (`EncoderInput.*`), the raw input adapters (`SensorInputs.h`), the
   watchdog checkpoint (`WatchdogCheckpoint.h`), the non-blocking serial line
   transport (`SerialTransport.h`) and the vehicle configuration
@@ -182,6 +182,16 @@ recorded in `DEVELOPMENT_LOG.md`.
   refuses to compile, and H3 now states that the firmware acts on `nFAULT` not at
   all until H1B's polarity is promoted - so the supply's current limit and the
   kill switch are the stop authority. See `DEVELOPMENT_LOG.md` D20.
+- **P9E (D32)** - the assembled vehicle turned out not to wire the DRV8874's
+  nFAULT output to the Nano, and the firmware now says so instead of treating the
+  pin as a fault input: the external driver-fault signal is an explicit
+  capability (`DriverFaultCapability::NotInstalled`), the pin is not configured or
+  sampled, the capability-aware `DriverFaultConfigurationValid` check treats
+  polarity verification as not applicable rather than outstanding, and telemetry
+  reports `nfault=NotInstalled` with the level field marked absent rather than as
+  a healthy `0`. See `DEVELOPMENT_LOG.md` D32. The driver's own on-chip protection
+  is untouched; what is gone is the MCU's ability to observe it, which
+  `docs/limitations.md` records.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
   electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are now done, so what
