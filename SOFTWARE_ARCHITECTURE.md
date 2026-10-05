@@ -206,10 +206,12 @@ depend on facts tracked in `VERIFIED_STATE.md`:
   reversal timeout and final-approach distance. Section 14 fixes the states, the
   transitions, the refusal behavior and the ownership of those values, but not
   one number in them - none has been measured;
-- the producers of the bottle-interaction evidence. Section 14 fixes that the run
-  waits for contact, capture and push evidence under a configured bound, but how
-  a contact or a finished push is detected, and whether the mechanism can detect
-  one at all, depends on the bottle-pushing mechanism that does not exist yet
+- the bottle-interaction producers' *values*. Section 14 fixes that the forward
+  phases wait for a completion under a configured bound and that the run never
+  learns which strategy produced it, but every number behind those completions -
+  the interaction distances, the credible contact-window tolerance and the
+  forward-stop margin - is unmeasured, so no plan (and therefore no completion)
+  exists yet, and how the bottle actually behaves is still unknown
   (`VERIFIED_STATE.md` #11);
 - any *future* addition to the telemetry schema, the command vocabulary or the
   response vocabulary. Schema version 1 and the command set are frozen in sections
@@ -352,8 +354,9 @@ that the value is an unverified, configurable placeholder.
     `ev::legExecutionTargetM()` answers where the leg being travelled ends (the
     forward leg at `forwardStopMpPositionM`, the reverse leg at the announced
     Target Point), and `ev::deriveBottleEvidence(plan, ...)` answers the
-    forward-leg evidence with the push objective taken from that same forward
-    stop. The vehicle layer holds its current plan in `ev::RunExecutionPlanHolder`
+    forward-leg progression thresholds from the plan's own landmarks: approach
+    complete at the earliest credible contact position, capture complete at the
+    capture guarantee, and push complete at that same forward stop. The vehicle layer holds its current plan in `ev::RunExecutionPlanHolder`
     and reads both through it, so the travel taper and the phase progression cannot
     disagree about where the forward travel ends. With no usable plan there is no
     leg target at all: the run shapes nothing and claims no forward completion
@@ -677,9 +680,12 @@ dwell interval? It combines exactly the three facts the safety contract names -
   `Fault`; there is no path that re-enters a run without a fresh announcement and
   a fresh arming decision.
 - **The run policy consumes evidence and emits intent, nothing else.**
-  `RunInputs` carries the armed fact, the start trigger, bottle contact/capture/
-  push evidence, the run-axis remaining distance with its own usability, the
-  near-zero evidence packet and any fault the vehicle layer observed.  `RunStatus`
+  `RunInputs` carries the armed fact, the start trigger, the three
+  forward-progression completions (`approachComplete`, `captureComplete`,
+  `pushComplete` - facts about the vehicle's own travel, never observations of the
+  bottle, and producers the machine is deliberately blind to), the run-axis
+  remaining distance with its own usability, the near-zero evidence packet and any
+  fault the vehicle layer observed.  `RunStatus`
   carries the phase, one `RunMotionCommand`, the fault of record, the
   `stopVerified` verdict, the reversal phase and the time in phase. No phase
   transition derives geometry from the announced `RunConfig`: the announced
@@ -688,7 +694,9 @@ dwell interval? It combines exactly the three facts the safety contract names -
   is on the run axis is owned by `RunAxis.h` (section 12); what the bottle line
   means for the mechanism and how far the vehicle must travel before a push is
   complete remain run-layer calculations on measured, still-UNVERIFIED facts
-  (#11); the state machine consumes their results as evidence.
+  (#11), and the positions the forward progression is thresholded at are owned by
+  the run's execution plan (`RunExecutionPlan.h`); the state machine consumes their
+  results as completion facts and never as observations.
 - **Every bound is an input.** `RunPhaseConfig` supplies each phase timeout, the
   optional delay, the final-approach distance and the final-stop verification as
   `Sourced` values, and an unusable one refuses the announcement instead of
@@ -699,24 +707,28 @@ dwell interval? It combines exactly the three facts the safety contract names -
   refusal that names no cause) faults as `RunSequencingError` instead of becoming
   a wait that nothing can end. A positive bound that converts to zero whole
   milliseconds expires immediately rather than becoming an unbounded wait.
-- **The bottle interaction waits for evidence, and a bound that expires is a
-  fault.** Each of their phases waits for the vehicle layer's evidence under its
-  own configured bound, and a bound that expires raises `PhaseTimeout`. **That
-  evidence is distance-derived, deliberately and with the claim stated (D34).**
-  This vehicle's mechanism has no detection of its own, so
-  `ev::deriveBottleEvidence()` (`BottleEvidence.h`) derives contact, capture and
-  push from the run-axis position and the announced geometry - a lead distance
-  before the Bottle Start Point, a capture advance beyond contact, and the
-  Bottle Line position plus a configured margin. Every distance arrives as
-  `Sourced` configuration and must be `Measured` before the run policy is usable,
-  so the inference never rests on a placeholder; and it is the firmware's
-  position-derived *belief*, not an observation of the bottle. The
-  bottle-interaction row (`VERIFIED_STATE.md` #11) stays UNVERIFIED until P-H8
-  records independently observed bottle positions against it. This supersedes the
-  earlier "not inferred from distance or from elapsed time" wording, which was
-  written when no mechanism existed; contact, capture and push are still never
-  inferred from *elapsed time*. The
-  same rule covers the reverse leg's closing distance and the final stop.
+- **The forward progression waits for a completion, and a bound that expires is a
+  fault.** Each of the forward phases waits for the vehicle layer's completion
+  fact under its own configured bound, and a bound that expires raises
+  `PhaseTimeout`. **That completion is distance-derived, deliberately and with
+  the claim stated in its name (D34, D42/S5).** This vehicle's mechanism has no
+  detection of its own, so `ev::deriveForwardProgression()`
+  (`BottleEvidence.h`) turns the run-axis position into `approachComplete`,
+  `captureComplete` and `pushComplete`, thresholded at the positions the run's
+  execution plan owns (`RunExecutionPlan.h`): the earliest credible contact
+  position (the capture window *opening* - never a claim that the bottle was
+  touched), the capture guarantee, and the forward execution target. Every
+  distance behind them arrives as `Sourced` configuration and must be `Measured`
+  before a plan - and therefore a completion - exists, so the inference never
+  rests on a placeholder, and the state machine never learns which strategy
+  produced a completion. The claim is the firmware's position-derived *belief*,
+  not an observation of the bottle. The bottle-interaction row
+  (`VERIFIED_STATE.md` #11) stays UNVERIFIED until P-H8 records independently
+  observed bottle positions against it. This supersedes the earlier "not inferred
+  from distance or from elapsed time" wording, which was written when no
+  mechanism existed; the three completions are still never inferred from
+  *elapsed time*. The same rule covers the reverse leg's closing distance and the
+  final stop.
 - **The reversal is requested through the reversal contract, never
   re-implemented.** `Push` begins a reversal sequence on the way into
   `ForwardDecel`; `ForwardDecel` ramps the forward leg to zero and moves to

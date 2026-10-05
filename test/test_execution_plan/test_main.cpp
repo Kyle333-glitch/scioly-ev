@@ -16,10 +16,12 @@
 // honesty about timing readiness.
 //
 // S3 created the plan abstraction and its pure construction/validation logic; S4
-// created the plan's consumption accessors and wired them into the run layer. What
-// is asserted here is still only the pure arithmetic and the gates - who reads
-// which stored value, and what happens with no usable plan - and never vehicle
-// behavior.
+// created the plan's consumption accessors and wired them into the run layer; S5
+// made the plan the one owner of the forward progression's three thresholds, so the
+// run's approach/capture/push completions are thresholded at the plan's own
+// landmarks rather than at a second, configuration-derived set. What is asserted
+// here is still only the pure arithmetic and the gates - who reads which stored
+// value, and what happens with no usable plan - and never vehicle behavior.
 //
 // Every value below is a **synthetic test fixture**, not a measurement and not an
 // announced competition configuration. Nothing in this file is:
@@ -565,9 +567,8 @@ void test_the_leg_target_and_the_push_objective_are_the_same_stored_forward_stop
 
     // The push objective, through the plan-aware evidence derivation: the same
     // stored value, not a second formula that happens to produce it.
-    const ev::BottleEvidence evidence =
-        ev::deriveBottleEvidence(plan, true, 0.0, true, measuredBottleConfig());
-    expectPosition(plan.forwardStopMpPositionM, evidence.pushPositionM);
+    const ev::BottleEvidence evidence = ev::deriveBottleEvidence(plan, true, 0.0, true);
+    expectPosition(plan.forwardStopMpPositionM, evidence.pushCompletePositionM);
 
     // And the stored value is the Bottle Line plus the measured margin - not the
     // Bottle Line, and not the plan's own rule-derived push landmark.
@@ -609,9 +610,9 @@ void test_changing_only_the_forward_stop_moves_the_leg_target_and_the_push_objec
     // ...and so did the push objective, by the same amount in the same direction,
     // because both are the same stored field.
     const double nearPushM =
-        ev::deriveBottleEvidence(nearPlan, true, 0.0, true, measuredBottleConfig()).pushPositionM;
+        ev::deriveBottleEvidence(nearPlan, true, 0.0, true).pushCompletePositionM;
     const double farPushM =
-        ev::deriveBottleEvidence(farPlan, true, 0.0, true, measuredBottleConfig()).pushPositionM;
+        ev::deriveBottleEvidence(farPlan, true, 0.0, true).pushCompletePositionM;
     expectPosition(nearPlan.forwardStopMpPositionM, nearPushM);
     expectPosition(farPlan.forwardStopMpPositionM, farPushM);
     expectPosition(stopDeltaM, farPushM - nearPushM);
@@ -629,15 +630,14 @@ void test_the_push_completes_at_the_forward_stop_and_not_at_the_bottle_line(void
                                   measuredExecutionDependencies(), false, 0.0, 0.0)
             .plan;
     TEST_ASSERT_TRUE(plan.valid);
-    const ev::BottleEvidenceConfig bottle = measuredBottleConfig();
 
     // Past the Bottle Line and short of the forward stop, the push is NOT complete -
     // the rule landmark is not the run layer's threshold.
-    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.02, true, bottle).pushComplete);
-    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.10, true, bottle).pushComplete);
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.02, true).pushComplete);
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.10, true).pushComplete);
     // At and beyond the forward stop it is.
-    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.15, true, bottle).pushComplete);
-    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.20, true, bottle).pushComplete);
+    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.15, true).pushComplete);
+    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.20, true).pushComplete);
 
     // The plan's own rule-derived push landmark (Bottle Line + push margin) is at or
     // inside the forward stop, which is what makes completing at the stop a completed
@@ -646,10 +646,9 @@ void test_the_push_completes_at_the_forward_stop_and_not_at_the_bottle_line(void
     expectPosition(6.01, plan.pushCompleteMpPositionM);
 
     // The reverse leg reports no forward evidence at all, at any position.
-    const ev::BottleEvidence reverseEvidence =
-        ev::deriveBottleEvidence(plan, false, 6.20, true, bottle);
+    const ev::BottleEvidence reverseEvidence = ev::deriveBottleEvidence(plan, false, 6.20, true);
     TEST_ASSERT_FALSE(reverseEvidence.pushComplete);
-    TEST_ASSERT_FALSE(reverseEvidence.contactDetected);
+    TEST_ASSERT_FALSE(reverseEvidence.approachComplete);
 }
 
 void test_the_reverse_leg_ends_at_the_announced_target_point(void) {
@@ -699,12 +698,11 @@ void test_no_usable_plan_means_no_leg_target_and_no_forward_evidence(void) {
     TEST_ASSERT_FALSE(ev::legExecutionTargetM(none, true).usable);
     TEST_ASSERT_FALSE(ev::legExecutionTargetM(none, false).usable);
     expectPosition(0.0, ev::legExecutionTargetM(none, true).positionM);
-    const ev::BottleEvidence noEvidence =
-        ev::deriveBottleEvidence(none, true, 100.0, true, measuredBottleConfig());
+    const ev::BottleEvidence noEvidence = ev::deriveBottleEvidence(none, true, 100.0, true);
     TEST_ASSERT_FALSE(noEvidence.derived);
-    TEST_ASSERT_FALSE(noEvidence.contactDetected);
+    TEST_ASSERT_FALSE(noEvidence.approachComplete);
     TEST_ASSERT_FALSE(noEvidence.pushComplete);
-    expectPosition(0.0, noEvidence.pushPositionM);
+    expectPosition(0.0, noEvidence.pushCompletePositionM);
 
     // The same is true of a plan the run layer's own dependencies refuse: there is
     // no target to fall back to, and specifically not the Bottle Line.
@@ -715,8 +713,7 @@ void test_no_usable_plan_means_no_leg_target_and_no_forward_evidence(void) {
             .plan;
     TEST_ASSERT_FALSE(refused.valid);
     TEST_ASSERT_FALSE(ev::legExecutionTargetM(refused, true).usable);
-    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(refused, true, 6.5, true, measuredBottleConfig())
-                          .pushComplete);
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(refused, true, 6.5, true).pushComplete);
 
     // `NotPlanned` is a named status, so a log can tell "no announcement yet" from
     // "the announcement was refused".
@@ -752,6 +749,115 @@ void test_the_plan_holder_holds_one_plan_at_a_time(void) {
     expectPosition(0.0, holder.plan().forwardStopMpPositionM);
 }
 
+// --- 13. S5: the plan owns all three forward-progression thresholds -------------
+
+// The forward progression has ONE owner per threshold, and the plan is it. These
+// cases pin what each completion means: approach is the credible capture window
+// OPENING (never a claim that the bottle was touched), capture is the plan's capture
+// guarantee, and the push is the plan's forward execution target.
+
+void test_the_approach_completes_when_the_plans_capture_window_opens(void) {
+    const ev::RunExecutionPlan plan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(plan.valid);
+
+    // Just short of the plan's earliest credible contact position nothing is
+    // complete; at it, the approach is.
+    TEST_ASSERT_FALSE(
+        ev::deriveBottleEvidence(plan, true, plan.earliestContactMpPositionM - 1e-9, true)
+            .approachComplete);
+    const ev::BottleEvidence atWindowOpen =
+        ev::deriveBottleEvidence(plan, true, plan.earliestContactMpPositionM, true);
+    TEST_ASSERT_TRUE(atWindowOpen.derived);
+    TEST_ASSERT_TRUE(atWindowOpen.approachComplete);
+
+    // Identity of source: the threshold IS the plan's field, not a second formula
+    // over the announced geometry and the interaction configuration.
+    expectPosition(plan.earliestContactMpPositionM, atWindowOpen.approachCompletePositionM);
+    expectPosition(1.97, atWindowOpen.approachCompletePositionM);
+
+    // The window opening is the *beginning* of the credible contact window: it is
+    // earlier than the nominal contact position and earlier than the capture
+    // guarantee, and reporting it does not report capture. This is the whole point
+    // of the separation - the firmware never claims a contact it did not observe.
+    TEST_ASSERT_TRUE(plan.earliestContactMpPositionM < plan.latestContactMpPositionM);
+    TEST_ASSERT_TRUE(plan.earliestContactMpPositionM < plan.captureGuaranteedMpPositionM);
+    TEST_ASSERT_FALSE(atWindowOpen.captureComplete);
+    TEST_ASSERT_FALSE(atWindowOpen.pushComplete);
+}
+
+void test_the_capture_completes_at_the_plans_capture_guarantee(void) {
+    const ev::RunExecutionPlan plan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(plan.valid);
+
+    TEST_ASSERT_FALSE(
+        ev::deriveBottleEvidence(plan, true, plan.captureGuaranteedMpPositionM - 1e-9, true)
+            .captureComplete);
+    const ev::BottleEvidence atGuarantee =
+        ev::deriveBottleEvidence(plan, true, plan.captureGuaranteedMpPositionM, true);
+    expectPosition(plan.captureGuaranteedMpPositionM, atGuarantee.captureCompletePositionM);
+    expectPosition(2.03, atGuarantee.captureCompletePositionM);
+    TEST_ASSERT_TRUE(atGuarantee.approachComplete);
+    TEST_ASSERT_TRUE(atGuarantee.captureComplete);
+    TEST_ASSERT_FALSE(atGuarantee.pushComplete);
+
+    // The guarantee covers the WHOLE credible window, which is what stops the plan
+    // from declaring capture while contact is still uncertain.
+    TEST_ASSERT_TRUE(plan.captureGuaranteedMpPositionM >= plan.latestContactMpPositionM);
+}
+
+void test_the_progression_thresholds_follow_the_plans_measured_window(void) {
+    // The same announcement and bottle calibration, one different input: the
+    // measured credible contact-window tolerance. The rule geometry, the nominal
+    // contact position and the forward stop are identical, so anything that moves
+    // below moved because the plan's own measured window moved.
+    const ev::RunExecutionPlan narrow =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.01), measured(0.15)),
+                                  false, 0.0, 0.0)
+            .plan;
+    const ev::RunExecutionPlan wide =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.05), measured(0.15)),
+                                  false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(narrow.valid);
+    TEST_ASSERT_TRUE(wide.valid);
+    TEST_ASSERT_TRUE(narrow.geometry.bottleStartPositionM == wide.geometry.bottleStartPositionM);
+    TEST_ASSERT_TRUE(narrow.geometry.bottleLinePositionM() == wide.geometry.bottleLinePositionM());
+
+    // The approach threshold follows the widened window earlier...
+    expectPosition(0.04, narrow.earliestContactMpPositionM - wide.earliestContactMpPositionM);
+    expectPosition(wide.earliestContactMpPositionM,
+                   ev::deriveBottleEvidence(wide, true, wide.earliestContactMpPositionM, true)
+                       .approachCompletePositionM);
+    expectPosition(1.93, wide.earliestContactMpPositionM);
+
+    // ...and the capture guarantee still covers the widened window, which is the
+    // ordering the plan refuses to break.
+    TEST_ASSERT_TRUE(wide.captureGuaranteedMpPositionM >= wide.latestContactMpPositionM);
+
+    // The rule-derived push landmark and the forward execution target did NOT move:
+    // the contact window is not the forward stop, and neither is standing in for the
+    // other.
+    TEST_ASSERT_TRUE(narrow.pushCompleteMpPositionM == wide.pushCompleteMpPositionM);
+    TEST_ASSERT_TRUE(narrow.forwardStopMpPositionM == wide.forwardStopMpPositionM);
+
+    // A window the capture guarantee cannot cover is refused rather than sequenced:
+    // the plan will not claim capture while contact could still be uncertain.
+    expectRefused(ev::RunExecutionPlanStatus::ContradictoryExecutionGeometry,
+                  ev::buildRunExecutionPlan(
+                      regionalAnnouncement(),
+                      ev::BottleEvidenceConfig(measured(0.02), measured(0.02), measured(0.01)),
+                      ev::RunExecutionDependencies(measured(0.05), measured(0.15)), false, 0.0,
+                      0.0));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -777,6 +883,10 @@ int main(int, char**) {
     RUN_TEST(test_the_reverse_leg_ends_at_the_announced_target_point);
     RUN_TEST(test_no_usable_plan_means_no_leg_target_and_no_forward_evidence);
     RUN_TEST(test_the_plan_holder_holds_one_plan_at_a_time);
+
+    RUN_TEST(test_the_approach_completes_when_the_plans_capture_window_opens);
+    RUN_TEST(test_the_capture_completes_at_the_plans_capture_guarantee);
+    RUN_TEST(test_the_progression_thresholds_follow_the_plans_measured_window);
 
     return UNITY_END();
 }

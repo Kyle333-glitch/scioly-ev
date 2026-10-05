@@ -35,10 +35,19 @@ namespace ev {
 //   `MotionProfileIntent`/`MotionDirection`/the regulator and presents exactly
 //   one request per cycle to `SafetyAuthority`, as section 13 requires.
 // * Every phase has an understandable exit condition. Phases whose exit depends
-//   on a physical event the firmware has not measured - a bottle contact, a
-//   captured bottle, a completed push, a verified stop - wait for that evidence
-//   and are bounded by a configured timeout. A phase that never gets its exit
-//   evidence faults instead of waiting forever or guessing.
+//   on the forward progression - the travel reaching the credible capture window,
+//   capture being guaranteed, the push reaching the run's forward execution target
+//   - wait for that completion and are bounded by a configured timeout, exactly as
+//   the stop phases wait for their verified stop. A phase that never gets its
+//   completion faults instead of waiting forever or guessing.
+// * It is blind to how a completion was produced. `RunInputs` carries three
+//   completion booleans and nothing about their producer: today the vehicle layer
+//   derives them from the run axis thresholded at the run's own execution-plan
+//   landmarks (`BottleEvidence.h`, `RunExecutionPlan.h`), and a different producer
+//   later - a sensor, a different estimator, an operator - would change nothing
+//   here. No transition below may depend on which strategy is behind the fact, and
+//   none may claim an observation the producer did not make: a completion is "the
+//   travel has got this far", not "the bottle was detected".
 // * The reversal is requested through the reversal contract, not re-implemented:
 //   entering `ForwardDecel` begins a `ReversalSequencer`, `BrakeZeroSpeed`
 //   consumes its permission, and a refusal from it faults. The steady-state
@@ -61,7 +70,7 @@ namespace ev {
 //   is on the run axis, what "the bottle line" means for the mechanism, and how
 //   far the vehicle must travel before the push is complete are run-layer
 //   calculations built on measured, still-UNVERIFIED facts (#4, #6, #11). The
-//   state machine consumes their *results* as evidence.
+//   state machine consumes their *results* as completion facts.
 // * It does not ramp, regulate, brake or verify by itself. The ramp belongs to
 //   `MotionProfile`, the near-zero policy to `NearZeroVerifier`, the reversal
 //   sequencing to `ReversalSequencer`, the permission to `SafetyAuthority`.
@@ -82,11 +91,15 @@ enum class RunPhase : uint8_t {
     Armed = 2,
     // The deliberate pre-travel delay is being spent.
     OptionalDelay = 3,
-    // Forward travel toward the bottle.
+    // Forward travel toward the bottle. Completes when the travel enters the
+    // credible capture window (the run's `approachComplete` fact) - a statement
+    // about the travel, not an observation of the bottle.
     Approach = 4,
-    // Bottle contact observed; the mechanism engages it.
+    // The capture window is open: the mechanism's capture behavior runs while the
+    // travel continues, until capture is guaranteed (`captureComplete`).
     Capture = 5,
-    // Driving the bottle forward until the push objective is reported complete.
+    // Driving the bottle forward until the push reaches the run's forward execution
+    // target (`pushComplete`).
     Push = 6,
     // Bringing forward travel to zero: the reversal sequence is ramping down.
     // This is the run's *presentation* (`RampDown*`), not the evidence: the
@@ -323,7 +336,7 @@ struct RunPhaseConfig {
     // bound is no longer the run that was announced. `ForwardDecel` and
     // `BrakeZeroSpeed` deliberately have no bound here: the reversal sequence
     // carries its own single timeout, which covers both.
-    Sourced<double> approachTimeoutS;        // -> Capture, on bottle contact
+    Sourced<double> approachTimeoutS;        // -> Capture, on approach complete
     Sourced<double> captureTimeoutS;         // -> Push, on capture complete
     Sourced<double> pushTimeoutS;            // -> ForwardDecel, on push complete
     Sourced<double> reverseTimeoutS;         // -> FinalApproach, on the closing distance
@@ -350,11 +363,13 @@ struct RunPhaseConfig {
     // wait on a number nobody measured.
     Sourced<double> minimumPlannedCruiseMps;
 
-    // How the forward leg's bottle-interaction evidence is derived from the run
-    // axis (`BottleEvidence.h`). The phases that wait for it cannot exit without
-    // it, so it is validated with the rest of the run policy's configuration: a
-    // run may not be announced while any of its distances is a placeholder, and
-    // none of them may be assumed from the mechanism's intended geometry.
+    // The bottle-interaction distances the run's execution plan derives its forward
+    // progression thresholds from (`BottleEvidence.h` distances,
+    // `RunExecutionPlan.h` thresholds). The forward phases cannot exit without those
+    // thresholds, so the distances are validated with the rest of the run policy's
+    // configuration: a run may not be announced while any of its distances is a
+    // placeholder, and none of them may be assumed from the mechanism's intended
+    // geometry.
     BottleEvidenceConfig bottleEvidence;
 };
 
@@ -455,12 +470,19 @@ struct RunInputs {
     // when the run reaches Armed starts it on that update.
     bool startTriggered = false;
 
-    // Bottle-interaction evidence. None of these is derivable from the announced
-    // geometry yet: the mechanism and its contact behavior are UNVERIFIED
-    // (VERIFIED_STATE.md #11). The run layer reports what it actually observed,
-    // each phase waits with a configured bound, and a bound that expires is a
-    // fault rather than a guessed transition.
-    bool bottleContactDetected = false;
+    // Forward-progression completion, one fact per forward phase. Each says "the
+    // travel has reached this run's threshold for that phase" and nothing about how
+    // the answer was reached: the producer is the vehicle layer's own strategy
+    // (today the run axis thresholded at the execution plan's landmarks), and this
+    // machine consumes the fact without knowing or caring which strategy produced
+    // it. None of them is an observation of the bottle.
+    //
+    // No production producer may leave one of these permanently false: the vehicle
+    // layer derives all three from the run it announced, so they become available
+    // exactly when the run's execution plan does. A phase whose completion can never
+    // arrive is a wiring fault, not a policy, and each phase's configured bound
+    // turns it into a `PhaseTimeout` instead of a silent stall.
+    bool approachComplete = false;
     bool captureComplete = false;
     bool pushComplete = false;
 
@@ -770,7 +792,7 @@ private:
                 break;
 
             case RunPhase::Approach:
-                if (inputs.bottleContactDetected) {
+                if (inputs.approachComplete) {
                     enterPhase(RunPhase::Capture, nowMs);
                 }
                 break;

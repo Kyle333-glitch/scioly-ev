@@ -156,7 +156,7 @@ ev::RunStartStatus announceValidRun(Harness& harness) {
 struct Evidence {
     bool armed = true;
     bool start = false;
-    bool contact = false;
+    bool approach = false;
     bool captured = false;
     bool pushed = false;
     bool remainingUsable = false;
@@ -171,7 +171,7 @@ ev::RunInputs inputsFrom(const Evidence& evidence) {
     ev::RunInputs inputs;
     inputs.authorityArmed = evidence.armed;
     inputs.startTriggered = evidence.start;
-    inputs.bottleContactDetected = evidence.contact;
+    inputs.approachComplete = evidence.approach;
     inputs.captureComplete = evidence.captured;
     inputs.pushComplete = evidence.pushed;
     inputs.remainingDistanceUsable = evidence.remainingUsable;
@@ -199,7 +199,7 @@ Evidence evidenceFor(ev::RunPhase phase) {
             evidence.start = true;
             break;
         case ev::RunPhase::Approach:
-            evidence.contact = true;
+            evidence.approach = true;
             break;
         case ev::RunPhase::Capture:
             evidence.captured = true;
@@ -352,7 +352,7 @@ void test_a_fresh_state_machine_is_idle_and_asks_for_nothing(void) {
     // A trigger in Idle starts nothing: there is no announced run to run.
     Evidence trigger;
     trigger.start = true;
-    trigger.contact = true;
+    trigger.approach = true;
     trigger.pushed = true;
     trigger.remainingUsable = true;
     trigger.remainingM = 0.0;
@@ -395,7 +395,7 @@ void test_an_invalid_announcement_faults_and_requires_an_explicit_reset(void) {
     // Nothing acts during the fault, however much evidence arrives.
     Evidence everything;
     everything.start = true;
-    everything.contact = true;
+    everything.approach = true;
     everything.captured = true;
     everything.pushed = true;
     const ev::RunStatus status = tick(harness, everything);
@@ -531,7 +531,7 @@ void test_the_optional_delay_is_spent_before_any_travel(void) {
 
 // --- Bottle phases ----------------------------------------------------------
 
-void test_approach_waits_for_contact_evidence_and_times_out(void) {
+void test_approach_waits_for_completion_and_times_out(void) {
     Harness harness = defaultHarness(0.0);
     announceValidRun(harness);
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));
@@ -548,7 +548,7 @@ void test_capture_waits_for_engagement_and_times_out(void) {
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Capture));
 
     Evidence starved;
-    starved.contact = true;
+    starved.approach = true;
     const ev::RunStatus status = starveUntilFault(harness, starved);
     expectFault(ev::FaultCode::PhaseTimeout, status);
 }
@@ -559,7 +559,7 @@ void test_push_waits_for_completion_and_times_out(void) {
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Push));
 
     Evidence starved;
-    starved.contact = true;
+    starved.approach = true;
     starved.captured = true;
     const ev::RunStatus status = starveUntilFault(harness, starved);
     expectFault(ev::FaultCode::PhaseTimeout, status);
@@ -580,7 +580,7 @@ void test_the_phase_bound_is_inclusive_and_late_evidence_is_refused(void) {
     // that would have ended the phase faults the run instead of being accepted
     // late.
     Evidence arrivedLate;
-    arrivedLate.contact = true;
+    arrivedLate.approach = true;
     harness.nowMs = enteredMs + 5000U;
     status = harness.machine.update(harness.nowMs, inputsFrom(arrivedLate));
     expectFault(ev::FaultCode::PhaseTimeout, status);
@@ -595,10 +595,11 @@ void test_a_stalled_loop_faults_at_the_next_update(void) {
     announceValidRun(harness);
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));
 
-    Evidence contactArrivedLate;
-    contactArrivedLate.contact = true;
+    Evidence approachArrivedLate;
+    approachArrivedLate.approach = true;
     harness.nowMs += 6000U;  // past the 5 s approach bound
-    const ev::RunStatus status = harness.machine.update(harness.nowMs, inputsFrom(contactArrivedLate));
+    const ev::RunStatus status =
+        harness.machine.update(harness.nowMs, inputsFrom(approachArrivedLate));
     expectFault(ev::FaultCode::PhaseTimeout, status);
 
     // The reversal's own timeout covers the same case between ForwardDecel and
@@ -857,7 +858,7 @@ void test_no_evidence_can_skip_the_reversal_phases(void) {
     // Everything the run could ever be told, all at once: the run still advances
     // one phase per cycle and never jumps from the approach to the reverse.
     Evidence everything;
-    everything.contact = true;
+    everything.approach = true;
     everything.captured = true;
     everything.pushed = true;
     everything.remainingUsable = true;
@@ -1038,7 +1039,7 @@ void test_done_never_permits_further_drive(void) {
     // together: nothing moves it, and no travel command is ever emitted again.
     Evidence everything;
     everything.start = true;
-    everything.contact = true;
+    everything.approach = true;
     everything.captured = true;
     everything.pushed = true;
     everything.remainingUsable = true;
@@ -1085,7 +1086,7 @@ void test_reset_requires_a_new_announcement_and_a_new_arming_decision(void) {
     // boundary that entered it, not from machine construction.
     Evidence everything;
     everything.start = true;
-    everything.contact = true;
+    everything.approach = true;
     const ev::RunStatus idle = tick(harness, everything);
     expectPhase(ev::RunPhase::Idle, idle);
     expectCommand(ev::RunMotionCommand::None, idle);
@@ -1464,7 +1465,7 @@ int main(int, char**) {
     RUN_TEST(test_a_trigger_before_arming_starts_nothing);
     RUN_TEST(test_a_disarm_before_the_trigger_returns_to_parameter_valid);
     RUN_TEST(test_the_optional_delay_is_spent_before_any_travel);
-    RUN_TEST(test_approach_waits_for_contact_evidence_and_times_out);
+    RUN_TEST(test_approach_waits_for_completion_and_times_out);
     RUN_TEST(test_capture_waits_for_engagement_and_times_out);
     RUN_TEST(test_push_waits_for_completion_and_times_out);
     RUN_TEST(test_a_bound_below_a_millisecond_expires_rather_than_never);

@@ -106,14 +106,19 @@ Consequences that are easy to forget:
   position-derived evidence from `BottleEvidence.h`, with every distance a
   `Measured`-required placeholder - see the entry below. The mechanism's real
   behavior, and therefore row #11, is still unverified.)*
-- **The run's bottle evidence is the firmware's belief, not an observation** (D34).
-  This vehicle has no bottle sensor, so contact, capture and push are derived from
-  the run-axis position and the announced geometry (`lib/evcore/src/BottleEvidence.h`).
-  The three distances are Provisional placeholders, so no run may be announced
-  until they are measured, and even then the derivation says only where the
-  firmware believed the vehicle was. Removed by: P-H8 recording independently
-  observed bottle positions (witness mark, observer or camera) against the
-  believed ones, and the constants promoted with that evidence.
+- **The run's forward progression is the firmware's belief, not an observation**
+  (D34, named honestly by D42/S5). This vehicle has no bottle sensor, so
+  `approachComplete`, `captureComplete` and `pushComplete` are statements about the
+  vehicle's own travel: the run axis thresholded at the positions the run's
+  execution plan owns (`lib/evcore/src/BottleEvidence.h`,
+  `lib/evcore/src/RunExecutionPlan.h`). Approach complete means the credible
+  capture window is open - **not** that the bottle was touched - and no code path
+  reads it as a contact. The distances and the forward-stop margin are Provisional
+  placeholders, so no plan (and therefore no completion) may exist until they are
+  measured, and even then the derivation says only where the firmware believed the
+  vehicle was. Removed by: P-H8 recording independently observed bottle positions
+  (witness mark, observer or camera) against the believed ones, and the constants
+  promoted with that evidence.
 - **The run's timing plan has never been compared with a realised Run Time** (D34).
   `aim: planRunTiming()` chooses the run's cruise and deliberate delay from the
   announced Target Time and geometry, but every limit it uses is still a

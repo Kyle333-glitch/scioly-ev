@@ -65,9 +65,12 @@ Changing two at once makes a good run unattributable and a bad run undiagnosable
 Per run, record both what the firmware believed and what a person saw, kept
 separately:
 
-- **believed:** contact position (`pos_m` at the tick the Capture phase begins);
-  push start and end positions; push distance; the phase timeline (`Capture`,
-  `Push`) from the `EVE1` events; any fault or phase timeout; run time.
+- **believed:** the run-axis position at each forward-progression completion, from
+  the phase timeline - `pos_m` when `Capture` begins (the credible capture window
+  opening, which is **not** a contact observation), when `Push` begins (capture
+  guaranteed) and when `Push` ends (the forward execution target); push distance;
+  the phase timeline (`Capture`, `Push`) from the `EVE1` events; any fault or
+  phase timeout; run time.
 - **observed:** the bottle's start position before the run (tape, per the
   placement tolerance) and final position after it (tape from the start point);
   whether the witness mark was disturbed and when; whether the bottle tipped, was
@@ -106,7 +109,9 @@ is actually betting on.
 
 The judgement uses the observed evidence (bottle start/end positions, witness
 mark, observer), not the firmware's `pos_m`. The two are recorded side by side so
-the believed contact can be checked against the observed one. **No target push
+the believed progression can be checked against the observed contact and bottle
+travel - and the observed contact is what establishes the nominal contact position,
+never the tick the `Capture` phase began. **No target push
 distance is prescribed here**: the requirement is the event's, and the mechanism
 parameters are chosen from the data.
 
@@ -117,9 +122,15 @@ parameters are chosen from the data.
   independent contact evidence recorded.
 - Set the bottle-interaction parameters (capture threshold, approach distance,
   push criterion) from the measured data, with `ValueSource::Measured`, and cite
-  the rule for the placement/line values. If the believed contact position and the
-  observed one disagree systematically, fix the estimator or the mechanism - do not
-  move the threshold that hides it.
+  the rule for the placement/line values. The run's execution plan also needs its
+  two own dependencies measured here: the credible **contact-window tolerance**
+  (the spread of the observed contact position across runs) and the **forward-stop
+  margin beyond the Bottle Line** (how far past the line the vehicle's commanded
+  stop must lie, from the observed bottle overshoot together with the braking
+  distance at that speed) - without them no plan exists and no forward phase can
+  complete at all. If the believed progression and the observed contact disagree
+  systematically, fix the estimator or the mechanism - do not move the threshold
+  that hides it.
 - Log in `DEVELOPMENT_LOG.md`.
 
 ## If it fails or is inconclusive

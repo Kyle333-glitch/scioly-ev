@@ -183,11 +183,12 @@ struct TelemetrySnapshot {
 
     // The run policy and the request this cycle presented.
     ev::RunPhase phase = ev::RunPhase::Idle;
-    // The three pieces of forward-leg bottle evidence the run was given this
-    // cycle (`deriveBottleEvidence()`), reported so a phase that is waiting can
-    // be attributed to the evidence that has not arrived. They are the run's
-    // inputs, not readings: the derivation is a position-derived belief.
-    bool bottleContactDetected = false;
+    // The three forward-progression completion facts the run was given this cycle
+    // (`deriveBottleEvidence()`, thresholded at the run's execution plan landmarks),
+    // reported so a phase that is waiting can be attributed to the completion that
+    // has not arrived. They are the run's inputs, not readings: the strategy behind
+    // them is position-derived, and none of them is an observation of the bottle.
+    bool approachComplete = false;
     bool captureComplete = false;
     bool pushComplete = false;
     ev::RunMotionCommand runCommand = ev::RunMotionCommand::None;

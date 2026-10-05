@@ -135,14 +135,15 @@ public:
                 break;
             case ev::RunPhase::Approach:
                 script.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
-                script.bottleContactDetected =
-                    harness.runAxisPositionM() >= harness.bottleStartPositionM();
+                // The progression facts come from the production strategy - the run
+                // axis thresholded at the plan's own landmarks - so this script never
+                // carries a second copy of a threshold. Approach completes when the
+                // credible capture window opens, which is not a contact claim.
+                script.approachComplete = harness.forwardBottleEvidence().approachComplete;
                 break;
             case ev::RunPhase::Capture:
                 script.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
-                script.captureComplete = harness.runAxisPositionM() >=
-                                         harness.bottleStartPositionM() +
-                                             evscenario::kFixtureCaptureTravelM;
+                script.captureComplete = harness.forwardBottleEvidence().captureComplete;
                 break;
             case ev::RunPhase::Push:
                 script.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -671,7 +672,7 @@ void test_every_fault_identity_is_latched_in_every_phase_and_stops_the_boundary(
             // stop bounds that a phase could otherwise be waiting on.
             CycleScript everything;
             everything.startTriggered = true;
-            everything.bottleContactDetected = true;
+            everything.approachComplete = true;
             everything.captureComplete = true;
             everything.pushComplete = true;
             everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -815,7 +816,7 @@ void test_an_invalid_configuration_never_starts_a_run(void) {
         // cover every phase bound: nothing starts, and nothing drives.
         CycleScript everything;
         everything.startTriggered = true;
-        everything.bottleContactDetected = true;
+        everything.approachComplete = true;
         everything.captureComplete = true;
         everything.pushComplete = true;
         everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -1042,9 +1043,9 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
         return script;
     };
     CycleScript captureStarved = rolling();
-    captureStarved.bottleContactDetected = true;
+    captureStarved.approachComplete = true;
     CycleScript pushStarved = rolling();
-    pushStarved.bottleContactDetected = true;
+    pushStarved.approachComplete = true;
     pushStarved.captureComplete = true;
 
     // No contact, no capture, no completed push, no closing distance, no target
@@ -1243,7 +1244,7 @@ void test_a_chain_reset_returns_to_nothing_and_a_second_run_works(void) {
     // nothing, and nothing is what reaches the actuator.
     CycleScript everything;
     everything.startTriggered = true;
-    everything.bottleContactDetected = true;
+    everything.approachComplete = true;
     everything.captureComplete = true;
     everything.pushComplete = true;
     everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -1471,7 +1472,7 @@ void test_an_incomplete_configuration_cannot_arm_the_chain(void) {
         // `ParameterValid`, because leaving it requires the armed fact.
         CycleScript everything;
         everything.startTriggered = true;
-        everything.bottleContactDetected = true;
+        everything.approachComplete = true;
         everything.captureComplete = true;
         everything.pushComplete = true;
         everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -1532,7 +1533,7 @@ void test_a_disarm_in_every_reversal_phase_stops_the_run(void) {
         // nothing.
         CycleScript everything;
         everything.startTriggered = true;
-        everything.bottleContactDetected = true;
+        everything.approachComplete = true;
         everything.captureComplete = true;
         everything.pushComplete = true;
         everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -1686,7 +1687,7 @@ void test_a_rewound_clock_stops_the_run_and_the_chain_recovers(void) {
 
     CycleScript everything;
     everything.startTriggered = true;
-    everything.bottleContactDetected = true;
+    everything.approachComplete = true;
     everything.captureComplete = true;
     everything.pushComplete = true;
     everything.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
@@ -1962,7 +1963,7 @@ void test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_
     // One stored value, read by both consumers.
     TEST_ASSERT_TRUE(harness.legExecutionTargetM().usable);
     TEST_ASSERT_TRUE(harness.legExecutionTargetM().positionM == forwardStopM);
-    TEST_ASSERT_TRUE(harness.forwardBottleEvidence().pushPositionM == forwardStopM);
+    TEST_ASSERT_TRUE(harness.forwardBottleEvidence().pushCompletePositionM == forwardStopM);
 
     // Past the Bottle Line and short of the forward stop the run was still in
     // Push: the rule landmark did not end the push.
@@ -1985,6 +1986,52 @@ void test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_
     TEST_ASSERT_TRUE(harness.legExecutionTargetM().positionM == harness.targetPointPositionM());
     TEST_ASSERT_TRUE(harness.executionPlan().reverseStopMpPositionM ==
                      harness.targetPointPositionM());
+    expectTraceInvariants(harness);
+}
+
+// --- S5: truthful forward-phase progression -----------------------------------
+
+void test_the_run_enters_capture_when_the_capture_window_opens_without_claiming_contact(void) {
+    // End to end through the production chain: the run's forward progression is
+    // produced by the current strategy - the run axis thresholded at the run's own
+    // execution-plan landmarks - and what it reports is the truth about that
+    // strategy. Approach completes when the credible capture window opens, which is
+    // before the nominal contact position and before the capture guarantee, and
+    // entering Capture is not a claim that the bottle was touched or captured.
+    ScenarioHarness harness(fixtures());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(harness.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_TRUE_MESSAGE(harness.executionPlanUsable(), "the fixture plan must be usable");
+    TEST_ASSERT_TRUE(harness.arm());
+
+    const double windowOpenM = harness.executionPlan().earliestContactMpPositionM;
+    const double captureGuaranteedM = harness.executionPlan().captureGuaranteedMpPositionM;
+    TEST_ASSERT_TRUE(windowOpenM < captureGuaranteedM);
+    // The threshold is the plan's own field, and the plan's window opening is before
+    // the announced Bottle Start Point rule landmark: the progression is execution
+    // geometry, not the rule landmark.
+    TEST_ASSERT_TRUE(windowOpenM < harness.bottleStartPositionM());
+
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Capture, driver),
+                             "the run never reached Capture");
+
+    // The cycle that entered Capture: the travel was at or past the window opening
+    // and still short of the capture guarantee, and the production derivation at
+    // that position agrees - approach complete, capture not.
+    const CycleRecord& entered = harness.last();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Capture),
+                          static_cast<int>(entered.phase));
+    TEST_ASSERT_TRUE(entered.runAxisPositionM >= windowOpenM);
+    TEST_ASSERT_TRUE(entered.runAxisPositionM < captureGuaranteedM);
+    TEST_ASSERT_TRUE(entered.runAxisPositionM < harness.bottleStartPositionM());
+
+    const ev::BottleEvidence evidence = harness.forwardBottleEvidence();
+    TEST_ASSERT_TRUE(evidence.derived);
+    TEST_ASSERT_TRUE(evidence.approachComplete);
+    TEST_ASSERT_FALSE(evidence.captureComplete);
+    TEST_ASSERT_FALSE(evidence.pushComplete);
+    TEST_ASSERT_TRUE(evidence.approachCompletePositionM == windowOpenM);
     expectTraceInvariants(harness);
 }
 
@@ -2018,5 +2065,6 @@ int main(int, char**) {
     RUN_TEST(test_the_production_decoder_decides_what_a_raw_sample_counts);
     RUN_TEST(test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields);
     RUN_TEST(test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_at);
+    RUN_TEST(test_the_run_enters_capture_when_the_capture_window_opens_without_claiming_contact);
     return UNITY_END();
 }

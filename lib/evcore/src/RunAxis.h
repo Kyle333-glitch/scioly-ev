@@ -101,8 +101,10 @@ struct RunAxisGeometry {
     double bottleLineDistanceM;
 
     // Position of the Bottle Start Point, metres from the Start Point (rule
-    // 7.c.ii.(5)). Announced rather than derived; the run waits for the
-    // mechanism's contact evidence, not for this number. Official rule landmark.
+    // 7.c.ii.(5)). Announced rather than derived; the run waits for its own
+    // forward progression to complete (the execution plan's thresholds, derived
+    // from this landmark and the measured interaction calibration), never for this
+    // number itself. Official rule landmark.
     double bottleStartPositionM;
 
     // Position of the **Bottle Line**, metres from the Start Point: the event's

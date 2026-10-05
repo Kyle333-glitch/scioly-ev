@@ -260,22 +260,22 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     ev::RunInputs runInputs;
     runInputs.authorityArmed = authority_.isArmed();
     runInputs.startTriggered = rawInputs_.startTriggerActive;
-    // The forward leg's bottle-interaction evidence, derived from the run axis
-    // (`deriveBottleEvidence()`): this vehicle has no bottle sensor, so the three
-    // facts are positions the firmware believes rather than observations of the
-    // bottle, and every distance they rest on is a `Sourced` value that must be
-    // `Measured` before a run may be announced - so this path cannot run on a
-    // placeholder. The derivation reports nothing at all while the position
-    // verdict is unusable, which is what makes a phase whose evidence never
-    // arrives end in its configured timeout rather than in a guessed exit.
+    // The forward progression facts for this cycle, thresholded at the run's own
+    // execution plan landmarks (`deriveBottleEvidence()`): this vehicle has no
+    // bottle sensor, so these are statements about how far the vehicle has
+    // travelled - approach is "the credible capture window is open", never "the
+    // bottle was touched" - and every distance behind them is a `Sourced` value that
+    // must be `Measured` before the plan exists, so this path cannot run on a
+    // placeholder. The derivation reports nothing at all while the position verdict
+    // is unusable, which is what makes a phase whose completion never arrives end in
+    // its configured timeout rather than in a guessed exit.
     //
     // The leg it uses is the leg the run is on now (`legForward_`, updated in
     // stage 6 of the previous tick from the run's own command), because the leg
     // this cycle will name does not exist until the run has been stepped.
     const ev::BottleEvidence bottleEvidence = ev::deriveBottleEvidence(
-        executionPlan_.plan(), legForward_, axisPosition.positionM, positionUsable_,
-        vehicleConfig::bottleEvidenceConfig());
-    runInputs.bottleContactDetected = bottleEvidence.contactDetected;
+        executionPlan_.plan(), legForward_, axisPosition.positionM, positionUsable_);
+    runInputs.approachComplete = bottleEvidence.approachComplete;
     runInputs.captureComplete = bottleEvidence.captureComplete;
     runInputs.pushComplete = bottleEvidence.pushComplete;
     runInputs.remainingDistanceUsable = positionUsable_;
@@ -420,7 +420,7 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.driverFaultLowCycles = cyclesWithDriverFaultLow_;
     snapshot.driverFaultConfigurationValid = configurationChecks_.driverFaultConfigurationValid;
     snapshot.phase = status.phase;
-    snapshot.bottleContactDetected = bottleEvidence.contactDetected;
+    snapshot.approachComplete = bottleEvidence.approachComplete;
     snapshot.captureComplete = bottleEvidence.captureComplete;
     snapshot.pushComplete = bottleEvidence.pushComplete;
     snapshot.runCommand = status.intention.command;

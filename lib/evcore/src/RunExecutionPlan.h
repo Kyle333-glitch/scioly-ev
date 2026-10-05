@@ -44,11 +44,17 @@ namespace ev {
 //   rule landmarks (Target Point, Bottle Start Point, Bottle Line) and this module
 //   owns the execution targets. The Bottle Line is an official rule landmark and
 //   is **not** assumed to be the vehicle's physical forward stop.
-// * **It is not the bottle evidence.** `BottleEvidence.h` turns a position into
-//   contact/capture/push evidence and owns those three landmark positions; this
-//   plan carries the same official positions for planning and diagnostics, derived
-//   from the same configuration, and it does not re-implement the evidence or
-//   decide that a phase may advance.
+// * **It owns the forward progression's thresholds, and it is not the evidence.**
+//   `BottleEvidence.h` turns a position into the three progression facts the run
+//   waits for (`approachComplete`, `captureComplete`, `pushComplete`); the
+//   *positions* those facts are thresholded at are this plan's
+//   (`earliestContactMpPositionM`, `captureGuaranteedMpPositionM`,
+//   `forwardStopMpPositionM`), handed to that module through
+//   `ev::deriveBottleEvidence(plan, ...)`. The plan derives them once, from the
+//   announced rule geometry and the measured calibration, so there is no second
+//   derivation that could disagree with the travel taper about where an event is.
+//   The plan does not re-implement the comparison and does not decide that a phase
+//   may advance.
 // * **It is not a motion profile and it is not a state machine.**
 //   `MotionProfile.h` owns shaping and the timing plan;
 //   `CompetitionStateMachine.h` owns phase transitions. This plan owns neither,
@@ -59,7 +65,7 @@ namespace ev {
 //   false and both numbers are 0.0 ("not meaningfully available").
 // * **The run layer consumes it, and only through the accessors below.** S4 wired
 //   the plan into `VehicleRuntime` and the scenario harness: each leg's execution
-//   target (`legExecutionTargetM()`), the forward-leg push objective
+//   target (`legExecutionTargetM()`), the forward-leg progression thresholds
 //   (`deriveBottleEvidence()`) and the shaping distance the run travels are all
 //   read from the plan, and the temporary pre-S3/S4 compatibility seam
 //   (`temporaryLegExecutionTargetM()`) is gone. There is one forward stop value in
@@ -208,7 +214,10 @@ struct RunExecutionPlan {
     // is on the axis when each event happens. Positive is forward travel.
 
     // The earliest MP position at which the bottle's touch can credibly be
-    // reported: the nominal contact position minus the credible tolerance.
+    // reported: the nominal contact position minus the credible tolerance. The
+    // forward travel reaching it is where the run's `approachComplete` fact becomes
+    // true - the credible capture window opening is a statement about the travel,
+    // never a claim that the bottle was touched.
     const double earliestContactMpPositionM;
 
     // The latest MP position at which the bottle's touch can credibly be
@@ -218,8 +227,9 @@ struct RunExecutionPlan {
     const double latestContactMpPositionM;
 
     // The MP position at which the bottle counts as captured, given the
-    // configured advance past the *nominal* contact position - the same landmark
-    // `BottleEvidence.h` reports `captureComplete` at. Deliberately not named
+    // configured advance past the *nominal* contact position. This is the position
+    // the run's `captureComplete` fact is thresholded at, and a valid plan requires
+    // it to cover the whole credible contact window. Deliberately not named
     // "measured": it is derived arithmetic on measured inputs.
     const double captureGuaranteedMpPositionM;
 
@@ -234,7 +244,7 @@ struct RunExecutionPlan {
     // The commanded forward stop position, metres: the Bottle Line rule landmark
     // plus the measured forward-stop margin. This is the explicit forward
     // execution target the run layer consumes everywhere
-    // (`ev::legExecutionTargetM()`, and the push objective of
+    // (`ev::legExecutionTargetM()`, and the `pushComplete` threshold of
     // `ev::deriveBottleEvidence(plan, ...)`), and it is **not** the Bottle Line
     // unless the measured margin is exactly zero.
     const double forwardStopMpPositionM;
@@ -393,11 +403,13 @@ inline RunExecutionPlanResult buildRunExecutionPlan(
     }
 
     // 4. Derive the execution landmarks. The nominal contact position is the
-    //    announced Bottle Start Point advanced by the pusher's measured lead (the
-    //    same landmark `BottleEvidence.h` reports contact at); the window is the
-    //    measured tolerance either side of it; capture is the configured advance
-    //    past it; and the forward stop is the Bottle Line plus the measured margin
-    //    - never the Bottle Line itself.
+    //    announced Bottle Start Point advanced by the pusher's measured lead; the
+    //    credible window is the measured tolerance either side of it; capture is
+    //    the configured advance past it; and the forward stop is the Bottle Line
+    //    plus the measured margin - never the Bottle Line itself. The window's
+    //    earliest position is where `BottleEvidence.h` reports `approachComplete`
+    //    (the window opening), the capture position where it reports
+    //    `captureComplete`, and the forward stop where it reports `pushComplete`.
     const double nominalContactMpPositionM =
         geometry.bottleStartPositionM - bottleConfig.contactLeadDistanceM.value;
     const double earliestContactMpPositionM = nominalContactMpPositionM - contactWindowToleranceM;
@@ -495,36 +507,40 @@ inline LegExecutionTarget legExecutionTargetM(const RunExecutionPlan& plan, bool
                       : LegExecutionTarget(plan.reverseStopMpPositionM, plan.valid);
 }
 
-// The forward-leg bottle evidence, with the forward travel's endpoint taken from
-// the plan.
+// The forward-leg progression facts, with every threshold taken from the plan.
 //
-// Contact and capture keep the meaning and the owner they already had
-// (`BottleEvidence.h`, and the distance calibration behind them): this function
-// does not re-derive them and does not change what a phase waits for. The one
-// landmark that has an *execution* owner is the forward travel's endpoint, and that
-// is the value this overload takes from the plan: the push counts as complete at
-// the plan's forward stop, not at the Bottle Line rule landmark. That is what keeps
-// the phase progression and the travel taper from disagreeing - the run leaves
-// `Push` exactly where its own shaping target reaches zero - and it cannot report a
-// push earlier than the event's objective: a valid plan's ordering invariant
-// requires `pushCompleteMpPositionM <= forwardStopMpPositionM`, so the forward stop
-// is at or beyond the rule-derived push landmark. The plan's own
-// `pushCompleteMpPositionM` remains the rule-derived bound that invariant checks.
+// The plan is the one owner of the three positions at which the forward progression
+// completes, and this function is where the run layer reads them:
+//
+//   * `approachComplete` at `earliestContactMpPositionM` - the credible capture
+//     window opening, which is a statement about the travel and never a claim that
+//     the bottle was touched;
+//   * `captureComplete` at `captureGuaranteedMpPositionM` - the capture guarantee,
+//     which a valid plan places beyond the whole credible window; and
+//   * `pushComplete` at `forwardStopMpPositionM` - the run's own forward execution
+//     target, so the run leaves `Push` exactly where its shaping target reaches zero
+//     and cannot end its push short of the event's objective (the ordering invariant
+//     requires `pushCompleteMpPositionM <= forwardStopMpPositionM`).
+//
+// Nothing is derived a second time here: this function does not consult the
+// interaction configuration, because the plan already did - a valid plan exists only
+// when the calibration was measured, so taking the thresholds from it carries that
+// gate, and there is no configuration argument a caller could pass that would
+// disagree with the plan it is asking about.
 //
 // A refused plan produces no evidence at all: its positions are zeros, and a zero
-// would read as "the vehicle is past every landmark".
+// would read as "the vehicle is past every threshold".
 inline BottleEvidence deriveBottleEvidence(const RunExecutionPlan& plan, bool forwardLeg,
-                                           double positionM, bool positionUsable,
-                                           const BottleEvidenceConfig& config) {
+                                           double positionM, bool positionUsable) {
     if (!plan.valid) {
         return BottleEvidence{};
     }
 
-    BottleEvidence evidence =
-        deriveBottleEvidence(plan.geometry, forwardLeg, positionM, positionUsable, config);
-    evidence.pushPositionM = plan.forwardStopMpPositionM;
-    evidence.pushComplete = evidence.derived && positionM >= evidence.pushPositionM;
-    return evidence;
+    return deriveForwardProgression(
+        forwardLeg, positionM, positionUsable,
+        ForwardProgressionThresholds(plan.earliestContactMpPositionM,
+                                     plan.captureGuaranteedMpPositionM,
+                                     plan.forwardStopMpPositionM));
 }
 
 // The run layer's current execution plan.

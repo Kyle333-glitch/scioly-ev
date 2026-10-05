@@ -241,11 +241,6 @@ constexpr uint32_t kFixtureMaxUpdateGapMs = 250U;
 // with, so a limit shorter than the dwell could never let the two coincide.
 constexpr uint32_t kFixtureStopEvidenceMaxAgeMs = 200U;
 
-// How far past the bottle the vehicle must travel before the scenario reports
-// the capture complete. The mechanism does not exist, so this stands in for
-// evidence the real vehicle layer will have to produce (VERIFIED_STATE.md #11).
-constexpr double kFixtureCaptureTravelM = 0.1;
-
 inline ev::Sourced<double> measuredValue(double value) {
     return ev::Sourced<double>(value, ev::ValueSource::Measured);
 }
@@ -438,7 +433,11 @@ struct CycleScript {
     ev::MotorEffort hostileRequest{ev::MotorMode::Disabled, 0U};
 
     bool startTriggered = false;
-    bool bottleContactDetected = false;
+    // Forward-progression completion the scenario states for this cycle. A scripted
+    // fact, like the encoder advance: it says what the run policy is told, and the
+    // nominal driver states it from the production strategy
+    // (`harness.forwardBottleEvidence()`) rather than from its own threshold.
+    bool approachComplete = false;
     bool captureComplete = false;
     bool pushComplete = false;
 
@@ -803,7 +802,7 @@ public:
         ev::RunInputs inputs;
         inputs.authorityArmed = authority_.isArmed();
         inputs.startTriggered = script.startTriggered;
-        inputs.bottleContactDetected = script.bottleContactDetected;
+        inputs.approachComplete = script.approachComplete;
         inputs.captureComplete = script.captureComplete;
         inputs.pushComplete = script.pushComplete;
         inputs.remainingDistanceUsable = positionUsable;
@@ -989,15 +988,15 @@ public:
         return ev::legExecutionTargetM(executionPlan_.plan(), legForward_);
     }
 
-    // The forward-leg bottle evidence the vehicle layer derives this cycle, through
-    // the same production call the control tick makes: contact and capture from the
-    // announced geometry and the bottle-interaction configuration, and the push
-    // objective from the plan's own forward stop. A scenario that needs to state
-    // what the vehicle layer believed asks this rather than repeating the threshold
-    // arithmetic.
+    // The forward-progression facts the vehicle layer derives this cycle, through
+    // the same production call the control tick makes: all three thresholds come
+    // from the run's execution plan (approach at the start of the credible capture
+    // window, capture at the capture guarantee, push at the plan's forward stop). A
+    // scenario that needs to state what the vehicle layer believes asks this rather
+    // than repeating the threshold arithmetic.
     ev::BottleEvidence forwardBottleEvidence() const {
         return ev::deriveBottleEvidence(executionPlan_.plan(), legForward_, runAxisPositionM_,
-                                        positionUsable_, fixtures_.phase.bottleEvidence);
+                                        positionUsable_);
     }
 
     // The run layer's geometry, held here because the state machine deliberately

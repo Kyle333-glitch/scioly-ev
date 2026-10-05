@@ -6296,3 +6296,148 @@ strategy and the timing model; S8/S9 own Run Time telemetry and plan observabili
 Until the forward-stop margin and the bottle-interaction distances are measured
 (P-H8 plus a braking characterization), no run can travel forward. This entry does
 not start any of those.
+## D42 / S5 - 2026-10-05 - Truthful bottle-phase progression: the plan owns the thresholds, and no phase claims a contact
+
+**Baseline inspected before any edit**
+
+- Branch `main`, HEAD `c840fc2d475a293fe6f2c6740c049aa1f4fbf364` (the U1-S4
+  checkpoint), tracked tree clean, 5 ahead / 0 behind `origin/main`
+  (intentionally unpushed).
+- S5 of the corrected stage matrix: *"position-derived belief documented;
+  sensor-sounding names remain"*.
+
+**The finding.** The run's three forward-phase exits were named like observations of
+a bottle this vehicle cannot make. `RunInputs::bottleContactDetected` said a contact
+had been detected, while the producer was odometry: the run axis compared against a
+derived position. Nothing was dishonest about *where* the number came from
+(`BottleEvidence.h` and section 14 already said it is a position-derived belief), but
+the name - and therefore any log, review or reader - claimed a sensor that does not
+exist. The progression was also derived twice: once by the geometry/config
+derivation inside `BottleEvidence.h` and once by the run's execution plan, which
+already owns the forward stop.
+
+**What changed.**
+
+- **Names that state what happened.** `BottleEvidence` now reports
+  `approachComplete` / `captureComplete` / `pushComplete`, and the run policy
+  consumes `RunInputs::approachComplete` / `captureComplete` / `pushComplete`. The
+  three are *progression completions*: "the travel has got this far". None is an
+  observation of the bottle, and `approachComplete` in particular is the credible
+  capture window **opening** - never a claim that the bottle was touched.
+- **One owner per threshold, and it is the plan.** `ev::deriveBottleEvidence(plan,
+  ...)` thresholds at the plan's own `earliestContactMpPositionM`,
+  `captureGuaranteedMpPositionM` and `forwardStopMpPositionM`. The geometry-coupled
+  derivation and its `BottleEvidenceConfig` argument are **deleted**: with the
+  thresholds coming from the plan, the configuration no longer produced them, and a
+  parameter that looks like it does is the second source this stage exists to
+  remove. `BottleEvidence.h` keeps the config type and its validation, which the
+  plan consumes; `ev::deriveForwardProgression()` is the one comparison (leg,
+  position usability, finiteness, three thresholds) and is pure.
+- **The state machine is producer-agnostic.** Its contract now states that it never
+  learns which strategy produced a completion and that no transition may depend on
+  one: a sensor-driven or operator-driven producer later changes nothing in
+  `CompetitionStateMachine.h`. Timeouts, first-fault latching, phase ownership,
+  reset behavior and the stale-data refusal are untouched - a phase whose completion
+  never arrives still faults with `PhaseTimeout`, and an unusable (stale, unmeasured
+  polarity, unmeasured scale) position still produces no completion at all.
+- **Behavioural delta, stated plainly.** `Approach` now completes at the *earliest*
+  credible contact position (nominal contact minus the plan's measured window
+  tolerance) instead of at nominal contact: the run begins its capture behaviour when
+  the credible window opens rather than committing to one nominal position. On the
+  fixture course that is 0.12 m earlier (1.88 m instead of 2.00 m, with a 0.02 m
+  window and a 0.10 m lead). Capture and push completion are numerically unchanged;
+  no constant in `VehicleConfig.h` moved, and no speed, timing, safety or arming
+  behaviour changed.
+- **No production input is permanently false.** All three completions are produced
+  by the strategy from the announced run's own plan, so they become live exactly when
+  the plan does (`RunExecutionPlanStatus`). Today the plan refuses - the
+  bottle-interaction distances and the forward-stop margin are all `Provisional`
+  placeholders - so the completions are unavailable, which is the intended
+  fail-closed state and not a hard-coded `false`.
+- **Wiring and mirrors.** `src/VehicleRuntime.{h,cpp}` (snapshot field
+  `approachComplete`, the plan-aware derivation call) and
+  `test/test_scenario/ScenarioHarness.h` follow the new names; the scenario driver
+  now states all three completions from the production derivation
+  (`harness.forwardBottleEvidence()`) instead of carrying its own threshold, so the
+  scripted scenarios exercise the production strategy rather than a copy of it.
+- **Telemetry wire schema unchanged.** `kTelemetrySchemaVersion` stays **2** and no
+  wire field was added, renamed or reinterpreted: `TelemetrySample`,
+  `TelemetryRecord`, `TelemetryFormat` and the analysis tooling carry no
+  bottle-contact field (they carry `phase`, `position_m` and the rest), and none is
+  touched by this entry. The renamed facts live in the runtime's internal tick
+  snapshot only.
+
+**Tests.**
+
+- `test_bottle_evidence` rewritten for the new API (7 cases): one fact per threshold,
+  appearing exactly at its own threshold and staying as the travel continues; the
+  thresholds echoed back for diagnostics; an unusable position reporting nothing; a
+  non-finite position *or* threshold reporting nothing; the reverse leg reporting
+  nothing; a placeholder interaction distance producing no usable configuration; a
+  negative distance refused.
+- `test_execution_plan` (+3 cases): the approach completes exactly at the plan's
+  earliest credible contact position, and that position is the window opening rather
+  than a contact claim (earlier than nominal contact, earlier than the capture
+  guarantee, capture still not complete); the capture completes exactly at the plan's
+  capture guarantee, which covers the whole credible window; and the thresholds
+  follow the plan's *measured* window - widening the window tolerance moves the
+  approach threshold earlier while the rule landmarks and the forward stop do not
+  move, and a window the capture guarantee cannot cover is refused rather than
+  sequenced.
+- `test_scenario` (+1 case): end to end through the real chain, the run enters
+  `Capture` when the capture window opens - before the announced Bottle Start Point
+  and before the capture guarantee - and the production derivation at that position
+  reports approach complete, capture not complete and push not complete.
+- Renames across `test_competition_state` (the fixture's `approach` fact),
+  `test_scenario` and its harness; the S4-era `pushPositionM` name is gone with the
+  struct field it named.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native`: **578/578 test cases succeeded** (574 at S4, +3 plan cases,
+  +1 scenario case), 0 warnings from changed files (the one `-Wswitch` on
+  `FaultCode::DriverFaultBar` in `test_scenario`'s `faultName()` is pre-existing and
+  untouched by this diff).
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog` after `-t clean`: 3
+  SUCCESS, 0 warnings. RAM unchanged (6428 / 6628 / 6612); Flash +100/+108/+108
+  bytes (nano_r4 72520, bench 79364, bench-watchdog 78792) - the three-threshold
+  finiteness checks and the threshold value carried into the one derivation.
+- Telemetry tooling untouched and re-run green (`116 tests OK`). `git diff --check`
+  clean.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration and limit
+  value remains `Provisional`; no hardware was touched and no physical behaviour is
+  claimed.
+
+**Documents corrected for truthfulness (not rewritten history).**
+
+- `SOFTWARE_ARCHITECTURE.md` section 14: the forward phases wait for a *completion*,
+  the state machine never learns its producer, and the thresholds are the execution
+  plan's; section 7's "producers of the bottle-interaction evidence" item now names
+  the unmeasured values that actually gate a plan; the "what the bottle line means
+  for the mechanism" sentence points at the plan.
+- `docs/limitations.md`: the D34 entry now says *forward progression* rather than
+  "bottle evidence", states that approach complete is the window opening and not a
+  contact, and says no code path reads it as one.
+- `docs/bringup/P-H8-bottle-integration.md` and
+  `docs/bringup/P-H14-calibration-checklist.md`: the believed values to record are
+  the three progression completions, and the nominal contact position must come from
+  the **observed** contact (the witness mark at its tick) - never from the `Capture`
+  transition, which is now the window opening. P-H14 Step 11 also lists the execution
+  plan's two own dependencies (credible contact-window tolerance and forward-stop
+  margin beyond the Bottle Line) as measurements that step must produce, since no
+  plan can exist without them.
+
+**Not changed (owned elsewhere).** Speed strategy and the timing model (S6/S7):
+`plannedTravelDistanceM()` still sizes the timing plan from rule geometry, the
+planned cruise still comes from `planRunTiming()`, and the plan's timing inputs stay
+honest (`timingReady = false`, both numbers 0.0). Run Time telemetry and plan
+observability (S8/S9), `maxRunDuration` (S10) and the legal-parameter sweep (S11) are
+untouched; the arming gate still does not require a usable plan, so a run announced
+while the plan refuses ends in a phase timeout rather than in motion. Bottle-phase
+*ordering*, timeouts and phase ownership are unchanged.
+
+**Next.** H8 (bottle integration) must produce five measured facts before this
+progression can do anything: the three bottle-interaction distances, the credible
+contact-window tolerance and the forward-stop margin beyond the Bottle Line - with
+the observed contact position recorded independently of the firmware. S6/S7 own the
+speed/timing decision; S8/S9 the Run Time telemetry and the `plan` command.

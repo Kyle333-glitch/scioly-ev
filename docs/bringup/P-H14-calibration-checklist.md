@@ -203,24 +203,41 @@ bottle, independent observer or camera, kill switch, runout clear.
 `status` (and the captured log).
 **Measure, per run, believed AND observed:**
 - believed: `pos_m` at the tick the phase changed (`EVE2` `PhaseChange=Capture` /
-  `Push`), and the position at which the run entered `ForwardDecel`;
+  `Push`), and the position at which the run entered `ForwardDecel`. Those three
+  are the run's *progression* completions: `Capture` begins at the earliest
+  credible contact position (the window opening - **not** a contact observation),
+  `Push` begins at the capture guarantee, and `ForwardDecel` at the forward
+  execution target;
 - observed: the bottle's start and end positions from the tape, whether the
-  witness mark moved, and where contact and release were seen.
+  witness mark moved, and where contact and release were seen. The observed
+  contact position and tick are what establish the nominal contact position;
+  never derive it from the `Capture` transition.
 
 **Reps:** enough runs per condition to decide the pre-registered success fraction,
 at least three conditions (approach distance, approach speed, push criterion).
 **Calculation:**
-- `kPlannedBottleContactLeadM` = `bottleStartM - pos_m(contact)` from the runs
-  where contact was observed at the witness mark;
+- `kPlannedBottleContactLeadM` = `bottleStartM - pos_m` at the tick the observer
+  saw contact at the witness mark (from the log, at the observed contact tick - not
+  at the `Capture` transition, which is the window opening);
 - `kPlannedBottleCaptureAdvanceM` = the advance beyond contact over which the
   bottle is observed to be carried (believed and observed must agree; a systematic
   disagreement is an estimator or mechanism problem, not a threshold to move);
 - `kPlannedBottlePushMarginM` = the observed overshoot of the bottle past the
-  bottle line, minus the announced margin the run already has.
+  bottle line, minus the announced margin the run already has;
+- `kPlannedContactWindowToleranceM` = half the observed spread (max - min) of the
+  witnessed contact position around the nominal contact position across the runs -
+  the credible window the execution plan needs;
+- `kPlannedForwardStopMarginBeyondBottleLineM` = how far beyond the Bottle Line
+  the vehicle's *commanded* forward stop must lie: from the observed bottle
+  overshoot together with the measured braking distance at the forward-stop speed
+  (a braking-characterization run, not a bottle run).
 **Acceptance:** the pre-registered success fraction of runs finish with the bottle
 past the line, judged from the *observed* evidence.
-**Establishes:** the three bottle distances (then `PhaseConfigValid`'s bottle
-clause), and only then `VERIFIED_STATE.md` #11.
+**Establishes:** the three bottle distances and the execution plan's two own
+physical dependencies (the credible contact-window tolerance and the forward-stop
+margin beyond the Bottle Line). All five are required before
+`ev::buildRunExecutionPlan()` can produce a plan, so no run can complete a forward
+phase until then; and only then `VERIFIED_STATE.md` #11.
 
 ## Step 12 - Plan verification (Target Time)
 
