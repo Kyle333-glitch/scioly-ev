@@ -6069,3 +6069,117 @@ test asserts that the vehicle's turnaround inherently equals the Bottle Line.
 owns the explicit vehicle execution target (including the forward stop position);
 S4 then makes motion shaping and forward progression consume that one target and
 removes the S2 compatibility seam. This entry does not start S3.
+
+---
+
+## D40 / S3 - 2026-10-05 - The execution plan owns the run's execution targets, or names why it cannot
+
+**Kind of change.** Software + documentation. S3 of the pack
+`EV-V5-current-to-competition-2026-10-04-v2`. Adds
+`lib/evcore/src/RunExecutionPlan.h` and `test/test_execution_plan/test_main.cpp`. No
+runtime wiring, no calibration value, no telemetry change, no hardware action.
+
+**Why.** S2 separated the announced *rule* geometry (`RunAxisGeometry`: Target
+Point, Bottle Start Point, Bottle Line) from the vehicle's execution geometry and
+left exactly one temporary compatibility seam (`temporaryLegExecutionTargetM()`)
+that maps the forward leg onto the Bottle Line. The vehicle's physical forward stop
+target is not the Bottle Line and cannot be guessed: it depends on pusher reach, the
+contact window, capture/transfer behaviour, the push margin and braking, none of
+which is established on this vehicle. S3 creates the abstraction that will
+eventually own those execution targets, without pretending the missing physical
+facts exist.
+
+**What the plan is.** `ev::RunExecutionPlan` (with `ev::RunExecutionDependencies`,
+`ev::buildRunExecutionPlan()` and `ev::RunExecutionPlanStatus`) is a pure, immutable
+value describing ONE announced run: the preserved validated `RunAxisGeometry`; the
+forward-axis interaction landmarks (earliest and latest credible contact, capture
+guarantee, push complete); the explicit `forwardStopMpPositionM` and
+`reverseStopMpPositionM`; and timing state (`timingReady`, `predictedMotionTimeS`,
+`initialDelayS`). No Arduino headers, no I/O, no serial formatting, no allocation,
+no globals, no `VehicleConfig` dependency and no motor command. Every field is
+`const`, there is no default constructor and there are no setters, so a plan cannot
+be adjusted as a run progresses: an announcement produces one plan and a new
+announcement produces a new plan.
+
+**Forward stop rule.** `forwardStopMpPositionM = bottleLinePositionM() +
+forwardStopMarginBeyondBottleLineM`, where the margin is a required `Measured`
+dependency. The builder never equates the forward stop with the Bottle Line: an
+unchanged Bottle Line with a different measured margin produces a different forward
+stop (host-tested), and with no margin established the construction refuses with
+`MissingForwardExecutionTarget`.
+
+**Reverse stop rule.** `reverseStopMpPositionM = targetPointPositionM` (rule 8.h) -
+a rule-derived relationship pinned by host test, and not labelled `Measured`
+anywhere.
+
+**Ordering.** A valid plan must satisfy `earliestContact <= latestContact <=
+captureGuaranteed <= forwardStop`, `pushComplete <= forwardStop` and
+`earliestContact >= 0` (contact cannot precede the Start Point). Internally
+contradictory geometry is refused as `ContradictoryExecutionGeometry` rather than
+carried into a run. The contact/capture positions are derived from the existing
+`BottleEvidenceConfig` semantics (nominal contact = Bottle Start Point minus the
+contact lead; capture = nominal contact plus the capture advance; push complete =
+Bottle Line plus the push margin), reused rather than restated.
+
+**Dependency / provenance contract.** Construction reuses `validateRunConfig()` for
+the announcement and `validateBottleEvidenceConfig()` for the bottle distances
+instead of restating either; only `ValueSource::Measured` authorizes a physical
+position, so a `Provisional` placeholder - or a `Derived` planning value - refuses,
+and nothing is promoted. Refusals are named: `InvalidAnnouncement`,
+`MissingBottleInteractionCalibration`, `MissingForwardExecutionTarget`,
+`NonFiniteValue` and `ContradictoryExecutionGeometry`. The zero value stays
+`Planned`, and a refusal carries no derived position at all.
+
+**Timing.** The plan records timing honestly and does not make the idealized timing
+model control production behavior: with `timingReady` false it carries
+`predictedMotionTimeS = 0.0` and `initialDelayS = 0.0` regardless of the caller's
+idealized numbers, and `timingReady` true requires finite non-negative inputs and is
+exercised only by a synthetic fixture. `planRunTiming()`, the run's delay and the
+run's cruise are untouched.
+
+**Production.** With the shipped configuration a production construction refuses:
+every bottle-interaction distance in `src/VehicleConfig.h` is `provisionalValue(...)`
+(`kPlannedBottleContactLeadM`, `kPlannedBottleCaptureAdvanceM`,
+`kPlannedBottlePushMarginM`), and no measured forward-stop margin exists anywhere in
+the tree - there is no forward-stop constant at all. Both refusals are host-tested
+with production-shaped provenance.
+
+**Not done (scope).** No runtime integration: `src/VehicleRuntime.cpp`/`.h`,
+`CompetitionStateMachine`, `MotionProfile`, `OperatorPolicy`, the serial commands and
+the telemetry schema are untouched, and no consumer reads the plan yet. The S2
+compatibility seam `ev::temporaryLegExecutionTargetM()` remains exactly as S2 left
+it, still mapping the forward leg onto the Bottle Line rule landmark, and is
+identified for removal by S4. S4 owns the wiring.
+
+**Tests.** `test/test_execution_plan/test_main.cpp`, 12 cases: a valid synthetic plan
+(all fields and the ordering invariant); illegal announcements (off-grid,
+out-of-range, another level's bottle placement, non-finite); non-finite established
+dependencies (NaN tolerance, infinite margin, non-finite bottle distances);
+unestablished bottle dependencies (each distance and the contact-window tolerance, as
+`Provisional` and as `Derived`); unestablished forward execution target;
+contradictory geometry (capture window not covered by the advance, push not complete
+by the stop, negative margin, contact behind the Start Point); reverse stop = Target
+Point for two announcements; the forward stop follows the margin and is not the
+Bottle Line at an unchanged Bottle Line; two plans from two announcements are
+independent (building plan B does not mutate plan A); timing readiness recorded
+honestly; no hidden valid defaults (`static_assert`s on default-constructibility and
+copy-assignability, plus a refusal that carries zero positions and a named status);
+and the production-shaped refusal. Every value is a synthetic fixture, not a
+measurement: a passing host test is arithmetic and gate verification only, and is
+not evidence about the bottle, the stops or the vehicle.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native -f test_execution_plan`: **12/12 succeeded**.
+- `pio test -e native`: **568/568 succeeded** (556 at S2 plus 12 new), 0 warnings.
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog`: 3 SUCCESS, 0 warnings,
+  RAM/Flash byte-identical to the S2 baseline (6292/71884, 6492/78728, 6476/78156) -
+  the new header is compiled into no image, so no image behaviour changed.
+- `git diff --check`: clean. Telemetry was not touched and was not re-run.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration and limit
+  value remains `Provisional`; the `Provisional` lockout still refuses to arm.
+
+**Next.** S4 - make motion shaping and forward progression consume the plan's one
+forward stop target everywhere, and delete `ev::temporaryLegExecutionTargetM()` and
+its two call sites (`src/VehicleRuntime.cpp`, `test/test_scenario/ScenarioHarness.h`).
+This entry does not start S4.

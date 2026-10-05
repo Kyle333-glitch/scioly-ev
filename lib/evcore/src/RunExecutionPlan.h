@@ -1,0 +1,432 @@
+#pragma once
+
+#include "BottleEvidence.h"
+#include "RunAxis.h"
+#include "RunConfig.h"
+#include "Units.h"
+
+#include <cmath>
+#include <cstdint>
+#include <type_traits>
+
+namespace ev {
+
+// ---------------------------------------------------------------------------
+// The run execution plan - the execution targets of ONE announced run
+// ---------------------------------------------------------------------------
+//
+// What this module is
+//
+// * The one production owner of a run's **execution geometry**: where the
+//   vehicle must actually stop and where the bottle interaction landmarks sit on
+//   the run axis, derived once, at the announcement boundary, from
+//
+//     - the announced *rule* geometry (`RunAxisGeometry`, `RunAxis.h`), which
+//       this module consumes and never redefines;
+//     - the bottle-interaction calibration the evidence model already uses
+//       (`BottleEvidenceConfig`, `BottleEvidence.h`); and
+//     - the physical dependencies that establish the forward execution target
+//       (`RunExecutionDependencies` below), which are exactly the facts that do
+//       not exist yet.
+//
+// * A pure value: no Arduino headers, no I/O, no serial formatting, no
+//   allocation, no clock, no pin, no globals and no knowledge of `VehicleConfig`.
+//   It reads nothing but its arguments and it commands nothing.
+//
+// * Immutable once constructed. There are no setters and every field is `const`,
+//   so a plan cannot be adjusted as a run progresses: an announcement produces
+//   one plan, and a new announcement produces a new plan.
+//
+// What this module is not
+//
+// * **It is not rule geometry.** S2 separated the two: `RunAxisGeometry` owns the
+//   rule landmarks (Target Point, Bottle Start Point, Bottle Line) and this module
+//   owns the execution targets. The Bottle Line is an official rule landmark and
+//   is **not** assumed to be the vehicle's physical forward stop.
+// * **It is not the bottle evidence.** `BottleEvidence.h` turns a position into
+//   contact/capture/push evidence and owns those three landmark positions; this
+//   plan carries the same official positions for planning and diagnostics, derived
+//   from the same configuration, and it does not re-implement the evidence or
+//   decide that a phase may advance.
+// * **It is not a motion profile and it is not a state machine.**
+//   `MotionProfile.h` owns shaping and the timing plan;
+//   `CompetitionStateMachine.h` owns phase transitions. This plan owns neither,
+//   and it carries no motion command.
+// * **It is not a timing model.** It carries `timingReady`, `predictedMotionTimeS`
+//   and `initialDelayS` because timing is per-run state, and it records them
+//   honestly: until empirical physical timing evidence exists, `timingReady` is
+//   false and both numbers are 0.0 ("not meaningfully available").
+// * **It is not wired into the run yet.** S4 owns runtime integration: making
+//   motion shaping and forward progression consume the one forward stop target
+//   everywhere, and deleting the temporary pre-S3/S4 compatibility seam
+//   (`ev::temporaryLegExecutionTargetM()`, `RunAxis.h`). Nothing in the vehicle
+//   layer consumes a plan today.
+// * **It invents no physical value.** The forward stop is the Bottle Line plus a
+//   *measured* margin; with no margin established, construction refuses with a
+//   named reason instead of quietly equating the forward stop with the rule
+//   landmark.
+//
+// Why the refusal is the point
+//
+// The physical facts behind the forward stop - pusher reach, the contact window,
+// bottle capture and transfer behaviour, the push margin and braking behaviour -
+// are not established on this vehicle. `VERIFIED_STATE.md` and `P-H8` own that
+// work. Until it exists, a production plan is *unavailable*, and this module's
+// job is to say so with a name rather than to produce a plausible-looking plan
+// from the Bottle Line.
+
+// Why an execution plan does not exist. The zero value is `Planned`, so a plan
+// that was never produced cannot default into a valid-looking one: there is no
+// default constructor below, and `refusedExecutionPlan()` is how "no plan" is
+// stated. The names are the wire/diagnostic spelling of the refusal.
+enum class RunExecutionPlanStatus : uint8_t {
+    // A complete, immutable plan exists. This is the only status a plan may be
+    // consumed under, and the zero value.
+    Planned = 0,
+    // The announced `RunConfig` failed `validateRunConfig()`: the announcement is
+    // not a legal one, so no execution arithmetic may run on it at all.
+    InvalidAnnouncement = 1,
+    // A bottle-interaction distance, or the contact window's own tolerance, is
+    // not an established physical fact (`ValueSource::Measured`). `Provisional`
+    // never authorizes an execution plan that depends on it.
+    MissingBottleInteractionCalibration = 2,
+    // The forward execution target's own physical dependency - the margin by
+    // which the commanded forward stop passes the Bottle Line rule landmark - is
+    // not established. With no such fact, there is no forward stop to plan to.
+    MissingForwardExecutionTarget = 3,
+    // A supplied or derived value is NaN or infinite. Provenance says where a
+    // number came from; it does not say it is a number.
+    NonFiniteValue = 4,
+    // The derived interaction landmarks are not in a physically possible order
+    // (see the ordering invariant in `buildRunExecutionPlan()`).
+    ContradictoryExecutionGeometry = 5,
+};
+
+inline const char* runExecutionPlanStatusName(RunExecutionPlanStatus status) {
+    switch (status) {
+        case RunExecutionPlanStatus::Planned:
+            return "Planned";
+        case RunExecutionPlanStatus::InvalidAnnouncement:
+            return "InvalidAnnouncement";
+        case RunExecutionPlanStatus::MissingBottleInteractionCalibration:
+            return "MissingBottleInteractionCalibration";
+        case RunExecutionPlanStatus::MissingForwardExecutionTarget:
+            return "MissingForwardExecutionTarget";
+        case RunExecutionPlanStatus::NonFiniteValue:
+            return "NonFiniteValue";
+        case RunExecutionPlanStatus::ContradictoryExecutionGeometry:
+            return "ContradictoryExecutionGeometry";
+    }
+    return "?";
+}
+
+// The physical dependencies that establish the forward execution target, and the
+// credibility window of the contact landmark. Every field is supplied by the
+// caller and is required to be a measured fact; none has a default, because none
+// has been measured on this vehicle.
+struct RunExecutionDependencies {
+    constexpr RunExecutionDependencies(Sourced<double> contactWindowToleranceM_,
+                                        Sourced<double> forwardStopMarginBeyondBottleLineM_)
+        : contactWindowToleranceM(contactWindowToleranceM_),
+          forwardStopMarginBeyondBottleLineM(forwardStopMarginBeyondBottleLineM_) {}
+
+    // How far either side of the nominal contact position the bottle's actual
+    // touch may credibly be reported, metres (so the credible window is twice
+    // this). The nominal contact position itself comes from the announced Bottle
+    // Start Point and the configured contact lead; this is the measured spread
+    // around it - the pusher's own mechanical window and the repeatability of the
+    // approach - and it is what makes the earliest and latest credible contact
+    // positions two different landmarks. `P-H8` measures it against independently
+    // observed bottle contact positions. 0 is a legitimate value for a mechanism
+    // whose touch position is exactly repeatable, and it is still a measurement.
+    Sourced<double> contactWindowToleranceM;
+
+    // How far **beyond the Bottle Line rule landmark** the commanded forward stop
+    // position lies, metres. This is the one dependency that establishes the
+    // forward execution target, and it exists because the Bottle Line is rule
+    // geometry rather than a physical stop: driving to the line is not the same
+    // fact as having pushed and captured the bottle, and a commanded stop is not
+    // the physical resting position either (`AGENTS.md` sections 10 and 15).
+    // Pusher reach, the contact window, capture/transfer behaviour, the push
+    // margin and braking all fold into this distance, and it is measured from
+    // observed bottle positions and a braking characterization - never from the
+    // rule landmark alone.
+    Sourced<double> forwardStopMarginBeyondBottleLineM;
+};
+
+static_assert(!std::is_default_constructible<RunExecutionDependencies>::value,
+              "execution dependencies must state their provenance, never default");
+
+// One announced run's execution plan. Deliberately no default constructor: a plan
+// with no announcement behind it must be impossible to write. Every field is
+// `const`, so a plan is immutable after construction - there is no `setDelay()`,
+// no `setForwardStop()` and no path that adjusts a plan as a run progresses.
+//
+// Invariant, pinned by every test: `valid == (status == Planned)`, and a refused
+// plan carries no derived position at all.
+struct RunExecutionPlan {
+    constexpr RunExecutionPlan(RunAxisGeometry geometryM_,
+                               double earliestContactMpPositionM_,
+                               double latestContactMpPositionM_,
+                               double captureGuaranteedMpPositionM_,
+                               double pushCompleteMpPositionM_, double forwardStopMpPositionM_,
+                               double reverseStopMpPositionM_, bool timingReady_,
+                               double predictedMotionTimeS_, double initialDelayS_, bool valid_,
+                               RunExecutionPlanStatus status_)
+        : geometry(geometryM_),
+          earliestContactMpPositionM(earliestContactMpPositionM_),
+          latestContactMpPositionM(latestContactMpPositionM_),
+          captureGuaranteedMpPositionM(captureGuaranteedMpPositionM_),
+          pushCompleteMpPositionM(pushCompleteMpPositionM_),
+          forwardStopMpPositionM(forwardStopMpPositionM_),
+          reverseStopMpPositionM(reverseStopMpPositionM_),
+          timingReady(timingReady_),
+          predictedMotionTimeS(predictedMotionTimeS_),
+          initialDelayS(initialDelayS_),
+          valid(valid_),
+          status(status_) {}
+
+    // The announced **rule** geometry the plan was built from, preserved by value
+    // so a consumer reads the rule landmarks from the plan rather than re-deriving
+    // them. Rule geometry stays owned by `RunAxisGeometry`; this is the validated
+    // value, not a second definition of it.
+    const RunAxisGeometry geometry;
+
+    // --- Forward-axis interaction landmarks, metres from the Start Point ---
+    // Measurement Point (MP) positions: where the vehicle's own measurement point
+    // is on the axis when each event happens. Positive is forward travel.
+
+    // The earliest MP position at which the bottle's touch can credibly be
+    // reported: the nominal contact position minus the credible tolerance.
+    const double earliestContactMpPositionM;
+
+    // The latest MP position at which the bottle's touch can credibly be
+    // reported: the nominal contact position plus the credible tolerance. A plan
+    // whose agent has not touched the bottle by here cannot claim a credible
+    // contact at all.
+    const double latestContactMpPositionM;
+
+    // The MP position at which the bottle counts as captured, given the
+    // configured advance past the *nominal* contact position - the same landmark
+    // `BottleEvidence.h` reports `captureComplete` at. Deliberately not named
+    // "measured": it is derived arithmetic on measured inputs.
+    const double captureGuaranteedMpPositionM;
+
+    // The MP position at which the push counts as complete: the Bottle Line rule
+    // landmark plus the configured push margin. Carried here for the forward stop
+    // ordering check and for diagnostics; the evidence itself stays owned by
+    // `BottleEvidence.h`.
+    const double pushCompleteMpPositionM;
+
+    // The commanded forward stop position, metres: the Bottle Line rule landmark
+    // plus the measured forward-stop margin. This is the explicit forward
+    // execution target S4 will consume everywhere, and it is **not** the Bottle
+    // Line unless the measured margin is exactly zero.
+    const double forwardStopMpPositionM;
+
+    // The commanded reverse stop position, metres: the announced Target Point
+    // (rule 8.h). A rule-derived relationship, not a measurement - the reverse
+    // leg stops where the rules put the Target Point - so it is deliberately not
+    // labelled `Measured` anywhere.
+    const double reverseStopMpPositionM;
+
+    // --- Timing state ---
+
+    // True only when empirical physical timing evidence has established this
+    // run's predicted motion time and delay. False is the honest production value
+    // until that evidence exists, and it is the only value the firmware's
+    // configuration currently produces.
+    const bool timingReady;
+
+    // The predicted motion time, seconds, when `timingReady` is true. 0.0
+    // otherwise, which means "not meaningfully available" - never a claim that the
+    // run takes no time.
+    const double predictedMotionTimeS;
+
+    // The deliberate stationary delay before travel, seconds, when `timingReady`
+    // is true. 0.0 otherwise.
+    const double initialDelayS;
+
+    // Invariant: `valid == (status == RunExecutionPlanStatus::Planned)`.
+    const bool valid;
+
+    const RunExecutionPlanStatus status;
+};
+
+static_assert(!std::is_default_constructible<RunExecutionPlan>::value,
+              "no silent defaults; an execution plan must be built from an announcement");
+static_assert(!std::is_copy_assignable<RunExecutionPlan>::value,
+              "an execution plan must be immutable: every field is const");
+static_assert(static_cast<int>(RunExecutionPlanStatus::Planned) == 0,
+              "the planned status must stay the zero value");
+
+// The plan with no announcement behind it: what a run layer holds before a run is
+// announced, and what a refused construction carries. Every position is zero and
+// `valid` is false, exactly like `refusedTimingPlan()`; `status` must not be
+// `Planned`, because that would break the invariant above.
+inline RunExecutionPlan refusedExecutionPlan(RunExecutionPlanStatus status) {
+    return RunExecutionPlan(RunAxisGeometry(0.0, 0.0, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0,
+                            0.0, false, status);
+}
+
+// The result of one plan-construction attempt: either a complete immutable plan,
+// or a named refusal. A caller must check `valid` (equivalently `plan.valid`)
+// before reading any position - a refusal carries none.
+struct RunExecutionPlanResult {
+    constexpr RunExecutionPlanResult(RunExecutionPlan plan_, bool valid_,
+                                     RunExecutionPlanStatus status_)
+        : plan(plan_), valid(valid_), status(status_) {}
+
+    // The plan, meaningful only when `valid` is true. When `valid` is false this
+    // is the refused value: every position 0.0 and `plan.valid` false.
+    const RunExecutionPlan plan;
+
+    // Invariant: `valid == (status == Planned) == plan.valid`.
+    const bool valid;
+
+    const RunExecutionPlanStatus status;
+};
+
+inline RunExecutionPlanResult refusedExecutionPlanResult(RunExecutionPlanStatus status) {
+    return RunExecutionPlanResult(refusedExecutionPlan(status), false, status);
+}
+
+// Builds the execution plan for one announced run.
+//
+// The gates are ordered from the most fundamental problem to the most specific,
+// so a refusal names one attributable reason (the same convention as
+// `firstFailure()` in `ConfigurationChecks.h`):
+//
+//   1. the announced rule geometry must be legal (`validateRunConfig()`);
+//   2. the bottle-interaction calibration must be an established, finite,
+//      non-negative fact (`validateBottleEvidenceConfig()`, reused rather than
+//      restated);
+//   3. the contact window's tolerance and the forward execution target's margin
+//      must be established facts;
+//   4. every input and every derived position must be finite; and
+//   5. the derived landmarks must be in a physically possible order.
+//
+// Ordering invariant, all four terms required:
+//
+//   earliestContact <= latestContact <= captureGuaranteed <= forwardStop
+//   pushComplete <= forwardStop
+//
+// Read each on its own:
+//
+//   * the credible contact window must not be inverted (a negative tolerance is
+//     not a window);
+//   * the capture guarantee must cover the **whole** credible contact window -
+//     otherwise the plan could declare the bottle captured while contact is still
+//     uncertain, which is exactly the contradiction that must not reach a run;
+//   * the forward stop must not be commanded before capture is guaranteed, and
+//     not before the push is complete, because stopping short of either leaves the
+//     event's own interaction unfinished; and
+//   * the earliest credible contact must not lie behind the Start Point (the axis
+//     origin), because the vehicle cannot touch the bottle before it starts.
+//
+// This is the project's *current* bottle-interaction semantics, read from
+// `BottleEvidenceConfig`; S5 owns any redesign of them. Nothing here invents a
+// physical constant.
+//
+// Timing inputs are accepted and recorded honestly: with `timingReady` false the
+// plan carries `predictedMotionTimeS = 0.0` and `initialDelayS = 0.0` regardless
+// of the arguments, because an unvalidated idealized prediction is not available
+// evidence for a run's delay; with `timingReady` true both must be finite and
+// non-negative. Nothing here makes idealized timing control production behavior.
+inline RunExecutionPlanResult buildRunExecutionPlan(
+    const RunConfig& announcedConfig, const BottleEvidenceConfig& bottleConfig,
+    const RunExecutionDependencies& dependencies, bool timingReady, double predictedMotionTimeS,
+    double initialDelayS) {
+    // 1. The announcement. An illegal announced value is a rule problem, not an
+    //    execution one, and no execution arithmetic may run on it.
+    if (!validateRunConfig(announcedConfig).ok) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::InvalidAnnouncement);
+    }
+    const RunAxisGeometry geometry = RunAxisGeometry::fromRunConfig(announcedConfig);
+
+    // 2. The bottle-interaction calibration, through the bottle module's own
+    //    single validation entry point - reused, never restated - with its reasons
+    //    mapped onto this plan's names so one refusal has one spelling.
+    const BottleEvidenceConfigValidation bottleEvidence = validateBottleEvidenceConfig(bottleConfig);
+    if (bottleEvidence.error == BottleEvidenceConfigError::ValuesAreNotMeasured) {
+        return refusedExecutionPlanResult(
+            RunExecutionPlanStatus::MissingBottleInteractionCalibration);
+    }
+    if (bottleEvidence.error == BottleEvidenceConfigError::NonFiniteValue) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::NonFiniteValue);
+    }
+    if (bottleEvidence.error == BottleEvidenceConfigError::NegativeDistance) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::ContradictoryExecutionGeometry);
+    }
+
+    // 3. The contact window and the forward execution target. `Provisional` is a
+    //    placeholder and never authorizes a plan that depends on it; `Derived` is
+    //    a computed planning value and is not a measurement of the mechanism
+    //    either, so only `Measured` passes.
+    if (!dependencies.contactWindowToleranceM.isMeasured()) {
+        return refusedExecutionPlanResult(
+            RunExecutionPlanStatus::MissingBottleInteractionCalibration);
+    }
+    if (!dependencies.forwardStopMarginBeyondBottleLineM.isMeasured()) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::MissingForwardExecutionTarget);
+    }
+
+    const double contactWindowToleranceM = dependencies.contactWindowToleranceM.value;
+    const double forwardStopMarginM = dependencies.forwardStopMarginBeyondBottleLineM.value;
+    if (!std::isfinite(contactWindowToleranceM) || !std::isfinite(forwardStopMarginM)) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::NonFiniteValue);
+    }
+
+    // 4. Derive the execution landmarks. The nominal contact position is the
+    //    announced Bottle Start Point advanced by the pusher's measured lead (the
+    //    same landmark `BottleEvidence.h` reports contact at); the window is the
+    //    measured tolerance either side of it; capture is the configured advance
+    //    past it; and the forward stop is the Bottle Line plus the measured margin
+    //    - never the Bottle Line itself.
+    const double nominalContactMpPositionM =
+        geometry.bottleStartPositionM - bottleConfig.contactLeadDistanceM.value;
+    const double earliestContactMpPositionM = nominalContactMpPositionM - contactWindowToleranceM;
+    const double latestContactMpPositionM = nominalContactMpPositionM + contactWindowToleranceM;
+    const double captureGuaranteedMpPositionM =
+        nominalContactMpPositionM + bottleConfig.captureAdvanceDistanceM.value;
+    const double pushCompleteMpPositionM =
+        geometry.bottleLinePositionM() + bottleConfig.pushMarginDistanceM.value;
+    const double forwardStopMpPositionM = geometry.bottleLinePositionM() + forwardStopMarginM;
+    const double reverseStopMpPositionM = geometry.targetPointPositionM;
+
+    if (!std::isfinite(earliestContactMpPositionM) || !std::isfinite(latestContactMpPositionM) ||
+        !std::isfinite(captureGuaranteedMpPositionM) || !std::isfinite(pushCompleteMpPositionM) ||
+        !std::isfinite(forwardStopMpPositionM) || !std::isfinite(reverseStopMpPositionM)) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::NonFiniteValue);
+    }
+
+    // 5. The ordering invariant. Internally contradictory execution geometry is
+    //    refused here rather than carried into a run.
+    const bool ordered = earliestContactMpPositionM <= latestContactMpPositionM &&
+                         latestContactMpPositionM <= captureGuaranteedMpPositionM &&
+                         captureGuaranteedMpPositionM <= forwardStopMpPositionM &&
+                         pushCompleteMpPositionM <= forwardStopMpPositionM &&
+                         earliestContactMpPositionM >= 0.0;
+    if (!ordered) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::ContradictoryExecutionGeometry);
+    }
+
+    // 6. Timing state, recorded honestly. A non-finite timing input on a
+    //    timing-ready plan is still no plan; a plan that is not timing-ready
+    //    carries 0.0 for both numbers and never the caller's idealized guess.
+    if (timingReady && (!std::isfinite(predictedMotionTimeS) || predictedMotionTimeS < 0.0 ||
+                        !std::isfinite(initialDelayS) || initialDelayS < 0.0)) {
+        return refusedExecutionPlanResult(RunExecutionPlanStatus::NonFiniteValue);
+    }
+    const double planPredictedMotionTimeS = timingReady ? predictedMotionTimeS : 0.0;
+    const double planInitialDelayS = timingReady ? initialDelayS : 0.0;
+
+    const RunExecutionPlan plan(geometry, earliestContactMpPositionM, latestContactMpPositionM,
+                                captureGuaranteedMpPositionM, pushCompleteMpPositionM,
+                                forwardStopMpPositionM, reverseStopMpPositionM, timingReady,
+                                planPredictedMotionTimeS, planInitialDelayS, true,
+                                RunExecutionPlanStatus::Planned);
+    return RunExecutionPlanResult(plan, true, RunExecutionPlanStatus::Planned);
+}
+
+}  // namespace ev

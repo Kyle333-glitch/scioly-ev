@@ -297,10 +297,11 @@ that the value is an unverified, configurable placeholder.
     the Bottle Line position as the Target Point plus the announced Bottle Line
     Distance. The Bottle Line is an official **rule landmark**, not the vehicle's
     physical turnaround, forward-leg endpoint or forward stop target - that is
-    execution geometry, owned by the later immutable `RunExecutionPlan` (S3) and
-    its single forward stop target (S4). The state machine deliberately stores no
-    geometry, so the run layer has to hold it, and holding it without an owner is
-    how two places start disagreeing about where a rule landmark is.
+    execution geometry, owned by the immutable `RunExecutionPlan` below, whose
+    single forward stop target S4 wires into motion shaping. The state machine
+    deliberately stores no geometry, so the run layer has to hold it, and holding
+    it without an owner is how two places start disagreeing about where a rule
+    landmark is.
   - `runAxisPositionM()` applies the measured tick-sign polarity **once**, to the
     travel rather than to a position, so an origin that is not zero cannot invert
     the sign. Its `RunAxisStatus` separates the two refusals - no tick travel at
@@ -311,20 +312,44 @@ that the value is an unverified, configurable placeholder.
     `Provisional` scale, and may not reach control.
   - `remainingDistanceTo()` is the generic remaining-distance arithmetic and takes
     an **explicit, caller-supplied target** - the caller names the landmark (or,
-    once S3/S4 land, the execution target) it is measuring to, so the arithmetic
-    cannot substitute a rule landmark for the target a consumer asked about. It is
-    signed and deliberately unclamped (an overshoot is evidence, not something to
-    hide from a log); `remainingDistanceToClamped()` is the same arithmetic for
-    the travel taper and is never negative. Both take the leg as an argument and
-    are computed from the leg the run named in the previous cycle, which is the
-    leg whose distance the run consumes this cycle; neither decides that a
-    position was reached and neither stops anything.
+    once S4 consumes it, the execution plan's target) it is measuring to, so the
+    arithmetic cannot substitute a rule landmark for the target a consumer asked
+    about. It is signed and deliberately unclamped (an overshoot is evidence, not
+    something to hide from a log); `remainingDistanceToClamped()` is the same
+    arithmetic for the travel taper and is never negative. Both take the leg as an
+    argument and are computed from the leg the run named in the previous cycle,
+    which is the leg whose distance the run consumes this cycle; neither decides
+    that a position was reached and neither stops anything.
   - `temporaryLegExecutionTargetM()` is the one **temporary pre-S3/S4
     compatibility seam**: it maps the current leg's execution target to the Bottle
     Line rule landmark (forward) or the rule Target Point (reverse), so the
     firmware keeps its current deterministic behaviour until the execution plan
-    exists. It is a compatibility mapping, not a physical claim, and S3/S4 remove
-    it.
+    exists. It is a compatibility mapping, not a physical claim, and **S4 removes
+    it** when the run reads the execution plan's forward stop target instead.
+  - **The execution targets have their own owner.** `ev::RunExecutionPlan`,
+    `ev::RunExecutionDependencies` and `ev::buildRunExecutionPlan()` in
+    `lib/evcore/src/RunExecutionPlan.h` own the *execution* geometry of one
+    announced run: the explicit forward stop target, the reverse stop target and
+    the forward-axis interaction landmarks, as an immutable value built once at
+    the announcement boundary from the validated `RunAxisGeometry`, the
+    `BottleEvidenceConfig` landmark distances and the physical dependencies in
+    `RunExecutionDependencies`. It consumes rule geometry and never redefines it:
+    the Bottle Line stays a rule landmark, the reverse stop is the announced
+    Target Point, and the forward stop is the Bottle Line plus a **measured**
+    margin rather than the Bottle Line itself. Construction fails closed with a
+    named `RunExecutionPlanStatus` when the announcement is illegal, when a
+    required physical dependency is not `Measured` (a `Provisional` placeholder
+    never authorizes an execution plan that depends on it), when a value is not
+    finite, or when the derived landmarks are not in a physically possible order
+    (`earliestContact <= latestContact <= captureGuaranteed <= forwardStop` and
+    `pushComplete <= forwardStop`). The plan records `timingReady`,
+    `predictedMotionTimeS` and `initialDelayS` honestly: with no empirical timing
+    evidence the first is false and both numbers are 0.0. It has no default
+    constructor, no setters and only `const` fields, so an announcement produces
+    one plan and a run cannot adjust it. **No measured forward-stop margin exists
+    yet**, so a production construction refuses today, and **runtime consumption
+    is deliberately not wired**: S4 is what makes motion shaping and forward
+    progression read the plan's one forward stop target.
 - Sample age is computed once, by `ev::sampleAge()` in `Snapshots.h`:
   `ageMs = nowMs - sampleMs` with unsigned subtraction, fresh up to a
   caller-supplied `maxAgeMs` inclusive, so a stamp from the future is never
