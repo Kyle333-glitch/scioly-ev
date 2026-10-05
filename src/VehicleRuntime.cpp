@@ -185,13 +185,23 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     const double remainingToTargetM =
         ev::remainingDistanceTo(axisGeometry_.targetPointPositionM, axisPosition.positionM,
                                 legForward_);
-    // The leg's execution target: the forward leg's is the single temporary
-    // pre-S3/S4 compatibility mapping (`temporaryLegExecutionTargetM()`, RunAxis.h);
-    // the reverse leg's is the rule Target Point. S3/S4 replace the forward target
-    // with the execution plan's explicit forward stop target.
-    const double legRemainingM = ev::remainingDistanceToClamped(
-        ev::temporaryLegExecutionTargetM(axisGeometry_, legForward_), axisPosition.positionM,
-        legForward_);
+    // The leg the run is travelling ends at ONE execution target, and the plan is
+    // its owner: the forward leg at the plan's explicit forward stop, the reverse
+    // leg at the announced Target Point the plan carries. This is the distance the
+    // travel taper is sized from, so the shaping and the run's own progression
+    // (which completes the forward phases at the same stored value) cannot disagree
+    // about where the forward travel ends.
+    //
+    // With no usable plan there is no leg target at all, and the answer is zero
+    // remaining distance rather than a shape toward a rule landmark: the Bottle
+    // Line is not a substitute execution target, and a run that has none does not
+    // travel forward.
+    const ev::LegExecutionTarget legTarget = ev::legExecutionTargetM(executionPlan_.plan(), legForward_);
+    const double legRemainingM =
+        legTarget.usable
+            ? ev::remainingDistanceToClamped(legTarget.positionM, axisPosition.positionM,
+                                             legForward_)
+            : 0.0;
 
     // ---------------------------------------------------------------- stage 3
     // Raw inputs. Nothing here is converted or interpreted: the counts are counts
@@ -262,9 +272,9 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // The leg it uses is the leg the run is on now (`legForward_`, updated in
     // stage 6 of the previous tick from the run's own command), because the leg
     // this cycle will name does not exist until the run has been stepped.
-    const ev::BottleEvidence bottleEvidence =
-        ev::deriveBottleEvidence(axisGeometry_, legForward_, axisPosition.positionM,
-                                 positionUsable_, vehicleConfig::bottleEvidenceConfig());
+    const ev::BottleEvidence bottleEvidence = ev::deriveBottleEvidence(
+        executionPlan_.plan(), legForward_, axisPosition.positionM, positionUsable_,
+        vehicleConfig::bottleEvidenceConfig());
     runInputs.bottleContactDetected = bottleEvidence.contactDetected;
     runInputs.captureComplete = bottleEvidence.captureComplete;
     runInputs.pushComplete = bottleEvidence.pushComplete;
@@ -393,6 +403,11 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.runAxisPositionM = axisPosition.positionM;
     snapshot.remainingToTargetM = remainingToTargetM;
     snapshot.legRemainingM = legRemainingM;
+    snapshot.legTargetUsable = legTarget.usable;
+    snapshot.legTargetM = legTarget.positionM;
+    snapshot.executionPlanUsable = executionPlan_.plan().valid;
+    snapshot.executionPlanStatus = executionPlan_.plan().status;
+    snapshot.forwardStopMpPositionM = executionPlan_.plan().forwardStopMpPositionM;
     snapshot.measuredVelocityMps = estimate_.velocityMps;
     snapshot.velocityUsable = velocityReady.usable;
     snapshot.velocityStatus = estimate_.status;
@@ -902,6 +917,23 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     // as the record of what was decided.
     timingPlan_ = plan;
     runProfileLimits_ = vehicleConfig::profileLimitsWithCruise(plan.plannedCruiseMps);
+    // This run's execution plan, from the same announcement the rule geometry above
+    // came from and the same `Sourced` dependencies the configuration carries. It
+    // owns the run's ONE forward execution target, and it is adopted even when it
+    // refuses: a refusal is a fact about this run (`MissingForwardExecutionTarget`
+    // while the margin is a placeholder) and the named reason is what a diagnostic
+    // reports. With a refused plan the run has no forward target to shape and no
+    // forward completion to claim, so it cannot travel forward - the fail-closed
+    // behaviour, and the state of this vehicle today.
+    //
+    // The timing arguments are the honest production ones: this run is not
+    // announced with an idealized predicted motion time or delay, so the plan
+    // records `timingReady = false` and both numbers as 0.0 rather than letting an
+    // unvalidated prediction travel beside the execution targets.
+    executionPlan_.adopt(
+        ev::buildRunExecutionPlan(config, vehicleConfig::bottleEvidenceConfig(),
+                                  vehicleConfig::runExecutionDependencies(), false, 0.0, 0.0)
+            .plan);
     legForward_ = true;
     pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted, ev::kTelemetryMissingField);
     respondLine(ev::formatAnnounceAck(verdict, serialTransport::port().workingBuffer(),
@@ -962,6 +994,9 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     // is planned from its own announcement (which may name a different Target
     // Time), and no planned cruise survives a new-run boundary.
     timingPlan_ = ev::refusedTimingPlan(ev::RunTimingPlanStatus::NotPlanned);
+    // The execution plan goes with it too: there is no run to have execution
+    // targets until the next announcement produces its own plan.
+    executionPlan_.clear();
     runProfileLimits_ = vehicleConfig::profileLimits();
     legForward_ = true;
     runOriginTicks_ = encoderInput::snapshotTicks().ticks;

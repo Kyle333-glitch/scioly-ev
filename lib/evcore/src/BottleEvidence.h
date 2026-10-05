@@ -84,8 +84,11 @@ struct BottleEvidenceConfig {
     // before the push counts as complete, metres. Pushing the bottle to the line
     // means the vehicle has to reach the line at least; 0 means "the vehicle
     // reaching the Bottle Line is the push". This is the event's rule landmark,
-    // not the vehicle's physical forward stop target (that is execution geometry
-    // owned by S3/S4).
+    // not the vehicle's physical forward stop target: that is execution geometry
+    // owned by the immutable `RunExecutionPlan` (`RunExecutionPlan.h`), and the run
+    // layer derives its forward-leg evidence through
+    // `ev::deriveBottleEvidence(plan, ...)`, whose push objective is the plan's own
+    // forward stop.
     Sourced<double> pushMarginDistanceM;
 };
 

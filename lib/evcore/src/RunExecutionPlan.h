@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <new>
 #include <type_traits>
 
 namespace ev {
@@ -56,11 +57,13 @@ namespace ev {
 //   and `initialDelayS` because timing is per-run state, and it records them
 //   honestly: until empirical physical timing evidence exists, `timingReady` is
 //   false and both numbers are 0.0 ("not meaningfully available").
-// * **It is not wired into the run yet.** S4 owns runtime integration: making
-//   motion shaping and forward progression consume the one forward stop target
-//   everywhere, and deleting the temporary pre-S3/S4 compatibility seam
-//   (`ev::temporaryLegExecutionTargetM()`, `RunAxis.h`). Nothing in the vehicle
-//   layer consumes a plan today.
+// * **The run layer consumes it, and only through the accessors below.** S4 wired
+//   the plan into `VehicleRuntime` and the scenario harness: each leg's execution
+//   target (`legExecutionTargetM()`), the forward-leg push objective
+//   (`deriveBottleEvidence()`) and the shaping distance the run travels are all
+//   read from the plan, and the temporary pre-S3/S4 compatibility seam
+//   (`temporaryLegExecutionTargetM()`) is gone. There is one forward stop value in
+//   an active run, and the taper and the phase progression both read it.
 // * **It invents no physical value.** The forward stop is the Bottle Line plus a
 //   *measured* margin; with no margin established, construction refuses with a
 //   named reason instead of quietly equating the forward stop with the rule
@@ -100,6 +103,12 @@ enum class RunExecutionPlanStatus : uint8_t {
     // The derived interaction landmarks are not in a physically possible order
     // (see the ordering invariant in `buildRunExecutionPlan()`).
     ContradictoryExecutionGeometry = 5,
+    // No announcement has produced this plan yet: the value a run layer holds
+    // before its first announcement and returns to at a new-run boundary. It is a
+    // separate status from `InvalidAnnouncement` because "no announcement at all"
+    // and "an announcement that was refused" are different facts, and a
+    // diagnostic that could not tell them apart could not name the cause.
+    NotPlanned = 6,
 };
 
 inline const char* runExecutionPlanStatusName(RunExecutionPlanStatus status) {
@@ -116,6 +125,8 @@ inline const char* runExecutionPlanStatusName(RunExecutionPlanStatus status) {
             return "NonFiniteValue";
         case RunExecutionPlanStatus::ContradictoryExecutionGeometry:
             return "ContradictoryExecutionGeometry";
+        case RunExecutionPlanStatus::NotPlanned:
+            return "NotPlanned";
     }
     return "?";
 }
@@ -213,15 +224,19 @@ struct RunExecutionPlan {
     const double captureGuaranteedMpPositionM;
 
     // The MP position at which the push counts as complete: the Bottle Line rule
-    // landmark plus the configured push margin. Carried here for the forward stop
-    // ordering check and for diagnostics; the evidence itself stays owned by
-    // `BottleEvidence.h`.
+    // landmark plus the configured push margin. This is the plan's *rule-derived*
+    // push landmark - the objective the event asks for - and it is carried here for
+    // the forward stop ordering check and for diagnostics. The run layer's own
+    // completion threshold is `forwardStopMpPositionM` (see the consumption
+    // section below), which every valid plan places at or beyond this landmark.
     const double pushCompleteMpPositionM;
 
     // The commanded forward stop position, metres: the Bottle Line rule landmark
     // plus the measured forward-stop margin. This is the explicit forward
-    // execution target S4 will consume everywhere, and it is **not** the Bottle
-    // Line unless the measured margin is exactly zero.
+    // execution target the run layer consumes everywhere
+    // (`ev::legExecutionTargetM()`, and the push objective of
+    // `ev::deriveBottleEvidence(plan, ...)`), and it is **not** the Bottle Line
+    // unless the measured margin is exactly zero.
     const double forwardStopMpPositionM;
 
     // The commanded reverse stop position, metres: the announced Target Point
@@ -428,5 +443,126 @@ inline RunExecutionPlanResult buildRunExecutionPlan(
                                 RunExecutionPlanStatus::Planned);
     return RunExecutionPlanResult(plan, true, RunExecutionPlanStatus::Planned);
 }
+
+// ---------------------------------------------------------------------------
+// Consuming a plan - the run layer's one source for each leg's target
+// ---------------------------------------------------------------------------
+//
+// A plan answers one question per leg: **where does this leg end?**
+//
+//   * the forward leg ends at `forwardStopMpPositionM`, the explicit execution
+//     target (the Bottle Line rule landmark plus the measured forward-stop
+//     margin) - never at the Bottle Line itself;
+//   * the reverse leg ends at `reverseStopMpPositionM`, the announced Target Point
+//     (rule 8.h), which is what the reverse leg ended at before the plan existed.
+//
+// Both answers come from the plan and from nowhere else. The vehicle layer holds a
+// plan and reads it with these functions, so the taper that shapes the travel and
+// the phase progression that ends it cannot be working to two different endpoints:
+// both are arithmetic on the same stored value.
+//
+// With no usable plan there is no leg target at all. Every position of a refused
+// plan is zero, and a zero is not a landmark: the run layer must treat "no plan" as
+// "no target", shape nothing, and claim no forward completion, rather than
+// substituting a rule landmark for the execution target the plan was supposed to
+// own. That is the fail-closed rule `usable` carries.
+
+// Where one leg of the run ends, metres on the run axis, with its own usability.
+// There is deliberately no default: an absent target must be stated as absent.
+struct LegExecutionTarget {
+    constexpr LegExecutionTarget(double positionM_, bool usable_)
+        : positionM(positionM_), usable(usable_) {}
+
+    // The target position, metres from the Start Point, signed (positive is
+    // forward travel). Meaningful only when `usable` is true.
+    double positionM;
+
+    // False means "this leg has no execution target", which is a different fact
+    // from "the target is at zero". A consumer must not shape travel against an
+    // unusable target, and must not report its position as a landmark.
+    bool usable;
+};
+
+static_assert(!std::is_default_constructible<LegExecutionTarget>::value,
+              "no silent defaults; an absent leg target must be stated as absent");
+
+// The execution target of the leg the run is travelling. The plan owns it: there
+// is no second argument, no fallback and no rule landmark here, so a caller cannot
+// ask "where does the forward leg end?" and be handed the Bottle Line because the
+// execution target is missing.
+inline LegExecutionTarget legExecutionTargetM(const RunExecutionPlan& plan, bool forwardLeg) {
+    return forwardLeg ? LegExecutionTarget(plan.forwardStopMpPositionM, plan.valid)
+                      : LegExecutionTarget(plan.reverseStopMpPositionM, plan.valid);
+}
+
+// The forward-leg bottle evidence, with the forward travel's endpoint taken from
+// the plan.
+//
+// Contact and capture keep the meaning and the owner they already had
+// (`BottleEvidence.h`, and the distance calibration behind them): this function
+// does not re-derive them and does not change what a phase waits for. The one
+// landmark that has an *execution* owner is the forward travel's endpoint, and that
+// is the value this overload takes from the plan: the push counts as complete at
+// the plan's forward stop, not at the Bottle Line rule landmark. That is what keeps
+// the phase progression and the travel taper from disagreeing - the run leaves
+// `Push` exactly where its own shaping target reaches zero - and it cannot report a
+// push earlier than the event's objective: a valid plan's ordering invariant
+// requires `pushCompleteMpPositionM <= forwardStopMpPositionM`, so the forward stop
+// is at or beyond the rule-derived push landmark. The plan's own
+// `pushCompleteMpPositionM` remains the rule-derived bound that invariant checks.
+//
+// A refused plan produces no evidence at all: its positions are zeros, and a zero
+// would read as "the vehicle is past every landmark".
+inline BottleEvidence deriveBottleEvidence(const RunExecutionPlan& plan, bool forwardLeg,
+                                           double positionM, bool positionUsable,
+                                           const BottleEvidenceConfig& config) {
+    if (!plan.valid) {
+        return BottleEvidence{};
+    }
+
+    BottleEvidence evidence =
+        deriveBottleEvidence(plan.geometry, forwardLeg, positionM, positionUsable, config);
+    evidence.pushPositionM = plan.forwardStopMpPositionM;
+    evidence.pushComplete = evidence.derived && positionM >= evidence.pushPositionM;
+    return evidence;
+}
+
+// The run layer's current execution plan.
+//
+// A holder, and not an assignment, because a plan is immutable: it has no default
+// constructor, no setters and no assignment operator (every field is `const`), so
+// "the run's current plan" cannot be produced by copying over a previous one.
+// `adopt()` ends the previous plan's lifetime and begins the new one's in place,
+// which is the same "one announcement, one plan" rule the type states. A plan owns
+// no resources, so the replacement is a plain construct-in-place: no allocation, no
+// ownership transfer, and no partially updated plan - a reader sees either the whole
+// previous plan or the whole new one.
+class RunExecutionPlanHolder {
+public:
+    // Before any announcement there is no plan, and that is stated rather than
+    // implied by zeros.
+    RunExecutionPlanHolder() : plan_(refusedExecutionPlan(RunExecutionPlanStatus::NotPlanned)) {}
+
+    // A holder is the run layer's storage, not a value to copy around: copying one
+    // would be a second, unnamed owner of the current plan.
+    RunExecutionPlanHolder(const RunExecutionPlanHolder&) = delete;
+    RunExecutionPlanHolder& operator=(const RunExecutionPlanHolder&) = delete;
+
+    const RunExecutionPlan& plan() const { return plan_; }
+
+    // Takes on one announcement's plan, ending the previous one. Refused plans are
+    // adopted too: a refusal is a fact about the current run, and its named status
+    // is what a diagnostic reports.
+    void adopt(const RunExecutionPlan& plan) {
+        plan_.~RunExecutionPlan();
+        new (&plan_) RunExecutionPlan(plan);
+    }
+
+    // Back to "no announcement", for a new-run boundary.
+    void clear() { adopt(refusedExecutionPlan(RunExecutionPlanStatus::NotPlanned)); }
+
+private:
+    RunExecutionPlan plan_;
+};
 
 }  // namespace ev

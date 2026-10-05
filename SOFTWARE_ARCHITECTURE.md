@@ -298,7 +298,8 @@ that the value is an unverified, configurable placeholder.
     Distance. The Bottle Line is an official **rule landmark**, not the vehicle's
     physical turnaround, forward-leg endpoint or forward stop target - that is
     execution geometry, owned by the immutable `RunExecutionPlan` below, whose
-    single forward stop target S4 wires into motion shaping. The state machine
+    single forward stop target the run layer reads as its forward travel's
+    endpoint. The state machine
     deliberately stores no geometry, so the run layer has to hold it, and holding
     it without an owner is how two places start disagreeing about where a rule
     landmark is.
@@ -311,8 +312,8 @@ that the value is an unverified, configurable placeholder.
     still reports a diagnostic number under the placeholder sign, exactly like a
     `Provisional` scale, and may not reach control.
   - `remainingDistanceTo()` is the generic remaining-distance arithmetic and takes
-    an **explicit, caller-supplied target** - the caller names the landmark (or,
-    once S4 consumes it, the execution plan's target) it is measuring to, so the
+    an **explicit, caller-supplied target** - the caller names the execution
+    plan's target it is measuring to (see `legExecutionTargetM()` below), so the
     arithmetic cannot substitute a rule landmark for the target a consumer asked
     about. It is signed and deliberately unclamped (an overshoot is evidence, not
     something to hide from a log); `remainingDistanceToClamped()` is the same
@@ -320,12 +321,12 @@ that the value is an unverified, configurable placeholder.
     argument and are computed from the leg the run named in the previous cycle,
     which is the leg whose distance the run consumes this cycle; neither decides
     that a position was reached and neither stops anything.
-  - `temporaryLegExecutionTargetM()` is the one **temporary pre-S3/S4
-    compatibility seam**: it maps the current leg's execution target to the Bottle
-    Line rule landmark (forward) or the rule Target Point (reverse), so the
-    firmware keeps its current deterministic behaviour until the execution plan
-    exists. It is a compatibility mapping, not a physical claim, and **S4 removes
-    it** when the run reads the execution plan's forward stop target instead.
+  - **No leg's execution target lives here.** The S2 compatibility seam
+    (`temporaryLegExecutionTargetM()`), which mapped the forward leg onto the
+    Bottle Line rule landmark, is **gone** (S4): the run layer reads each leg's
+    target from its own execution plan (`ev::legExecutionTargetM()`) and this
+    module maps no leg onto any landmark. What remains here is rule geometry and
+    the arithmetic done to an explicitly named target.
   - **The execution targets have their own owner.** `ev::RunExecutionPlan`,
     `ev::RunExecutionDependencies` and `ev::buildRunExecutionPlan()` in
     `lib/evcore/src/RunExecutionPlan.h` own the *execution* geometry of one
@@ -346,10 +347,19 @@ that the value is an unverified, configurable placeholder.
     `predictedMotionTimeS` and `initialDelayS` honestly: with no empirical timing
     evidence the first is false and both numbers are 0.0. It has no default
     constructor, no setters and only `const` fields, so an announcement produces
-    one plan and a run cannot adjust it. **No measured forward-stop margin exists
-    yet**, so a production construction refuses today, and **runtime consumption
-    is deliberately not wired**: S4 is what makes motion shaping and forward
-    progression read the plan's one forward stop target.
+    one plan and a run cannot adjust it. **The run layer consumes it** (S4),
+    through the plan's own accessors rather than by reading fields ad hoc:
+    `ev::legExecutionTargetM()` answers where the leg being travelled ends (the
+    forward leg at `forwardStopMpPositionM`, the reverse leg at the announced
+    Target Point), and `ev::deriveBottleEvidence(plan, ...)` answers the
+    forward-leg evidence with the push objective taken from that same forward
+    stop. The vehicle layer holds its current plan in `ev::RunExecutionPlanHolder`
+    and reads both through it, so the travel taper and the phase progression cannot
+    disagree about where the forward travel ends. With no usable plan there is no
+    leg target at all: the run shapes nothing and claims no forward completion
+    rather than substituting the Bottle Line landmark. **No measured forward-stop
+    margin exists yet**, so a production construction refuses and every leg's
+    target is absent - which is why this vehicle cannot travel forward today.
 - Sample age is computed once, by `ev::sampleAge()` in `Snapshots.h`:
   `ageMs = nowMs - sampleMs` with unsigned subtraction, fresh up to a
   caller-supplied `maxAgeMs` inclusive, so a stamp from the future is never

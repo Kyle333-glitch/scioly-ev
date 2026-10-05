@@ -28,8 +28,9 @@ namespace ev {
 //       applied exactly once;
 //     - the generic remaining-distance arithmetic the run layer consumes, which
 //       takes an explicit, caller-supplied target rather than choosing one
-//       itself; and the one temporary pre-S3/S4 compatibility mapping for the
-//       forward leg's execution target.
+//       itself. The target is supplied by the consumer's own execution plan
+//       (`RunExecutionPlan.h`), not by this module: this arithmetic must not be
+//       able to substitute a rule landmark for it.
 //
 // * Pure arithmetic. No clock, no pin, no interrupt, no allocation, no
 //   filtering, and no decision about a run.
@@ -110,10 +111,10 @@ struct RunAxisGeometry {
     //
     // This is rule geometry only. It is **not** the vehicle's physical
     // turn-around point, its forward-leg endpoint or its forward stop target -
-    // those are execution geometry, which the vehicle layer decides explicitly
-    // (S3's immutable `RunExecutionPlan`, S4's single forward stop target). The
-    // one pre-S3/S4 compatibility mapping that currently stands in for the
-    // forward execution target is `temporaryLegExecutionTargetM()` below.
+    // those are execution geometry, owned by the immutable `RunExecutionPlan`
+    // (`RunExecutionPlan.h`), whose single forward stop target the run layer reads
+    // through `ev::legExecutionTargetM()`. Nothing in this module maps a leg onto
+    // this landmark.
     constexpr double bottleLinePositionM() const {
         return targetPointPositionM + bottleLineDistanceM;
     }
@@ -213,7 +214,11 @@ inline RunAxisPosition runAxisPositionM(int32_t originTicks, int32_t currentTick
 // 8.h). This is the distance a timing plan is sized against - the run must
 // travel it, not just the announced Target Distance - and it is derived from the
 // announced rule geometry, so there is no second, competing distance for a run's
-// budget. It is a rule quantity used to size the plan, not an execution target.
+// budget. It is a rule quantity used to size the plan, not an execution target:
+// the vehicle travels to its execution plan's own targets, which are further out
+// than this rule course (`RunExecutionPlan.h`), and reconciling the two for the
+// timing estimate is a separate, owned decision rather than something this
+// arithmetic may assume.
 inline double plannedTravelDistanceM(const RunAxisGeometry& geometry) {
     return geometry.bottleLinePositionM() + geometry.bottleLineDistanceM;
 }
@@ -249,31 +254,6 @@ inline double remainingDistanceToClamped(double targetPositionM, double currentP
                                          bool forwardLeg) {
     const double remainingM = remainingDistanceTo(targetPositionM, currentPositionM, forwardLeg);
     return remainingM > 0.0 ? remainingM : 0.0;
-}
-
-// ===========================================================================
-// TEMPORARY PRE-S3/S4 COMPATIBILITY SEAM - S3/S4 MUST REMOVE THIS
-// ===========================================================================
-//
-// S2 separates official rule geometry from vehicle execution geometry. This is
-// the ONE place that preserves the old behaviour - the forward leg's execution
-// target is taken to be the Bottle Line rule landmark - so the firmware keeps
-// its current deterministic behaviour until S3's immutable `RunExecutionPlan`
-// and S4's single forward stop target land.
-//
-// It is a compatibility mapping, **not architecture truth**:
-//
-//   * it is not a claim that the Bottle Line is the vehicle's measured physical
-//     turn-around point, forward-leg endpoint or forward stop target;
-//   * it contains no calibration constant and invents no physical value;
-//   * the reverse leg's target is the rule Target Point and is not temporary.
-//
-// S3/S4: delete this function and have the consumers read the execution plan's
-// explicit forward stop target instead. Recorded as debt in `DEVELOPMENT_LOG.md`
-// (D39) and the S2 stage report.
-inline constexpr double temporaryLegExecutionTargetM(const RunAxisGeometry& geometry,
-                                                     bool forwardLeg) {
-    return forwardLeg ? geometry.bottleLinePositionM() : geometry.targetPointPositionM;
 }
 
 }  // namespace ev

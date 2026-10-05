@@ -14,6 +14,7 @@
 #include <OperatorPolicy.h>
 #include <OperatorResponse.h>
 #include <RunAxis.h>
+#include <RunExecutionPlan.h>
 #include <SafetyAuthority.h>
 #include <SerialCommandParser.h>
 #include <TelemetryFormat.h>
@@ -139,7 +140,22 @@ struct TelemetrySnapshot {
     uint32_t ignoredUpdates = 0U;
     double runAxisPositionM = 0.0;
     double remainingToTargetM = 0.0;
+    // The remaining distance along the leg the run is travelling, and the execution
+    // target it was measured to (`ev::legExecutionTargetM()`). A plan that is not
+    // usable has no target at all, and then this leg distance is zero *because
+    // there is nothing to shape toward* rather than because the vehicle arrived -
+    // which is what `legTargetUsable` distinguishes.
     double legRemainingM = 0.0;
+    bool legTargetUsable = false;
+    double legTargetM = 0.0;
+
+    // This run's execution plan: the one value the forward travel's endpoint comes
+    // from. Reported so a run that could not shape a forward target is attributed
+    // to the missing plan - and to the named refusal behind it - rather than to a
+    // missing measurement somewhere else.
+    bool executionPlanUsable = false;
+    ev::RunExecutionPlanStatus executionPlanStatus = ev::RunExecutionPlanStatus::NotPlanned;
+    double forwardStopMpPositionM = 0.0;
     double measuredVelocityMps = 0.0;
     bool velocityUsable = false;
     ev::VelocityEstimateStatus velocityStatus = ev::VelocityEstimateStatus::WarmingUp;
@@ -445,6 +461,12 @@ private:
     int32_t runOriginTicks_ = 0;
     bool legForward_ = true;
     ev::RunAxisGeometry axisGeometry_{0.0, 0.0, 0.0};
+    // This run's execution plan, adopted from the announcement and cleared at a
+    // new-run boundary. It owns the run's execution targets: the forward stop the
+    // travel is shaped to and the push objective the forward phases complete at
+    // are both read from it, and with no usable plan there is no leg target at all
+    // (fail closed) rather than a rule landmark standing in for one.
+    ev::RunExecutionPlanHolder executionPlan_{};
     // Held defaults before the first estimate exists. The shape of an absent
     // number is owned by `refusedVelocityEstimate()`; spelling it here by hand
     // would silently survive a new field or a reordered enumerator.

@@ -8,6 +8,7 @@
 #include <NearZeroVerifier.h>
 #include <ReversalSequencer.h>
 #include <RunConfig.h>
+#include <RunExecutionPlan.h>
 #include <SafetyLimits.h>
 #include <Units.h>
 #include <VehicleCalibration.h>
@@ -184,6 +185,25 @@ constexpr double kPlannedMaximumOptionalDelayS = ev::rules2027::kTargetTimeMaxS;
 constexpr double kPlannedBottleContactLeadM = 0.0;
 constexpr double kPlannedBottleCaptureAdvanceM = 0.0;
 constexpr double kPlannedBottlePushMarginM = 0.0;
+
+// The forward execution target's own physical dependencies
+// (`ev::RunExecutionDependencies`): how far either side of the nominal contact
+// position the bottle's touch may credibly be reported, and how far beyond the
+// Bottle Line rule landmark the vehicle's commanded forward stop lies. The second
+// is the one fact that establishes the forward execution target, and it is not a
+// number anyone has measured: pusher reach, the contact window, capture/transfer
+// behaviour, the push margin and braking behaviour all fold into that single
+// distance, and the bottle-integration protocol (P-H8) plus a braking
+// characterization are what establish it.
+//
+// Both are placeholders, deliberately, and the consequence is fail-closed:
+// `ev::buildRunExecutionPlan()` refuses with `MissingForwardExecutionTarget` while
+// the margin is not `Measured`, so a run has no forward execution target to shape
+// toward and no forward travel to command. Nothing here may be promoted to
+// `Measured` without the recorded measurement, and no value may be guessed in the
+// meantime to make a run drive.
+constexpr double kPlannedContactWindowToleranceM = 0.0;
+constexpr double kPlannedForwardStopMarginBeyondBottleLineM = 0.0;
 
 // Run-policy bounds. Every one of these is a bound the run is allowed to wait
 // for evidence under, so a placeholder that is too short turns into a phase
@@ -406,6 +426,16 @@ inline ev::BottleEvidenceConfig bottleEvidenceConfig() {
     return ev::BottleEvidenceConfig(provisionalValue(kPlannedBottleContactLeadM),
                                     provisionalValue(kPlannedBottleCaptureAdvanceM),
                                     provisionalValue(kPlannedBottlePushMarginM));
+}
+
+// What the execution plan is built from, besides the announcement and the
+// bottle-interaction calibration above: the two physical facts behind the forward
+// stop. Both are placeholders, so the plan refuses and a run has no execution
+// target at all - which is why this vehicle cannot be armed for a run. See
+// `kPlannedForwardStopMarginBeyondBottleLineM`.
+inline ev::RunExecutionDependencies runExecutionDependencies() {
+    return ev::RunExecutionDependencies(provisionalValue(kPlannedContactWindowToleranceM),
+                                        provisionalValue(kPlannedForwardStopMarginBeyondBottleLineM));
 }
 
 // The delay bound: the event's maximum Target Time, as a rule value (rule 8.i),

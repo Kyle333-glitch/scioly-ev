@@ -15,6 +15,7 @@
 #include <ReversalSequencer.h>
 #include <RunAxis.h>
 #include <RunConfig.h>
+#include <RunExecutionPlan.h>
 #include <SafetyAuthority.h>
 #include <SafetyLimits.h>
 #include <Snapshots.h>
@@ -115,7 +116,8 @@
 //     ev::runCommandNamesForwardLeg()        CompetitionStateMachine.h
 //     ev::RunAxisGeometry / runAxisPositionM()
 //     ev::remainingDistanceTo() / remainingDistanceToClamped()   RunAxis.h
-//     ev::temporaryLegExecutionTargetM()            RunAxis.h (pre-S3/S4 seam)
+//     ev::buildRunExecutionPlan() / ev::legExecutionTargetM()
+//     ev::deriveBottleEvidence(plan, ...)            RunExecutionPlan.h
 //     ev::tickPolarityAgrees()               SafetyLimits.h
 //
 //   A change to any of those decisions changes the scenarios with it, which is
@@ -213,6 +215,16 @@ constexpr double kFixtureFinalApproachTimeoutS = 10.0;
 constexpr double kFixtureFinalStopTimeoutS = 1.0;
 constexpr double kFixtureFinalApproachDistanceM = 0.5;
 
+// The execution plan's own measured fixtures: how far either side of the nominal
+// contact position the touch may credibly be reported, and how far beyond the
+// Bottle Line rule landmark the vehicle's commanded forward stop lies. The
+// forward-stop margin is deliberately larger than the fixture push margin
+// (`kFixtureBottlePushMarginM`, 0.05 m) because the plan refuses a forward stop
+// that does not reach the push objective, and small enough that the scripted runs
+// stay inside their phase budgets.
+constexpr double kFixtureContactWindowToleranceM = 0.02;
+constexpr double kFixtureForwardStopMarginBeyondBottleLineM = 0.10;
+
 constexpr double kFixtureStopThresholdMps = 0.05;
 constexpr double kFixtureStopDwellS = 0.1;
 constexpr double kFixtureReversalTimeoutS = 1.0;
@@ -258,6 +270,14 @@ inline ev::NearZeroConfig fixtureStopConfig() {
                               measuredValue(kFixtureStopDwellS),
                               ev::Sourced<uint32_t>(kFixtureMaxUpdateGapMs,
                                                     ev::ValueSource::Measured));
+}
+
+// The fixture execution dependencies: the plan's own physical inputs, marked
+// measured exactly like every other fixture value here so the production builder
+// accepts them. They are test fixtures, not measurements of this vehicle.
+inline ev::RunExecutionDependencies fixtureExecutionDependencies() {
+    return ev::RunExecutionDependencies(measuredValue(kFixtureContactWindowToleranceM),
+                                        measuredValue(kFixtureForwardStopMarginBeyondBottleLineM));
 }
 
 // The single fixture set every scenario uses.
@@ -625,6 +645,14 @@ public:
             axisGeometry_ = ev::RunAxisGeometry::fromRunConfig(config);
             runOriginTicks_ = decoder_.ticks();
             legForward_ = true;
+            // This run's execution plan, through the same production builder the
+            // vehicle layer calls, with the fixture dependencies in place of the
+            // production placeholders. Adopted even when it refuses, so the run's
+            // own refusal travels with the run rather than being hidden.
+            executionPlan_.adopt(ev::buildRunExecutionPlan(config, fixtures_.phase.bottleEvidence,
+                                                           fixtureExecutionDependencies(), false,
+                                                           0.0, 0.0)
+                                     .plan);
         }
         return status;
     }
@@ -685,7 +713,9 @@ public:
         odometrySampleMs_ = 0U;
         runOriginTicks_ = 0;
         axisGeometry_ = ev::RunAxisGeometry(0.0, 0.0, 0.0);
+        executionPlan_.clear();
         legForward_ = true;
+        positionUsable_ = false;
         stopCyclesAtZeroSinceLastDrive_ = 0U;
         verifiedStopSinceLastDrive_ = false;
         droppedSamples_ = 0U;
@@ -753,15 +783,21 @@ public:
             fixtures_.positiveTicksDirection);
         runAxisPositionM_ = runAxisPosition.positionM;
         const bool positionUsable = odometryReady.usable && runAxisPosition.usable;
+        positionUsable_ = positionUsable;
         const double remainingToTargetM =
             ev::remainingDistanceTo(axisGeometry_.targetPointPositionM, runAxisPositionM_,
                                     legForward_);
-        // The forward leg's execution target comes from the one temporary
-        // pre-S3/S4 compatibility mapping; the reverse leg's is the rule Target
-        // Point. Mirrors the vehicle layer's wiring exactly.
-        const double legRemainingM = ev::remainingDistanceToClamped(
-            ev::temporaryLegExecutionTargetM(axisGeometry_, legForward_), runAxisPositionM_,
-            legForward_);
+        // The leg the run is travelling ends at the execution plan's own target,
+        // exactly as the vehicle layer computes it: no rule landmark stands in for
+        // a missing execution target, and with no usable plan there is no leg target
+        // at all, so the shaping distance is zero rather than a shape toward the
+        // Bottle Line.
+        const ev::LegExecutionTarget legTarget =
+            ev::legExecutionTargetM(executionPlan_.plan(), legForward_);
+        const double legRemainingM =
+            legTarget.usable ? ev::remainingDistanceToClamped(legTarget.positionM,
+                                                             runAxisPositionM_, legForward_)
+                             : 0.0;
 
         // 4. The evidence packet the run policy consumes this cycle.
         ev::RunInputs inputs;
@@ -934,6 +970,36 @@ public:
     // production conversion with the fixture polarity applied once.
     double runAxisPositionM() const { return runAxisPositionM_; }
 
+    // This run's execution plan, held here because the state machine deliberately
+    // does not store the announced parameters. It is the production plan type,
+    // adopted through the production builder from a valid announcement only, so a
+    // scenario reads the same execution targets the firmware will.
+    const ev::RunExecutionPlan& executionPlan() const { return executionPlan_.plan(); }
+    bool executionPlanUsable() const { return executionPlan_.plan().valid; }
+
+    // The plan's single forward stop target, metres. Meaningful only when
+    // `executionPlanUsable()`; a refused plan carries zeros, and reading those as a
+    // landmark is exactly what the plan's `valid` flag exists to prevent.
+    double forwardStopMpPositionM() const { return executionPlan_.plan().forwardStopMpPositionM; }
+
+    // The execution target of the leg the run is travelling, from the production
+    // rule (`ev::legExecutionTargetM()`). `usable` is false while the run has no
+    // plan, and then the harness shapes no travel - mirroring the vehicle layer.
+    ev::LegExecutionTarget legExecutionTargetM() const {
+        return ev::legExecutionTargetM(executionPlan_.plan(), legForward_);
+    }
+
+    // The forward-leg bottle evidence the vehicle layer derives this cycle, through
+    // the same production call the control tick makes: contact and capture from the
+    // announced geometry and the bottle-interaction configuration, and the push
+    // objective from the plan's own forward stop. A scenario that needs to state
+    // what the vehicle layer believed asks this rather than repeating the threshold
+    // arithmetic.
+    ev::BottleEvidence forwardBottleEvidence() const {
+        return ev::deriveBottleEvidence(executionPlan_.plan(), legForward_, runAxisPositionM_,
+                                        positionUsable_, fixtures_.phase.bottleEvidence);
+    }
+
     // The run layer's geometry, held here because the state machine deliberately
     // does not store the announced parameters. It is the production geometry
     // type, adopted from a valid announcement only, so a scenario reads the same
@@ -1056,8 +1122,16 @@ private:
     // meaning.
     bool configurationValid_ = false;
     ev::RunAxisGeometry axisGeometry_{0.0, 0.0, 0.0};
+    // This run's execution plan, from the same production builder the vehicle layer
+    // calls. It owns the run's execution targets: the forward stop both the leg
+    // shaping and the push objective are read from.
+    ev::RunExecutionPlanHolder executionPlan_{};
     int32_t runOriginTicks_ = 0;
     double runAxisPositionM_ = 0.0;
+    // The combined position verdict of the most recent cycle, held because a
+    // scenario asks the harness for the evidence the vehicle layer would derive and
+    // that derivation needs the same verdict the control path used.
+    bool positionUsable_ = false;
     bool legForward_ = true;
 
     // The reversal audit, mirroring what the authority's direction latch is

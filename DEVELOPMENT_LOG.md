@@ -6183,3 +6183,116 @@ not evidence about the bottle, the stops or the vehicle.
 forward stop target everywhere, and delete `ev::temporaryLegExecutionTargetM()` and
 its two call sites (`src/VehicleRuntime.cpp`, `test/test_scenario/ScenarioHarness.h`).
 This entry does not start S4.
+
+---
+
+## D41 / S4 - 2026-10-05 - One forward stop target: the travel taper and the push objective read the same stored value
+
+**Kind of change.** Software + documentation. S4 of the pack
+`EV-V5-current-to-competition-2026-10-04-v2`. Wires the immutable execution plan
+into the vehicle layer and the scenario harness, deletes the S2 compatibility seam,
+and makes one stored forward stop value own both the forward travel's shaping target
+and its completion. No calibration value, no telemetry wire-schema change, no
+hardware action.
+
+**Why.** S2 separated the announced *rule* geometry from the vehicle's execution
+geometry (`D39`), and S3 created the plan that owns the execution targets (`D40`) -
+but nothing consumed it. Until this change the forward travel ended in two places,
+both built on the same rule landmark: the taper was sized to the Bottle Line, and
+`Push` completed at the Bottle Line plus the configured push margin. Neither was the
+vehicle's execution target, and the two could disagree with each other. This change
+gives both consumers one owner and one stored value.
+
+**What consumes the plan now.**
+
+- **The leg's execution target** - `ev::legExecutionTargetM(plan, legForward)`
+  (`RunExecutionPlan.h`): the forward leg ends at `forwardStopMpPositionM`, the
+  reverse leg at the announced Target Point the plan carries. The vehicle layer's
+  leg distance (`legRemainingM`, the taper input) and the harness's mirror of it are
+  computed from this, and `remainingDistanceToClamped()` is unchanged arithmetic
+  done to an explicitly named target.
+- **The push objective** - `ev::deriveBottleEvidence(plan, ...)`: contact and
+  capture keep their existing meaning, owner and configuration; the push counts as
+  complete at the plan's forward stop. Every valid plan's ordering invariant already
+  requires `pushCompleteMpPositionM <= forwardStopMpPositionM`, so completing at the
+  stop is a completed push rather than a shortened one, and the plan's rule-derived
+  landmark stays as the bound that invariant checks.
+- **The run layer's storage** - `ev::RunExecutionPlanHolder`: a plan is immutable
+  and not assignable, so the holder *adopts* one announcement's plan in place
+  (construct-in-place, no allocation) and `clear()`s back to `NotPlanned` at a
+  new-run boundary. `RunExecutionPlanStatus::NotPlanned` was added for exactly that
+  state, so "no announcement yet" is distinguishable in a log from "the
+  announcement was refused".
+- **Telemetry** - the tick snapshot now carries `legTargetUsable`, `legTargetM`,
+  `executionPlanUsable`, `executionPlanStatus` and `forwardStopMpPositionM`, so a run
+  that could not shape a forward target is attributed to the missing plan and to its
+  named refusal. The wire schema (`TelemetrySample`/`TelemetryFormat`) is
+  deliberately untouched: extending it is S8/S9 work.
+- **Configuration** - `kPlannedContactWindowToleranceM` and
+  `kPlannedForwardStopMarginBeyondBottleLineM` in `src/VehicleConfig.h`, both
+  `provisionalValue(...)` placeholders, plus `runExecutionDependencies()`. No value
+  was invented: they exist so the refusal paths can run, and the plan refuses while
+  they are Provisional.
+
+**Fail-closed behaviour.** With no usable plan there is no leg target at all: the
+leg distance is zero (nothing to shape toward) and no forward evidence is derived,
+so a run cannot travel forward or claim a completed push. No rule landmark is
+substituted for the missing execution target, and the plan's refused positions
+(zeros) are never read as landmarks. In production this is the live state: the
+forward-stop margin has never been measured, so the plan refuses with
+`MissingForwardExecutionTarget` and a run has no forward execution target. The
+`Provisional` calibration lockout already refuses to arm such a run.
+
+**Removed duplication.** `ev::temporaryLegExecutionTargetM()` (`RunAxis.h`) and its
+two call sites (`src/VehicleRuntime.cpp`, `test/test_scenario/ScenarioHarness.h`) are
+gone, together with the scenario driver's own
+`position >= bottleLinePositionM()` push threshold - that script now asks the
+harness for the production derivation instead of repeating the arithmetic.
+
+**Not changed (owned elsewhere).** Bottle-phase semantics (S5): the phases, their
+order, their timeouts and their exit evidence are untouched. Speed strategy and the
+timing model (S6/S7): `plannedTravelDistanceM()` still sizes the timing plan from
+rule geometry, the planned cruise still comes from `planRunTiming()`, and the plan's
+timing inputs are recorded honestly (`timingReady = false`, both numbers 0.0) rather
+than letting an unvalidated prediction travel beside the execution targets -
+reconciling the rule course with the execution targets for the timing estimate is a
+separate, owned decision. Operator `plan` output (S9) and the telemetry wire schema
+(S8/S9) are not built here. The arming gate does not yet require a usable execution
+plan: a run announced with one cannot drive, but nothing stops such a run being
+announced, and it would end in a phase timeout rather than in motion.
+
+**Tests.** `test_execution_plan` (+6 cases): the leg target and the push objective
+are the same stored forward stop; changing *only* the measured forward-stop margin
+(fixture margins 0.15 and 0.40, same announcement, same bottle
+calibration, same rule geometry) moves the leg target and the push objective together
+by the same 0.25 m while the rule-derived push landmark and the reverse stop do not
+move; the push completes at the forward stop and not at the Bottle Line; the reverse
+leg ends at the announced Target Point for two announcements and is unaffected by the
+forward margin; no usable plan means no leg target and no forward evidence (including
+a production-shaped refusal); the holder adopts, reads and clears one plan. The
+scenario suite gains one case asserting the same identity end to end through the
+harness (including that the run stayed in `Push` past the Bottle Line and short of
+the forward stop), and `test_run_axis` drops the seam case. Every value is a fixture,
+not a measurement.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native`: **574/574 test cases succeeded** (568 at S3, +7 new cases,
+  -1 seam case removed), 0
+  warnings from changed files (the one `-Wswitch` on `FaultCode::DriverFaultBar` in
+  `test_scenario`'s `faultName()` reproduces at the D38 baseline and is untouched by
+  this diff).
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog` after `-t clean`: 3
+  SUCCESS, 0 warnings. RAM/Flash grew by a deliberate **+136 bytes RAM** on every
+  image (nano_r4 6292 -> 6428, bench 6492 -> 6628, bench-watchdog 6476 -> 6612) and
+  +536/+528/+528 bytes Flash: the run layer now *holds* this run's plan and reports
+  its state in the tick snapshot, which is the point of the change.
+- `git diff --check`: clean. Telemetry tooling untouched and not re-run.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration and limit
+  value remains `Provisional`; the `Provisional` lockout still refuses to arm.
+
+**Next.** S5 owns truthful bottle-phase progression semantics; S6/S7 own the speed
+strategy and the timing model; S8/S9 own Run Time telemetry and plan observability.
+Until the forward-stop margin and the bottle-interaction distances are measured
+(P-H8 plus a braking characterization), no run can travel forward. This entry does
+not start any of those.

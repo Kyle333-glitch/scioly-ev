@@ -15,9 +15,11 @@
 // geometry of ONE announced run, its dependency gates, its refusal names and its
 // honesty about timing readiness.
 //
-// S3 creates the plan abstraction and its pure construction/validation logic. It
-// does NOT wire the plan through the runtime (S4 owns that), so nothing here
-// asserts anything about vehicle behavior.
+// S3 created the plan abstraction and its pure construction/validation logic; S4
+// created the plan's consumption accessors and wired them into the run layer. What
+// is asserted here is still only the pure arithmetic and the gates - who reads
+// which stored value, and what happens with no usable plan - and never vehicle
+// behavior.
 //
 // Every value below is a **synthetic test fixture**, not a measurement and not an
 // announced competition configuration. Nothing in this file is:
@@ -44,6 +46,10 @@ static_assert(!std::is_default_constructible<ev::RunExecutionPlanResult>::value,
               "a construction result must come from a construction attempt");
 static_assert(static_cast<int>(ev::RunExecutionPlanStatus::Planned) == 0,
               "the planned status must stay the zero value");
+static_assert(!std::is_default_constructible<ev::LegExecutionTarget>::value,
+              "an absent leg target must be stated as absent");
+static_assert(!std::is_copy_constructible<ev::RunExecutionPlanHolder>::value,
+              "the current plan has one owner; a holder must not be copied around");
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -537,6 +543,215 @@ void test_the_production_shaped_dependencies_cannot_yet_produce_a_plan(void) {
                                             noForwardTarget, false, 0.0, 0.0));
 }
 
+// --- 12. One forward execution target, read by both consumers -----------------
+
+// The two consumers that must not disagree about where the forward travel ends:
+// the travel taper's leg distance (measured to `legExecutionTargetM()`) and the
+// forward progression's push objective (`deriveBottleEvidence(plan, ...)`). Both
+// must read the plan's ONE stored forward stop, and both must move together when
+// only that value moves.
+
+void test_the_leg_target_and_the_push_objective_are_the_same_stored_forward_stop(void) {
+    const ev::RunExecutionPlan plan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(plan.valid);
+
+    // The taper's target, through the plan accessor: exactly the stored forward stop.
+    const ev::LegExecutionTarget forward = ev::legExecutionTargetM(plan, true);
+    TEST_ASSERT_TRUE(forward.usable);
+    expectPosition(plan.forwardStopMpPositionM, forward.positionM);
+
+    // The push objective, through the plan-aware evidence derivation: the same
+    // stored value, not a second formula that happens to produce it.
+    const ev::BottleEvidence evidence =
+        ev::deriveBottleEvidence(plan, true, 0.0, true, measuredBottleConfig());
+    expectPosition(plan.forwardStopMpPositionM, evidence.pushPositionM);
+
+    // And the stored value is the Bottle Line plus the measured margin - not the
+    // Bottle Line, and not the plan's own rule-derived push landmark.
+    expectPosition(6.15, plan.forwardStopMpPositionM);
+    TEST_ASSERT_TRUE(plan.forwardStopMpPositionM > plan.geometry.bottleLinePositionM());
+    TEST_ASSERT_TRUE(plan.forwardStopMpPositionM > plan.pushCompleteMpPositionM);
+}
+
+void test_changing_only_the_forward_stop_moves_the_leg_target_and_the_push_objective_together(void) {
+    // ONE input differs between these two plans: the measured forward-stop margin.
+    // The announcement, the bottle calibration and the rule geometry are identical,
+    // so any movement below is movement of the single forward stop value.
+    const ev::RunExecutionPlan nearPlan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.01), measured(0.15)),
+                                  false, 0.0, 0.0)
+            .plan;
+    const ev::RunExecutionPlan farPlan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.01), measured(0.40)),
+                                  false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(nearPlan.valid);
+    TEST_ASSERT_TRUE(farPlan.valid);
+    TEST_ASSERT_TRUE(nearPlan.geometry.bottleLinePositionM() ==
+                     farPlan.geometry.bottleLinePositionM());
+    TEST_ASSERT_TRUE(nearPlan.geometry.targetPointPositionM ==
+                     farPlan.geometry.targetPointPositionM);
+
+    const double stopDeltaM = farPlan.forwardStopMpPositionM - nearPlan.forwardStopMpPositionM;
+    expectPosition(0.25, stopDeltaM);
+
+    // The taper's target moved with it...
+    expectPosition(nearPlan.forwardStopMpPositionM,
+                   ev::legExecutionTargetM(nearPlan, true).positionM);
+    expectPosition(farPlan.forwardStopMpPositionM,
+                   ev::legExecutionTargetM(farPlan, true).positionM);
+
+    // ...and so did the push objective, by the same amount in the same direction,
+    // because both are the same stored field.
+    const double nearPushM =
+        ev::deriveBottleEvidence(nearPlan, true, 0.0, true, measuredBottleConfig()).pushPositionM;
+    const double farPushM =
+        ev::deriveBottleEvidence(farPlan, true, 0.0, true, measuredBottleConfig()).pushPositionM;
+    expectPosition(nearPlan.forwardStopMpPositionM, nearPushM);
+    expectPosition(farPlan.forwardStopMpPositionM, farPushM);
+    expectPosition(stopDeltaM, farPushM - nearPushM);
+
+    // Neither the plan's rule-derived push landmark nor the reverse stop moved with
+    // it: the forward stop is the end of the forward travel, and it is not standing
+    // in for either of those.
+    TEST_ASSERT_TRUE(nearPlan.pushCompleteMpPositionM == farPlan.pushCompleteMpPositionM);
+    TEST_ASSERT_TRUE(nearPlan.reverseStopMpPositionM == farPlan.reverseStopMpPositionM);
+}
+
+void test_the_push_completes_at_the_forward_stop_and_not_at_the_bottle_line(void) {
+    const ev::RunExecutionPlan plan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(plan.valid);
+    const ev::BottleEvidenceConfig bottle = measuredBottleConfig();
+
+    // Past the Bottle Line and short of the forward stop, the push is NOT complete -
+    // the rule landmark is not the run layer's threshold.
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.02, true, bottle).pushComplete);
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(plan, true, 6.10, true, bottle).pushComplete);
+    // At and beyond the forward stop it is.
+    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.15, true, bottle).pushComplete);
+    TEST_ASSERT_TRUE(ev::deriveBottleEvidence(plan, true, 6.20, true, bottle).pushComplete);
+
+    // The plan's own rule-derived push landmark (Bottle Line + push margin) is at or
+    // inside the forward stop, which is what makes completing at the stop a completed
+    // push rather than a shortened one.
+    TEST_ASSERT_TRUE(plan.pushCompleteMpPositionM <= plan.forwardStopMpPositionM);
+    expectPosition(6.01, plan.pushCompleteMpPositionM);
+
+    // The reverse leg reports no forward evidence at all, at any position.
+    const ev::BottleEvidence reverseEvidence =
+        ev::deriveBottleEvidence(plan, false, 6.20, true, bottle);
+    TEST_ASSERT_FALSE(reverseEvidence.pushComplete);
+    TEST_ASSERT_FALSE(reverseEvidence.contactDetected);
+}
+
+void test_the_reverse_leg_ends_at_the_announced_target_point(void) {
+    const ev::RunConfig regional = regionalAnnouncement();
+    const ev::RunConfig state = stateAnnouncement();
+    const ev::RunExecutionPlan regionalPlan =
+        ev::buildRunExecutionPlan(regional, measuredBottleConfig(), measuredExecutionDependencies(),
+                                  false, 0.0, 0.0)
+            .plan;
+    const ev::RunExecutionPlan statePlan =
+        ev::buildRunExecutionPlan(state, measuredBottleConfig(), measuredExecutionDependencies(),
+                                  false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(regionalPlan.valid);
+    TEST_ASSERT_TRUE(statePlan.valid);
+
+    // The reverse leg's target is the announced Target Point (rule 8.h), through the
+    // plan accessor and through the plan's own reverse stop field.
+    const ev::LegExecutionTarget regionalReverse = ev::legExecutionTargetM(regionalPlan, false);
+    TEST_ASSERT_TRUE(regionalReverse.usable);
+    expectPosition(regional.targetDistanceM, regionalReverse.positionM);
+    expectPosition(regional.targetDistanceM, regionalPlan.reverseStopMpPositionM);
+    expectPosition(state.targetDistanceM,
+                   ev::legExecutionTargetM(statePlan, false).positionM);
+    TEST_ASSERT_TRUE(ev::legExecutionTargetM(statePlan, false).positionM !=
+                     ev::legExecutionTargetM(regionalPlan, false).positionM);
+
+    // A different forward stop does not move the reverse target.
+    const ev::RunExecutionPlan widerForwardStop =
+        ev::buildRunExecutionPlan(regional, measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.01), measured(0.60)),
+                                  false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_TRUE(widerForwardStop.valid);
+    expectPosition(regionalReverse.positionM,
+                   ev::legExecutionTargetM(widerForwardStop, false).positionM);
+    TEST_ASSERT_TRUE(widerForwardStop.forwardStopMpPositionM !=
+                     regionalPlan.forwardStopMpPositionM);
+}
+
+void test_no_usable_plan_means_no_leg_target_and_no_forward_evidence(void) {
+    // A refusal carries no position, so it can carry no target: neither leg may be
+    // shaped, and no forward progression may be claimed from it.
+    const ev::RunExecutionPlan none =
+        ev::refusedExecutionPlan(ev::RunExecutionPlanStatus::NotPlanned);
+    TEST_ASSERT_FALSE(none.valid);
+    TEST_ASSERT_FALSE(ev::legExecutionTargetM(none, true).usable);
+    TEST_ASSERT_FALSE(ev::legExecutionTargetM(none, false).usable);
+    expectPosition(0.0, ev::legExecutionTargetM(none, true).positionM);
+    const ev::BottleEvidence noEvidence =
+        ev::deriveBottleEvidence(none, true, 100.0, true, measuredBottleConfig());
+    TEST_ASSERT_FALSE(noEvidence.derived);
+    TEST_ASSERT_FALSE(noEvidence.contactDetected);
+    TEST_ASSERT_FALSE(noEvidence.pushComplete);
+    expectPosition(0.0, noEvidence.pushPositionM);
+
+    // The same is true of a plan the run layer's own dependencies refuse: there is
+    // no target to fall back to, and specifically not the Bottle Line.
+    const ev::RunExecutionPlan refused =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  ev::RunExecutionDependencies(measured(0.01), provisional(0.15)),
+                                  false, 0.0, 0.0)
+            .plan;
+    TEST_ASSERT_FALSE(refused.valid);
+    TEST_ASSERT_FALSE(ev::legExecutionTargetM(refused, true).usable);
+    TEST_ASSERT_FALSE(ev::deriveBottleEvidence(refused, true, 6.5, true, measuredBottleConfig())
+                          .pushComplete);
+
+    // `NotPlanned` is a named status, so a log can tell "no announcement yet" from
+    // "the announcement was refused".
+    TEST_ASSERT_EQUAL_STRING(
+        "NotPlanned", ev::runExecutionPlanStatusName(ev::RunExecutionPlanStatus::NotPlanned));
+}
+
+void test_the_plan_holder_holds_one_plan_at_a_time(void) {
+    ev::RunExecutionPlanHolder holder;
+
+    // Before an announcement there is no plan, and that is a named state rather than
+    // a plan whose positions happen to be zero.
+    TEST_ASSERT_FALSE(holder.plan().valid);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunExecutionPlanStatus::NotPlanned),
+                          static_cast<int>(holder.plan().status));
+    TEST_ASSERT_FALSE(ev::legExecutionTargetM(holder.plan(), true).usable);
+
+    // Adopting a plan makes it the current one, whole.
+    const ev::RunExecutionPlanResult announced = ev::buildRunExecutionPlan(
+        regionalAnnouncement(), measuredBottleConfig(), measuredExecutionDependencies(), false, 0.0,
+        0.0);
+    holder.adopt(announced.plan);
+    TEST_ASSERT_TRUE(holder.plan().valid);
+    expectPosition(6.15, holder.plan().forwardStopMpPositionM);
+    expectPosition(5.0, holder.plan().reverseStopMpPositionM);
+    TEST_ASSERT_TRUE(ev::legExecutionTargetM(holder.plan(), true).usable);
+
+    // A new-run boundary returns to "no announcement", and the adopted plan is gone.
+    holder.clear();
+    TEST_ASSERT_FALSE(holder.plan().valid);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunExecutionPlanStatus::NotPlanned),
+                          static_cast<int>(holder.plan().status));
+    expectPosition(0.0, holder.plan().forwardStopMpPositionM);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -555,6 +770,13 @@ int main(int, char**) {
     RUN_TEST(test_timing_readiness_is_recorded_honestly);
     RUN_TEST(test_a_refused_plan_is_never_a_hidden_valid_default);
     RUN_TEST(test_the_production_shaped_dependencies_cannot_yet_produce_a_plan);
+
+    RUN_TEST(test_the_leg_target_and_the_push_objective_are_the_same_stored_forward_stop);
+    RUN_TEST(test_changing_only_the_forward_stop_moves_the_leg_target_and_the_push_objective_together);
+    RUN_TEST(test_the_push_completes_at_the_forward_stop_and_not_at_the_bottle_line);
+    RUN_TEST(test_the_reverse_leg_ends_at_the_announced_target_point);
+    RUN_TEST(test_no_usable_plan_means_no_leg_target_and_no_forward_evidence);
+    RUN_TEST(test_the_plan_holder_holds_one_plan_at_a_time);
 
     return UNITY_END();
 }

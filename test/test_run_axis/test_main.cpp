@@ -13,11 +13,11 @@
 // RunConfig, the tick-sign polarity applied exactly once, and the generic
 // remaining-distance arithmetic that takes an explicit caller-supplied target.
 //
-// S2 separates official rule geometry from vehicle execution geometry. Every
-// landmark below is a rule landmark (Target Point, Bottle Start Point, Bottle
-// Line); no physical forward stop target exists here and none is invented. The
-// one pre-S3/S4 compatibility mapping for the forward leg's execution target is
-// pinned as compatibility behaviour, never as physical truth.
+// S2 separated official rule geometry from vehicle execution geometry, and S4
+// removed the last compatibility mapping between them. Every landmark below is a
+// rule landmark (Target Point, Bottle Start Point, Bottle Line); no physical
+// forward stop target exists here and none is invented - the run layer's
+// execution targets come from its own plan (`RunExecutionPlan.h`).
 //
 // Every value below is a test fixture, not a measurement and not an announced
 // competition configuration. A passing test is arithmetic verification only: it
@@ -293,23 +293,11 @@ void test_the_clamped_remaining_distance_is_never_below_zero(void) {
     TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 4.0, false) == 0.0);
 }
 
-// --- The temporary pre-S3/S4 compatibility seam -------------------------------
-
-void test_the_compatibility_seam_maps_the_forward_leg_onto_the_bottle_line_landmark(void) {
-    // This pins TEMPORARY pre-S3/S4 COMPATIBILITY BEHAVIOUR so that changing it
-    // is a deliberate act. It is NOT an assertion that the Bottle Line is the
-    // vehicle's physical turnaround, forward-leg endpoint or forward stop target.
-    const ev::RunAxisGeometry geometry = regionalGeometry();
-    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(geometry, true) ==
-                     geometry.bottleLinePositionM());
-    // The reverse leg's target is the rule Target Point and is not temporary.
-    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(geometry, false) ==
-                     geometry.targetPointPositionM);
-    // A different announcement moves the seam's forward target with the rule
-    // landmark it stands in for - the behaviour S3/S4 must replace.
-    const ev::RunAxisGeometry wider(5.0, 2.5, 2.0);
-    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(wider, true) == 7.5);
-}
+// The S2 compatibility seam (`temporaryLegExecutionTargetM()`), which mapped a leg's
+// execution target onto a rule landmark, is gone: S4 made the run layer read each
+// leg's target from its own execution plan (`legExecutionTargetM()`,
+// `RunExecutionPlan.h`), and this module maps no leg onto any landmark. Nothing here
+// therefore asserts a leg target at all.
 
 void test_the_planned_travel_is_the_rule_course_out_and_back(void) {
     // Forward out to the Bottle Line (6.0 m) then the reverse leg back to the
@@ -339,7 +327,6 @@ int main(int, char**) {
     RUN_TEST(test_the_signed_remaining_distance_follows_the_leg);
     RUN_TEST(test_the_clamped_remaining_distance_is_never_below_zero);
 
-    RUN_TEST(test_the_compatibility_seam_maps_the_forward_leg_onto_the_bottle_line_landmark);
     RUN_TEST(test_the_planned_travel_is_the_rule_course_out_and_back);
 
     return UNITY_END();

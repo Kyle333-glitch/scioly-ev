@@ -146,7 +146,11 @@ public:
                 break;
             case ev::RunPhase::Push:
                 script.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
-                script.pushComplete = harness.runAxisPositionM() >= harness.bottleLinePositionM();
+                // The push objective the vehicle layer believes this cycle, from the
+                // production derivation: the execution plan's forward stop, not the
+                // Bottle Line rule landmark. Asking the harness for it keeps this
+                // script from carrying a second copy of the threshold.
+                script.pushComplete = harness.forwardBottleEvidence().pushComplete;
                 break;
             case ev::RunPhase::ForwardDecel:
             case ev::RunPhase::BrakeZeroSpeed:
@@ -1926,6 +1930,64 @@ void test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields(void) 
     expectTraceInvariants(reversed);
 }
 
+// --- S4: one forward execution target -----------------------------------------
+
+void test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_at(void) {
+    // The run has ONE forward execution target. The travel taper is sized from it
+    // (the leg distance) and the forward progression completes at it (the push
+    // objective), so the run cannot end its push at one position while its own
+    // shaping target is another. Both are read from the same execution plan value,
+    // through production accessors - not from two formulas that happen to agree.
+    ScenarioHarness harness(fixtures());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(harness.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_TRUE_MESSAGE(harness.executionPlanUsable(), "the fixture plan must be usable");
+    TEST_ASSERT_TRUE(harness.arm());
+
+    const double forwardStopM = harness.forwardStopMpPositionM();
+    // The execution target is not the Bottle Line: the fixture's forward stop lies
+    // beyond the rule landmark, by the measured margin the plan was built with.
+    TEST_ASSERT_TRUE(forwardStopM > harness.bottleLinePositionM());
+    // An explicit tolerance, not a double equality: the host target is 32-bit x86,
+    // where the plan's stored sum and this recomputation can differ in the last
+    // bits through excess precision.
+    TEST_ASSERT_TRUE(std::fabs(forwardStopM - (harness.bottleLinePositionM() +
+                                               evscenario::kFixtureForwardStopMarginBeyondBottleLineM)) <=
+                     1e-9);
+    // The plan's rule-derived push landmark is at or inside the forward stop, which
+    // is what lets the forward phases complete there without shortchanging the
+    // push objective.
+    TEST_ASSERT_TRUE(harness.executionPlan().pushCompleteMpPositionM <= forwardStopM);
+
+    // One stored value, read by both consumers.
+    TEST_ASSERT_TRUE(harness.legExecutionTargetM().usable);
+    TEST_ASSERT_TRUE(harness.legExecutionTargetM().positionM == forwardStopM);
+    TEST_ASSERT_TRUE(harness.forwardBottleEvidence().pushPositionM == forwardStopM);
+
+    // Past the Bottle Line and short of the forward stop the run was still in
+    // Push: the rule landmark did not end the push.
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Done, driver));
+    bool sawPushBeyondTheBottleLine = false;
+    for (const CycleRecord& record : harness.trace()) {
+        if (record.phase == ev::RunPhase::Push &&
+            record.runAxisPositionM >= harness.bottleLinePositionM() &&
+            record.runAxisPositionM < forwardStopM) {
+            sawPushBeyondTheBottleLine = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(sawPushBeyondTheBottleLine,
+                             "the push ended before the forward execution target");
+
+    // The reverse leg's target is the announced Target Point, from the same plan -
+    // unchanged by the forward leg's execution target becoming explicit.
+    TEST_ASSERT_TRUE(harness.legExecutionTargetM().usable);
+    TEST_ASSERT_TRUE(harness.legExecutionTargetM().positionM == harness.targetPointPositionM());
+    TEST_ASSERT_TRUE(harness.executionPlan().reverseStopMpPositionM ==
+                     harness.targetPointPositionM());
+    expectTraceInvariants(harness);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -1955,5 +2017,6 @@ int main(int, char**) {
     RUN_TEST(test_a_rewound_clock_stops_the_run_and_the_chain_recovers);
     RUN_TEST(test_the_production_decoder_decides_what_a_raw_sample_counts);
     RUN_TEST(test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields);
+    RUN_TEST(test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_at);
     return UNITY_END();
 }
