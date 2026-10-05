@@ -5795,3 +5795,125 @@ row stays UNVERIFIED.
 shows only `.md` files; no code file changed, so no rebuild was run. The tree
 intentionally no longer equals `cleanup/d35-post-tournament`'s tree - it differs
 by exactly these documentation files. Nothing committed, merged or pushed.
+
+---
+
+## D37 / S0 - 2026-10-04 - Live-source reconciliation and stage-status matrix (S0R corrected)
+
+**Kind of change.** Documentation only. No firmware source, test, configuration,
+calibration or provenance change was made; no hardware action was performed; nothing
+was committed, merged, pushed or uploaded by this stage. This entry is the
+repository-side record of the S0 stage of the pack
+`EV-V5-current-to-competition-2026-10-04-v2`; the full stage report is kept in the
+pack's local agent workspace (not committed).
+
+**S0R correction (same day, bookkeeping only).** The first version of this entry
+used an S1-S12 numbering taken from the pack's re-check lists, which does not match
+the pack's authoritative stage mapping. The entry has been corrected in place (only
+this current, uncommitted entry; no older history was touched): the mapping below is
+authoritative, the two "blocked on user architecture decision" rows are replaced by
+recorded Decisions A (rule geometry vs vehicle execution geometry) and B (absent
+battery/current sensing), and the S7 row records the timing decision. No engineering
+stage was started and no code changed.
+
+**Live starting point, re-verified rather than assumed.** `main` = `origin/main` =
+`a0de094c7cf67b1b13a86682745fe75c1a31757b`; working tree clean before this entry
+(`## main...origin/main`); active PlatformIO environments are `nano_r4`, `bench`,
+`bench-watchdog`, `native`; `env:emergency` is absent (`platformio.ini` has no such
+environment, `pio run -e emergency` reports an unknown environment name, and
+`src/main.cpp` refuses the removed defines with `#error`).
+
+**Software baseline, re-run at this HEAD (all green).**
+
+- `pio test -e native`: **552/552 test cases succeeded** (32 suites).
+- `pio run -e nano_r4`: SUCCESS, RAM 6292/32768 (19.2%), Flash 71836/262144 (27.4%).
+- `pio run -e bench`: SUCCESS, RAM 6492/32768 (19.8%), Flash 78680/262144 (30.0%).
+- `pio run -e bench-watchdog`: SUCCESS, RAM 6476/32768 (19.8%), Flash 78108/262144 (29.8%).
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry`: **116/116 OK**.
+- No compiler warnings in any of the three builds.
+
+**Roadmap artifact and orchestration authority.** No standalone "2026-10-04
+engineering roadmap" document exists at any repository path or in the pack
+workspace. Until a repository roadmap is deliberately added, this pack's S1-S12
+mapping and `.agent-work/MASTER_CONTEXT.md` are the orchestration authority for the
+stages below. Classification is software-evidence only and carries no hardware claim.
+
+**Architecture decisions already made (no stage is blocked on these).**
+
+- **Decision A - S2 geometry.** Bottle Line is an official rule landmark, not
+  inherently the vehicle's physical forward stop target. `RunAxisGeometry` keeps
+  owning rule geometry (`targetPointPositionM`, `bottleStartPositionM`,
+  `bottleLinePositionM = Target Point + the announced Bottle Line Distance`). A
+  later `RunExecutionPlan` owns the explicit vehicle execution target, including
+  `forwardStopMpPositionM`. Do not guess that physical target before its
+  dependencies are established; host-test fixtures may use synthetic explicit
+  targets; production must fail closed while required physical calibration is
+  unavailable. S2 is STILL NEEDED, not blocked.
+- **Decision B - S10 absent sensing.** The assembled V5 has nFAULT, battery sensing
+  and current sensing all `NotInstalled`; A1/A2 floating/raw counts are not
+  measurements. Do not fabricate a `Measured` `minBatteryV`; do not treat floating
+  counts as engineering values. `minBatteryV` must not permanently block arming
+  merely because this hardware has no battery-sense circuit; when battery sensing is
+  `NotInstalled`, the voltage-based runtime gate is N/A for that build and the
+  limitation stays explicit. If battery sensing is later installed, its conversion
+  and threshold must be physically validated before the gate can authorize motion.
+  Current sensing stays optional telemetry/anomaly information unless later evidence
+  justifies a control/safety dependency. S10 is not blocked.
+- **Timing decision - S7.** D34 established one timing-plan owner and
+  per-announcement cruise/delay plumbing. An unvalidated idealised physical-time
+  prediction must not control production timing; the intended later behaviour is
+  `timingReady = false`, `initialDelayS = 0` until physical timing evidence
+  validates the model. The live tree still lets the idealised plan control
+  cruise/delay, so S7 is PARTIALLY DONE. Do not implement here.
+
+**Capability matrix (S1-S12, authoritative mapping; S0R corrected).**
+
+| Stage: capability | Classification | Live evidence (at a0de094) |
+|---|---|---|
+| S1 Direction-specific brake-offset truth and stale-document reconciliation | PARTIALLY DONE | `profileLimitsForOneDirection()` selects `kPlannedForwardBrakeOffsetM`/`kPlannedReverseBrakeOffsetM` by travelled direction and `profileLimitsWithCruise()` does the same (D35-era fix recorded in this log). `test_run_timing/test_the_leg_limits_carry_that_legs_own_brake_offset` uses deliberately unequal fixtures (forward 0.05 vs reverse 0.40) and asserts both selection and behaviour (reverse `WithinBrakeOffset` at 0.30 m; forward still shapes a target). Remaining: the test covers the limits container, not the `VehicleConfig` builder (`test/` has zero `VehicleConfig` references), and `docs/bringup/P-H7-distance-braking-reversal.md` still says the reverse offset "currently has no consumer" and that the forward offset is passed to both legs - stale as of the fix. |
+| S2 Separate official rule geometry from vehicle execution geometry | STILL NEEDED | `lib/evcore/src/RunAxis.h` conflates the rule landmark with the forward execution target: `turnAroundPositionM() = targetPointPositionM + bottleLineDistanceM`, test-pinned by `test_run_axis/test_the_turn_around_is_the_target_plus_the_announced_bottle_line`; `RunConfig` carries no separate execution target. Decision A recorded above; not blocked. |
+| S3 Immutable RunExecutionPlan with dependency validity | STILL NEEDED | No `RunExecutionPlan` type exists (zero live hits; the only occurrence is this log text). Per-run decided state is mutable and spread across `VehicleRuntime` (`runProfileLimits_`, `timingPlan_`, `axisGeometry_`, `legForward_`) and `CompetitionStateMachine` (`plannedDelayS_`); announce/reset replace fields. |
+| S4 One forward physical stop target everywhere | STILL NEEDED | No execution-plan forward target exists. Motion shaping consumes `legRemainingM()` (taper to `turnAroundPositionM()`); forward progression consumes `BottleEvidence::pushComplete` at `turnAroundPositionM() + pushMarginDistanceM`. Both share the rule landmark today but neither consumes one explicit execution-plan target. |
+| S5 Truthful bottle-phase progression semantics | PARTIALLY DONE | `BottleEvidence.h` derives `contactDetected`/`captureComplete`/`pushComplete` from run-axis position and states it is a position-derived belief (D34 deviation recorded in `SOFTWARE_ARCHITECTURE.md` section 14 and `docs/limitations.md`); sensor-sounding names unchanged; `test_bottle_evidence` 7 cases; `VERIFIED_STATE.md` #11 UNVERIFIED. |
+| S6 Strategy velocity ceiling inside the existing target shaper | PARTIALLY DONE | `planRunTiming()` caps the planning ceiling at the lower of the strategy cruise and the safety ceiling (`TargetTimeTooShort` refusal); per-direction `velocityCeilingMps` feeds the shaper; no separate strategy-ceiling parameter; all inputs `Provisional`. |
+| S7 Per-run delay ownership AND disabling unvalidated automatic timing behavior | PARTIALLY DONE | D34 ownership live (`planRunTiming()` single owner; `runProfileLimits_`; `plannedDelayS()`; `test_run_timing` 14 cases + `test_competition_state` delay cases); the idealised model still controls cruise/delay automatically. Timing decision recorded above; do not implement here. |
+| S8 Official Run Time telemetry semantics at successful final-stop dwell start | STILL NEEDED | No run/actuation timestamp (`CompetitionStateMachine` stores `phaseEnteredMs_`/`faultRaisedAtMs_` only; `ReversalSequencer::startedAtMs_` is the reversal timer); telemetry schema v2 has no Run Time field or run-complete event; `STATUS` reports no time fields; rules 8.o/8.p recorded in `docs/rules/README.md` only. |
+| S9 Read-only plan observability command | PARTIALLY DONE | `announce` echoes the plan once (`OK,cmd=announce,plan=...,cruise_mps=...,delay_s=...,total_s=...,margin_s=...`, `formatAnnounceAck`); no `plan` command in the frozen vocabulary; `STATUS` has no plan fields; `timingPlan_` is never read back. |
+| S10 Global maxRunDuration runtime consumer AND capability-aware absent-sensing policy | PARTIALLY DONE | Plan-time consumer exists (`kPlannedMaxRunDurationS`; `PlanExceedsMaxRunDuration` refusal, pinned by test); no runtime run timer (`SafetyLimits::maxRunDurationS` data-only; `docs/limitations.md` F "run timer ... not built"). Battery/current sensing not installed (A1/A2 raw counts only; `batteryReadingValid` never true); arming currently requires a `Measured` `minBatteryV` (`isFullyEstablished()`). Decision B recorded above; not blocked. |
+| S11 Full legal-parameter host sweep and deterministic scenario coverage | PARTIALLY DONE | Deterministic scenario harness exists and is green (`test/test_scenario`, incl. identical-trace replay); no full legal-parameter sweep artifact in `tools/`/`scripts/`/`test/`; nearest coverage `test_run_config` boundary/grid cases. |
+| S12 Architecture / limitations / bring-up documentation synchronization | PARTIALLY DONE | D36 status wording and D34 section-14 deviation are live; remaining: `SOFTWARE_ARCHITECTURE.md` section 7 / `docs/limitations.md` F say velocity ceilings and max run duration have "no enforcement point ... no runtime effect" while the D34 announcement boundary consumes both (only the battery check and the runtime run timer remain genuinely unbuilt); stale P-H7 brake-offset wording tracked under S1. |
+
+**Post-audit changed facts, re-verified live (none re-broken).**
+
+| Fact | Live verification |
+|---|---|
+| Direction-specific brake-offset truth | Code fixed (`profileLimitsForOneDirection()`, `profileLimitsWithCruise()`); unequal-fixture regression test `test_the_leg_limits_carry_that_legs_own_brake_offset` (0.05 forward vs 0.40 reverse, plus behavioural assertion) covers the limits container; no native test reaches the `VehicleConfig` builder; `docs/bringup/P-H7-distance-braking-reversal.md` still carries the stale "no consumer" claim. |
+| D34 timing work | `planRunTiming()`, `RunTimingPlanInputs`, `plannedDelayS()`, `runProfileLimits_` wiring; the announce acknowledgement carries the plan. |
+| `Derived` provenance | `ValueSource::Derived` in `lib/evcore/src/Units.h`; `cruiseProvenanceIsEstablished()` accepts Measured or a cited Derived value for the cruise only; `plannedCruiseValue()` returns Derived with its derivation cited; tests `test_a_computed_cruise_is_derived_never_measured`, `test_profile_limits_accept_a_cited_derived_cruise_only`, `test_plan_inputs_still_require_measured_limits`. |
+| nFAULT `NotInstalled` semantics | `DriverFaultCapability::NotInstalled` in `lib/evcore/src/DriverFault.h`; `kPlannedDriverFaultCapability` is `NotInstalled`; `kMotorFaultBar` is `kNoPin`; `src/SensorInputs.h` does not configure or sample the pin; telemetry writes `nfault=NotInstalled,nfault_low=-` (pinned by `test_telemetry_format`); the capability-aware check passes without a polarity measurement while `Installed` still refuses (`test_driver_fault`). |
+| Final V5 pin map | `src/PinMap.h`: encoder A D2 (interrupt channel 0), encoder B D4, PH D8, EN D9 (the only PWM consumer), nSLEEP D10, trigger D12, nFAULT has no pin, PMODE is not an MCU pin; it remains a stated harness map, so `VERIFIED_STATE.md` #1 stays UNVERIFIED. |
+| D36 evidence wording | `VERIFIED_STATE.md` "OBSERVED, NOT VERIFIED" section and row annotations; `docs/limitations.md` section A; `README.md` current state; `SOFTWARE_ARCHITECTURE.md` sections 10/11 notes; "all twelve hardware rows remain UNVERIFIED". |
+
+**Contradictions found (recorded, not fixed in S0/S0R).**
+
+1. `SOFTWARE_ARCHITECTURE.md` section 7 and `docs/limitations.md` section F
+   ("maximum velocity per direction, maximum run duration ... have no enforcement
+   point ... no runtime effect") are narrower than the D34 tree: the announcement
+   boundary now consumes both through `runTimingPlanInputs()` - a plan refusal and
+   a shaped cruise bound are behaviour. Only the battery check and the runtime run
+   timer remain genuinely unbuilt.
+2. The pack's 2026-10-04 roadmap document is absent from the repository; per S0R,
+   the pack mapping and `.agent-work/MASTER_CONTEXT.md` are the orchestration
+   authority unless a repository roadmap is deliberately added later.
+3. `docs/bringup/P-H7-distance-braking-reversal.md` still claims the reverse brake
+   offset has no consumer and that the forward offset is passed to both legs -
+   stale as of the D35-era fix (S1 scope).
+
+**No promotions, no behavior change.** Every calibration and limit value stays
+`Provisional` (only `kMaxDwellGapMs` remains the cited `Measured` exception); no
+`VERIFIED_STATE.md` row changed; the configuration gates still report every arming
+precondition false, exactly as D34/D35 left them.
+
+**Stage bookkeeping.** S0 remains PASS; the S0R stage-map correction is PASS. The
+next eligible stage is **S1** (direction-specific brake-offset truth and
+stale-document reconciliation). This entry remains uncommitted pending a checkpoint.
