@@ -206,6 +206,55 @@ void test_the_leg_limits_carry_that_legs_own_brake_offset(void) {
     TEST_ASSERT_TRUE(reverseAt300mm.targetVelocityMps == 0.0);
 }
 
+// The builder's own selection step, exercised with a deliberately unequal fixture
+// pair. `ev::brakeOffsetForDirection()` is the function
+// `vehicleConfig::profileLimitsForOneDirection()` calls to fill `brakeOffsetM`, so
+// this is the exact expression the historical defect lived in ("both legs used the
+// forward brake offset"): if the reverse leg were built from the forward value
+// again, the reverse assertions below fail while the forward ones still pass.
+//
+// The pair is a fixture, not a vehicle measurement. Production's
+// `kPlannedForwardBrakeOffsetM` and `kPlannedReverseBrakeOffsetM` are currently
+// numerically equal, which is exactly why the selection is tested through a
+// deliberately unequal pair rather than through those constants - a test on two
+// equal values could not tell the two selections apart.
+void test_the_builder_selects_the_brake_offset_by_direction(void) {
+    const ev::Sourced<double> forwardOffset(0.011, ev::ValueSource::Provisional);
+    const ev::Sourced<double> reverseOffset(0.077, ev::ValueSource::Provisional);
+
+    const ev::Sourced<double> forward = ev::brakeOffsetForDirection(
+        ev::MotionDirection::Forward, forwardOffset, reverseOffset);
+    const ev::Sourced<double> reverse = ev::brakeOffsetForDirection(
+        ev::MotionDirection::Reverse, forwardOffset, reverseOffset);
+
+    TEST_ASSERT_TRUE(forward.value == 0.011);
+    TEST_ASSERT_TRUE(reverse.value == 0.077);
+
+    // The pair's roles are positional: a swapped pair swaps the answer, so the two
+    // arguments cannot be transposed and still pass.
+    TEST_ASSERT_TRUE(ev::brakeOffsetForDirection(ev::MotionDirection::Forward, reverseOffset,
+                                                 forwardOffset)
+                         .value == 0.077);
+    TEST_ASSERT_TRUE(ev::brakeOffsetForDirection(ev::MotionDirection::Reverse, reverseOffset,
+                                                 forwardOffset)
+                         .value == 0.011);
+
+    // Provenance rides along with the value: the chosen Sourced object is returned
+    // whole, so a leg receives the source as well as the number. The citation here
+    // is a synthetic host fixture and is never evidence about the vehicle.
+    const ev::Sourced<double> citedFixture(
+        0.011, ev::ValueSource::Measured,
+        "synthetic host fixture; not a vehicle measurement");
+    TEST_ASSERT_TRUE(ev::brakeOffsetForDirection(ev::MotionDirection::Forward, citedFixture,
+                                                 reverseOffset)
+                         .isMeasured());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ValueSource::Provisional),
+                          static_cast<int>(ev::brakeOffsetForDirection(
+                                               ev::MotionDirection::Reverse, citedFixture,
+                                               reverseOffset)
+                                               .source));
+}
+
 // A ramp-down is a regulated target being brought to zero, not a dead stop: it is
 // classified apart from a stop so the vehicle layer keeps regulating toward the
 // shaped target, while the stop mapping itself still presents no powered effort.
@@ -388,6 +437,7 @@ int main(int, char**) {
     RUN_TEST(test_a_placeholder_limit_refuses_the_plan);
     RUN_TEST(test_the_plan_agrees_with_the_profile_duration);
     RUN_TEST(test_the_leg_limits_carry_that_legs_own_brake_offset);
+    RUN_TEST(test_the_builder_selects_the_brake_offset_by_direction);
     RUN_TEST(test_a_ramp_down_is_classified_apart_from_a_stop);
     RUN_TEST(test_a_stop_request_ramps_the_target_down_without_crossing_zero);
     RUN_TEST(test_the_announced_delay_is_bounded_by_the_policy);

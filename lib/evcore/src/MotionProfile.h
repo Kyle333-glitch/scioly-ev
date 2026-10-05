@@ -629,6 +629,24 @@ struct MotionProfileLimits {
     Sourced<MotionDirection> positiveCommandDirection;
 };
 
+// The brake offset that belongs to the direction being travelled, chosen from an
+// explicit forward/reverse pair.
+//
+// This is the selection `src/VehicleConfig.h::profileLimitsForOneDirection()`
+// makes when it builds one leg's limits, extracted here so a host test can prove
+// it with a deliberately unequal fixture pair: the planned forward and reverse
+// offsets are currently numerically equal, so a test restricted to the production
+// constants could not tell a direction-specific selection from one that uses the
+// same offset for both legs - the defect that once existed in the builder. The
+// chosen value passes through untouched, provenance included; the selection is a
+// function of the direction alone.
+inline Sourced<double> brakeOffsetForDirection(MotionDirection direction,
+                                               Sourced<double> forwardBrakeOffsetM,
+                                               Sourced<double> reverseBrakeOffsetM) {
+    return direction == MotionDirection::Forward ? forwardBrakeOffsetM
+                                                 : reverseBrakeOffsetM;
+}
+
 // The forward and reverse limit sets for the two legs of a run, selected by the
 // direction being travelled.
 //

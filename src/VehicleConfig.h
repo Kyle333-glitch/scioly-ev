@@ -339,18 +339,23 @@ inline ev::VelocityControllerConfig controllerConfig() {
 // offsets differ, and so do the two safety velocity ceilings - so the direction is
 // an argument here rather than a constant: a caller that packed one leg's values
 // by hand could silently attach the forward offset to a reverse leg, and the
-// profile is handed one set of limits and cannot tell. Defect fixed here: the
-// reverse leg used to be built from `kPlannedForwardBrakeOffsetM` as well.
+// profile is handed one set of limits and cannot tell. Defect fixed in D35: the
+// reverse leg used to be built from `kPlannedForwardBrakeOffsetM` as well. The
+// selection itself is `ev::brakeOffsetForDirection()` (`MotionProfile.h`), a pure
+// function the host test `test_the_builder_selects_the_brake_offset_by_direction`
+// exercises with a deliberately unequal fixture pair - the two planned constants
+// below are numerically equal, so only an unequal pair can tell the two
+// selections apart.
 inline ev::MotionProfileLimits profileLimitsForOneDirection(
     ev::MotionDirection direction, ev::Sourced<double> cruiseMps,
     ev::Sourced<double> velocityCeilingMps) {
-    return ev::MotionProfileLimits(cruiseMps, velocityCeilingMps,
-                                   provisionalValue(kPlannedAccelMps2),
-                                   provisionalValue(kPlannedDecelMps2),
-                                   direction == ev::MotionDirection::Forward
-                                       ? provisionalValue(kPlannedForwardBrakeOffsetM)
-                                       : provisionalValue(kPlannedReverseBrakeOffsetM),
-                                   provisionalDirection(kPlannedPositiveCommandDirection));
+    return ev::MotionProfileLimits(
+        cruiseMps, velocityCeilingMps, provisionalValue(kPlannedAccelMps2),
+        provisionalValue(kPlannedDecelMps2),
+        ev::brakeOffsetForDirection(direction,
+                                    provisionalValue(kPlannedForwardBrakeOffsetM),
+                                    provisionalValue(kPlannedReverseBrakeOffsetM)),
+        provisionalDirection(kPlannedPositiveCommandDirection));
 }
 
 inline ev::DirectionalMotionProfileLimits profileLimits() {

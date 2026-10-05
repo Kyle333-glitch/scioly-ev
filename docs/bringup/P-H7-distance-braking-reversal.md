@@ -76,8 +76,8 @@ it is not to pretend a distance-targeted run exists before the numbers do:
 2. **Part B - braking offsets.** Still with B2, off the run path, against
    ground-truth marks.
 3. **Write the measured values** into `src/VehicleConfig.h` with
-   `ValueSource::Measured`, including only the offsets the firmware actually
-   consumes, and re-run the configuration checks.
+   `ValueSource::Measured` - both brake offsets are consumed, each by its own
+   direction's profile - and re-run the configuration checks.
 4. **Part L - loaded tracking re-check**, then, only now, a run may be announced
    and armed.
 5. **Part A - distance-targeted accuracy** through the real run path; then
@@ -159,13 +159,23 @@ is from video and its frame rate.
 
 ### Setting the offsets
 
-Set `kPlannedForwardBrakeOffsetM` with `ValueSource::Measured` from the measured
-data. **`kPlannedReverseBrakeOffsetM` currently has no consumer in the firmware:**
-`profileLimitsForOneDirection()` passes the forward offset to both legs, so
-changing the reverse value changes the arming checks, not the motion. Record the
-reverse measurement if it differs, and record "reverse offset measured but not yet
-consumed" as a **pending software change** - do not report the reverse leg as
-calibrated until the value is actually read by the profile.
+Set `kPlannedForwardBrakeOffsetM` and `kPlannedReverseBrakeOffsetM` with
+`ValueSource::Measured`, each from its own direction's measured series.
+
+**Software fact:** the firmware consumes both. The vehicle builder
+`vehicleConfig::profileLimitsForOneDirection()` selects the offset by the
+direction being travelled (through `ev::brakeOffsetForDirection()`), so a forward
+leg is shaped from the forward measurement and a reverse leg from the reverse one.
+The host test `test_the_builder_selects_the_brake_offset_by_direction`
+(`test/test_run_timing/test_main.cpp`) pins that selection with a deliberately
+unequal fixture pair; production's two offsets are still numerically equal, which
+is exactly why the test cannot use them.
+
+**Physical fact:** neither number is established by any of this. Both constants are
+still `Provisional` placeholders until this protocol's Part B records ground-truth
+braking data, and neither leg may be reported as calibrated before that data
+exists. Replacing the reverse placeholder is no longer blocked on a software
+change.
 
 If the distance depends materially on speed, say so and record the relationship
 and the range over which a single constant offset is acceptable. The design
@@ -270,8 +280,9 @@ continue to H8.
   report mean and spread per target. A systematic offset is steerable through
   calibration; a large random spread is not a software problem and must be
   reported as a mechanism or traction issue.
-- **B:** the forward offset is set from the measured data; the speed dependence
-  is recorded either way; the reverse offset is recorded as measured-but-unused.
+- **B:** each direction's offset is set from that direction's measured data (the
+  firmware consumes both, per direction); the speed dependence is recorded either
+  way; the raw trials behind each number are preserved.
 - **L:** the loaded tracking error is recorded; the gains in force are the ones
   the measured data supports.
 - **C:** the stop-before-reverse order is confirmed with the observed dwell and
@@ -287,8 +298,9 @@ excluded runs stay in the record with their reason.
 
 - #9 (braking behaviour and stopping distance) promoted, with the speed each
   offset was set for and the ground-truth braking measurements recorded.
-- The **forward** brake-offset placeholder replaced with a measured value; the
-  reverse measurement recorded as a pending software change until it is consumed.
+- **Both** brake-offset placeholders (forward and reverse) replaced with values
+  from this protocol's measured data; the firmware already consumes each by
+  direction, so nothing is recorded as a pending software change.
 - The reversal stop-verification values set from the measured stop behaviour.
 - Safety ceilings may only now be set from evidence: the maximum forward/reverse
   velocity the vehicle can control and stop within the runout, and the minimum

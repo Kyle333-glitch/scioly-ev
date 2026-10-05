@@ -5917,3 +5917,70 @@ precondition false, exactly as D34/D35 left them.
 **Stage bookkeeping.** S0 remains PASS; the S0R stage-map correction is PASS. The
 next eligible stage is **S1** (direction-specific brake-offset truth and
 stale-document reconciliation). This entry remains uncommitted pending a checkpoint.
+
+---
+
+## D38 / S1 - 2026-10-04 - Brake-offset direction selection: host regression coverage and stale bring-up text corrected
+
+**Kind of change.** Software + documentation. S1 of the pack
+`EV-V5-current-to-competition-2026-10-04-v2`: direction-specific brake-offset
+truth and stale-document reconciliation. The D35-era direction-specific selection
+is confirmed live and was **not** reimplemented; the production change is a
+behaviour-preserving extraction that creates the host-test seam, and the rest is
+regression coverage and documentation. No physical fact was promoted; no hardware
+action (no upload, no powered test, no measurement); nothing committed, merged,
+pushed or uploaded by this stage. This entry is the repository-side record; the
+full stage report is kept in the pack's local agent workspace (not committed).
+
+**What the live tree already had (re-verified, not assumed).**
+`src/VehicleConfig.h::profileLimitsForOneDirection()` selected
+`kPlannedForwardBrakeOffsetM` for the forward leg and
+`kPlannedReverseBrakeOffsetM` for the reverse leg, and `profileLimits()` /
+`profileLimitsWithCruise()` both routed through it. The unequal-fixture test
+`test_the_leg_limits_carry_that_legs_own_brake_offset` exercised the
+`DirectionalMotionProfileLimits` container, not the builder's selection step, and
+`docs/bringup/P-H7-distance-braking-reversal.md` still claimed the reverse offset
+had no consumer and that the forward offset was passed to both legs.
+
+**Code change (behaviour-preserving seam).**
+`ev::brakeOffsetForDirection(direction, forwardBrakeOffsetM, reverseBrakeOffsetM)`
+now owns the per-direction selection in `lib/evcore/src/MotionProfile.h`, and the
+`VehicleConfig` builder calls it with the two planned constants. The selection
+result is unchanged; no constant, gate, provenance label, safety path or motion
+behaviour changed. The extraction follows `SOFTWARE_ARCHITECTURE.md` section 3
+(the native environment never compiles `src/`, `test_build_src = no`) and the D14
+precedent (`ConfigurationChecks.h` moved out of `VehicleConfig.h` so it could be
+host-tested).
+
+**Regression coverage.**
+`test/test_run_timing/test_main.cpp::test_the_builder_selects_the_brake_offset_by_direction`
+drives the selection with a deliberately unequal fixture pair (forward 0.011,
+reverse 0.077 - synthetic host fixtures, never vehicle measurements): each
+direction receives its own value and provenance, and a swapped pair swaps the
+answer. Verified negatively: with the historical defect temporarily reintroduced
+(the reverse case returning the forward value), the new test fails while the older
+container-level test still passes; the simulation was reverted immediately and the
+restored tree re-passed.
+
+**Documentation correction.** `docs/bringup/P-H7-distance-braking-reversal.md` no
+longer claims `kPlannedReverseBrakeOffsetM` has no consumer or that the forward
+offset is passed to both legs. The corrected text separates the software fact
+(both offsets have their own direction-specific consumer, pinned by the host test)
+from the physical fact (both numbers remain `Provisional` until Part B records
+ground-truth braking data, and neither leg may be reported as calibrated before
+then). The order-of-work item, acceptance rule B and the "If it passes" bullets
+were corrected to match. Historical log entries were not rewritten.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native`: **553/553 test cases succeeded** (552 at D37 plus this
+  entry's one new test). The only compiler warning (`test_scenario` switch over
+  `FaultCode` missing `DriverFaultBar`, `-Wswitch`) reproduces identically at
+  `91409bc` in a clean worktree, so it is pre-existing, not new.
+- `pio run -e nano_r4`: SUCCESS, RAM 6292/32768 (19.2%), Flash 71884/262144 (27.4%).
+- `pio run -e bench`: SUCCESS, RAM 6492/32768 (19.8%), Flash 78728/262144 (30.0%).
+- `pio run -e bench-watchdog`: SUCCESS, RAM 6476/32768 (19.8%), Flash 78156/262144 (29.8%).
+- `git diff --check`: clean.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration/limit
+  value remains `Provisional`; the two brake-offset numbers still require the P-H7
+  physical characterization.
