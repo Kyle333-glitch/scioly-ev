@@ -306,10 +306,21 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // `planRunTiming()`). The run's Target Time therefore reaches the commanded
     // speeds, and the brake offset and velocity ceiling still come from the leg
     // being travelled.
+    //
+    // The optional strategy ceiling that belongs to this cycle's run phase: only
+    // the bottle phases (Approach/Capture/Push) carry one, every other phase is
+    // explicitly without a ceiling, and the ceiling enters the profile's desired
+    // magnitude before the rate limits - so a phase change tightens through the
+    // normal deceleration ramp instead of stepping. Every production ceiling is a
+    // Provisional placeholder today, so the run policy refuses and no run may be
+    // armed: the values stay unusable until the bottle-phase measurements exist
+    // (P-H8).
+    const ev::StrategyVelocityCeiling strategyCeiling =
+        ev::strategyVelocityCeilingForPhase(run_.config(), status.phase);
     const ev::MotionProfileCommand shaped = ev::nextTargetVelocity(
         profileTarget_.inputsFor(travel ? ev::MotionProfileIntent::Travel
                                         : ev::MotionProfileIntent::Stop,
-                                 direction, legRemainingM, dtMs),
+                                 direction, legRemainingM, dtMs, strategyCeiling),
         runProfileLimits_.forDirection(direction));
     profileTarget_.accept(shaped);
 

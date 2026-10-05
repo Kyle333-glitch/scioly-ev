@@ -181,6 +181,13 @@ constexpr uint32_t kFixtureEstimatorNoEdgeTimeoutMs = 100U;
 
 constexpr double kFixtureCruiseMps = 1.0;
 constexpr double kFixtureVelocityCeilingMps = 1.2;
+
+// The bottle-phase strategy ceilings every nominal fixture carries. Set at the
+// leg's velocity ceiling, i.e. deliberately non-binding: the nominal scenarios
+// must be shaped exactly as they were before phase ceilings existed, and a
+// scenario that wants to prove a phase difference lowers one of these
+// explicitly.
+constexpr double kFixtureBottlePhaseCeilingMps = kFixtureVelocityCeilingMps;
 constexpr double kFixtureAccelMps2 = 1.0;
 constexpr double kFixtureDecelMps2 = 2.0;
 constexpr double kFixtureBrakeOffsetM = 0.05;
@@ -369,6 +376,9 @@ inline ScenarioFixtures nominalFixtures() {
                            measuredValue(kFixtureFinalStopTimeoutS),
                            measuredValue(kFixtureFinalApproachDistanceM),
                            fixtureStopConfig(), measuredValue(kFixtureMinimumCruiseMps),
+                           measuredValue(kFixtureBottlePhaseCeilingMps),
+                           measuredValue(kFixtureBottlePhaseCeilingMps),
+                           measuredValue(kFixtureBottlePhaseCeilingMps),
                            ev::BottleEvidenceConfig(measuredValue(kFixtureBottleContactLeadM),
                                                     measuredValue(kFixtureBottleCaptureAdvanceM),
                                                     measuredValue(kFixtureBottlePushMarginM))),
@@ -481,6 +491,12 @@ struct CycleRecord {
     bool stopVerified = false;
     ev::FaultCode faultOfRecord = ev::FaultCode::None;
     uint32_t phaseElapsedMs = 0U;
+
+    // The shaped target the profile produced this cycle, metres per second: what
+    // the regulator was given, or would have been given had a gate refused the
+    // request. It is the one value that shows a strategy ceiling at work without
+    // inferring it from an effort.
+    double shapedTargetVelocityMps = 0.0;
 
     // Measurements and readiness (production verdicts; the age limits are
     // fixtures).
@@ -835,10 +851,17 @@ public:
         const bool stop = ev::isRunStopCommand(presented.command);
         const ev::MotionDirection direction =
             legForward_ ? ev::MotionDirection::Forward : ev::MotionDirection::Reverse;
+        // The strategy ceiling of the run phase the chain is in, selected by the
+        // same production mapping the vehicle layer uses. The nominal fixture
+        // ceilings are non-binding (see above), so the existing scenarios shape
+        // exactly as before; a scenario that wants to prove a phase difference
+        // lowers the ceiling it cares about in its own fixture copy.
+        const ev::StrategyVelocityCeiling strategyCeiling =
+            ev::strategyVelocityCeilingForPhase(fixtures_.phase, status.phase);
         const ev::MotionProfileCommand shaped = ev::nextTargetVelocity(
             profileTarget_.inputsFor(travel ? ev::MotionProfileIntent::Travel
                                             : ev::MotionProfileIntent::Stop,
-                                     direction, legRemainingM, dtMs),
+                                     direction, legRemainingM, dtMs, strategyCeiling),
             profile_.forDirection(direction));
         profileTarget_.accept(shaped);
 
@@ -907,6 +930,7 @@ public:
         record.stopVerified = status.stopVerified;
         record.faultOfRecord = status.fault;
         record.phaseElapsedMs = status.phaseElapsedMs;
+        record.shapedTargetVelocityMps = shaped.targetVelocityMps;
         record.encoderTicks = encoderTicks_;
         record.runAxisPositionM = runAxisPositionM_;
         record.remainingToTargetM = remainingToTargetM;

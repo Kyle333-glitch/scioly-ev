@@ -6441,3 +6441,122 @@ progression can do anything: the three bottle-interaction distances, the credibl
 contact-window tolerance and the forward-stop margin beyond the Bottle Line - with
 the observed contact position recorded independently of the firmware. S6/S7 own the
 speed/timing decision; S8/S9 the Run Time telemetry and the `plan` command.
+
+---
+
+## D43 / S6 - 2026-10-05 - The target shaper's optional strategy ceiling: per-phase speeds that can only tighten
+
+**Scope.** Competition strategy may want the bottle phases (Approach, Capture,
+Push) travelled slower than the announced cruise. S6 adds that as one explicit
+optional input to the existing target shaper - no second controller, no bypassed
+taper and no bypassed acceleration/deceleration limit. No calibration value was
+tuned and no speed was invented: every production bottle-phase ceiling is a
+`Provisional` placeholder and the run policy refuses while they are.
+
+**The shaper contract (`lib/evcore/src/MotionProfile.h`).**
+
+- New `ev::StrategyVelocityCeiling`: `active` plus `velocityMps`, with
+  `ev::inactiveStrategyVelocityCeiling()` / `ev::activeStrategyVelocityCeiling(v)`,
+  no default construction, and `ev::validateStrategyVelocityCeiling()` separating
+  `NonFiniteValue` from `NegativeValue`. Inactive is always valid and carries
+  exactly 0.0; a ceiling of zero is a legal ACTIVE value ("ask for no shaped
+  magnitude"), which is why the active flag exists.
+- `MotionProfileInputs` gained the ceiling as its last field, defaulted to the
+  explicit inactive value so every existing call site keeps exactly its former
+  shaping; `MotionProfileTarget::inputsFor()` passes it through.
+  `MotionProfileCommand` reports `strategyCeilingMps` / `strategyCeilingActive`
+  beside the other ceilings, with a new `MotionProfileLimit::StrategyCeiling`
+  binding and a new `MotionProfileStatus::InvalidStrategyCeiling` refusal.
+- `nextTargetVelocity()` computes the desired magnitude BEFORE the rate limits:
+  desired = min(cruise ceiling, distance taper, strategy ceiling if active), then
+  the existing acceleration/deceleration brackets produce the target. So the
+  ceiling can only tighten a target, a sudden reduction is a deceleration-limited
+  ramp and never a step, and an active NaN/infinite/negative ceiling refuses with a
+  zero target rather than shaping as if the ceiling were absent. A stop request and
+  the reversal street are untouched: both were already zero/ramp paths, and a
+  reversal still reaches zero before the sign may flip.
+
+**The run policy side (`CompetitionStateMachine.h`, `VehicleConfig.h`).**
+
+- `RunPhaseConfig` carries three `Sourced<double>` ceilings (approach / capture /
+  push), validated with the rest of the policy: `Measured`-only, finite and
+  strictly positive (`NonPositiveStrategyCeiling`). They are placeholders in
+  `VehicleConfig.h` (`kPlannedApproachCeilingMps` / `kPlannedCaptureCeilingMps` /
+  `kPlannedPushCeilingMps`, each the configured cruise today), so `PhaseConfigValid`
+  stays false and no run can be announced or armed on them - the
+  unusable/provisional state the bottle-integration work must earn its way past.
+- New free function `ev::strategyVelocityCeilingForPhase(config, phase)`: Approach
+  -> the approach ceiling, Capture -> capture, Push -> push, every other phase ->
+  explicitly inactive. The state machine never reads the ceilings; the vehicle
+  layer and the scenario harness select through this one mapping, and the harness
+  mirrors the production call exactly.
+- Production wiring: `VehicleRuntime` passes the phase's ceiling into the shaper
+  every cycle (stage 6), so an active ceiling tightens through the same taper and
+  rate limits every other target goes through, and `SafetyAuthority` and the FF+PI
+  regulator are untouched (the ceiling limits the target, never the effort path).
+
+**Proof that strategy only tightens motion (host tests, not physical).**
+
+- `test_motion_profile` +9 cases: inactive changes nothing (default form and
+  explicit form identical); a ceiling above the desired target changes nothing
+  (identical to the inactive baseline at the same state); a lower ceiling only
+  tightens (deceleration-limited first step, then the target sits at the ceiling
+  and the binding names it); NaN/inf/negative ACTIVE ceilings fail closed with
+  `InvalidStrategyCeiling` and a zero target while zero stays legal; a sudden
+  reduction is ramped at the deceleration limit, never stepped; a sweep of
+  ceilings x currents x distances never raises a target above the no-ceiling
+  baseline and never above the previous target when descending; a zero ceiling
+  ramps to exactly no powered effort; a stop request is unchanged by an active
+  ceiling; and a full reversal with an active ceiling still ramps to zero before
+  the sign may flip and is then capped on the new side.
+- `test_competition_state` +2 cases: the per-phase selection maps only the three
+  bottle phases (distinct fixtures prove which ceiling each phase gets); and a
+  provisional, zero or NaN phase ceiling is refused by `validateRunPhaseConfig()`
+  with its own named reason, so no run can be armed on a placeholder.
+- `test_scenario` +1 case: two identical scripted runs, one with a 0.30 m/s
+  Capture ceiling, produce the same trace length and the same phase every cycle;
+  every cycle the slowed run's shaped target is at or below the nominal one;
+  Capture cycles are tightened while Approach is not; the entry into Capture is
+  bounded by one cycle of deceleration (no step); and the slowed run still reaches
+  Push - the ceiling delays a phase instead of wedging the run. The harness gained
+  one recorded field (`CycleRecord::shapedTargetVelocityMps`) for that proof.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native`: **590/590 test cases succeeded** (578 at S5, +12: nine
+  `test_motion_profile` cases, two `test_competition_state` cases and one
+  `test_scenario` case), no new warnings (the one `-Wswitch` on
+  `FaultCode::DriverFaultBar` in the scenario helper is pre-existing and
+  untouched).
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog`: 3 SUCCESS, 0 warnings.
+  RAM +48 bytes on all three (nano_r4 6476, bench 6676, bench-watchdog 6660 of
+  32768) and Flash +548/+540/+540 bytes (nano_r4 73068, bench 79904,
+  bench-watchdog 79332): the three per-phase `Sourced` ceilings held by the run
+  policy, the optional input carried in the shaping inputs/command, and the
+  mapping/validation code - deliberate and small.
+- Telemetry tooling untouched and re-run green (`116 tests OK`); the telemetry
+  wire schema is unchanged (`kTelemetrySchemaVersion` stays 2; no check name,
+  field or event changed). `git diff --check` clean.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration and
+  limit value remains `Provisional`; no hardware was touched and no physical
+  behaviour is claimed.
+
+**Documents.** `SOFTWARE_ARCHITECTURE.md` section 7 now states the strategy
+ceiling in the target-shaping contract (desired-min before the rate limits, the
+per-phase mapping, the explicit inactive phases, the provisional production
+values). `docs/bringup/P-H8-bottle-integration.md` and its P-H14 Step 11 list the
+three ceilings among the facts that step must establish before a run may be armed,
+not only among the bottle distances and the plan's two dependencies.
+
+**Not changed (owned elsewhere).** Timing ownership and the idealized timing model
+(S7): `planRunTiming()` still controls cruise/delay at the announcement boundary
+and the `timingReady` policy is untouched. Run Time telemetry and plan
+observability (S8/S9), `maxRunDuration` (S10), the legal-parameter sweep (S11) and
+the remaining documentation synchronisation (S12) are untouched. No stop, reversal,
+fault, arming or telemetry behaviour changed.
+
+**Next.** H8 must also establish the three bottle-phase strategy ceilings (with the
+five facts it already owes). They remain unusable - the policy refuses and no run
+may be armed - until each is measured and promoted through the normal evidence
+procedure. S7 owns the timing decision; S8/S9 the Run Time telemetry and the
+`plan` command.

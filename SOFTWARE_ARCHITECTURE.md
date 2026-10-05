@@ -453,9 +453,24 @@ another's, and none is a run state machine.
   the only place a target velocity is shaped from remaining distance and elapsed
   time. It holds no state and commands nothing.
   - The target magnitude is the smallest of the cruise ceiling, the
-    remaining-distance taper and the rate brackets reachable in the measured dt.
-    The taper uses the caller's deceleration limit and the caller's measured brake
-    offset for the direction being travelled.
+    remaining-distance taper, the optional per-cycle strategy ceiling
+    (`ev::StrategyVelocityCeiling`) and the rate brackets reachable in the
+    measured dt. The taper uses the caller's deceleration limit and the caller's
+    measured brake offset for the direction being travelled.
+  - The strategy ceiling is how competition strategy slows a phase (Approach,
+    Capture, Push) without a second controller and without bypassing a limit. It
+    is an explicit active/inactive input, and it participates in the desired
+    magnitude *before* the acceleration/deceleration limits, so it can only
+    tighten a shaped target - never raise one - and a phase change is a ramped
+    transition rather than a step. An active malformed ceiling refuses the step
+    (`InvalidStrategyCeiling`) instead of being ignored, and an inactive one
+    changes nothing. The run policy carries one ceiling per bottle phase
+    (`RunPhaseConfig`, selected by `ev::strategyVelocityCeilingForPhase()`); every
+    other phase - the delay, the ramps, the brake, the reverse leg - is
+    explicitly without a ceiling. All three production values are Provisional
+    placeholders (never tuned), so `validateRunPhaseConfig()` refuses the policy
+    and the ceilings remain unusable until the bottle-phase measurements exist
+    (S6; `docs/bringup/P-H8-bottle-integration.md`).
   - A commanded reversal, and an explicit stop request, are ramped to zero at the
     deceleration limit; the sign never flips inside one step. The settle, the
     brake and the competition sequence remain undecided (section 10).

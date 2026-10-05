@@ -55,7 +55,8 @@ bottle: record the change and treat it as a new series.
 **One at a time**, with the others held constant:
 
 - approach distance / capture threshold (where the mechanism engages);
-- approach speed;
+- phase speeds (the three bottle-phase strategy ceilings: approach, capture,
+  push - each can only slow its own phase);
 - push completion criterion (what counts as "pushed").
 
 Changing two at once makes a good run unattributable and a bad run undiagnosable.
@@ -128,9 +129,14 @@ parameters are chosen from the data.
   margin beyond the Bottle Line** (how far past the line the vehicle's commanded
   stop must lie, from the observed bottle overshoot together with the braking
   distance at that speed) - without them no plan exists and no forward phase can
-  complete at all. If the believed progression and the observed contact disagree
-  systematically, fix the estimator or the mechanism - do not move the threshold
-  that hides it.
+  complete at all. The same data must also set the three **bottle-phase strategy
+  ceilings** (`RunPhaseConfig::approachCeilingMps` / `captureCeilingMps` /
+  `pushCeilingMps`, three `Provisional` placeholders today): they are
+  `Measured`-only, so while they are placeholders the run policy is refused and no
+  run may be armed, and each ceiling may only slow its own phase - record the
+  speed used and the evidence that the phase still succeeds at it. If the believed
+  progression and the observed contact disagree systematically, fix the estimator
+  or the mechanism - do not move the threshold that hides it.
 - Log in `DEVELOPMENT_LOG.md`.
 
 ## If it fails or is inconclusive

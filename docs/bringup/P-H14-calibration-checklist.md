@@ -214,7 +214,8 @@ bottle, independent observer or camera, kill switch, runout clear.
   never derive it from the `Capture` transition.
 
 **Reps:** enough runs per condition to decide the pre-registered success fraction,
-at least three conditions (approach distance, approach speed, push criterion).
+at least three conditions (approach distance, phase speeds - the three strategy
+ceilings - and push criterion).
 **Calculation:**
 - `kPlannedBottleContactLeadM` = `bottleStartM - pos_m` at the tick the observer
   saw contact at the witness mark (from the log, at the observed contact tick - not
@@ -230,14 +231,23 @@ at least three conditions (approach distance, approach speed, push criterion).
 - `kPlannedForwardStopMarginBeyondBottleLineM` = how far beyond the Bottle Line
   the vehicle's *commanded* forward stop must lie: from the observed bottle
   overshoot together with the measured braking distance at the forward-stop speed
-  (a braking-characterization run, not a bottle run).
+  (a braking-characterization run, not a bottle run);
+- `kPlannedApproachCeilingMps` / `kPlannedCaptureCeilingMps` / `kPlannedPushCeilingMps`
+  = the phase speed each bottle phase was shown to perform correctly at, from the
+  runs recorded here. They are the run policy's three strategy ceilings: each can
+  only slow its own phase (the target shaper takes the smallest of the cruise
+  ceiling, the distance taper and the active phase ceiling), they are
+  `Measured`-only, and while they are placeholders the whole run policy is refused
+  - so no run may be armed until they too come from these measurements.
 **Acceptance:** the pre-registered success fraction of runs finish with the bottle
 past the line, judged from the *observed* evidence.
-**Establishes:** the three bottle distances and the execution plan's two own
-physical dependencies (the credible contact-window tolerance and the forward-stop
-margin beyond the Bottle Line). All five are required before
-`ev::buildRunExecutionPlan()` can produce a plan, so no run can complete a forward
-phase until then; and only then `VERIFIED_STATE.md` #11.
+**Establishes:** the three bottle distances, the three bottle-phase strategy
+ceilings and the execution plan's two own physical dependencies (the credible
+contact-window tolerance and the forward-stop margin beyond the Bottle Line).
+`ev::buildRunExecutionPlan()` cannot produce a plan without its five, so no run
+can complete a forward phase until then; the three ceilings keep
+`PhaseConfigValid` false until they are measured, so no run may be armed on
+placeholders either. Only then `VERIFIED_STATE.md` #11.
 
 ## Step 12 - Plan verification (Target Time)
 

@@ -73,10 +73,12 @@ ev::MotionProfileLimits fixtureLimits() {
 // Fixture brake offset, in metres, matching fixtureLimits().
 const double kFixtureBrakeOffsetM = 0.05;
 
-ev::MotionProfileInputs travelForward(double currentTargetVelocityMps, double remainingDistanceM,
-                                      uint32_t dtMs) {
+ev::MotionProfileInputs travelForward(
+    double currentTargetVelocityMps, double remainingDistanceM, uint32_t dtMs,
+    ev::StrategyVelocityCeiling strategyCeiling = ev::inactiveStrategyVelocityCeiling()) {
     return ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Forward,
-                                   remainingDistanceM, currentTargetVelocityMps, dtMs);
+                                   remainingDistanceM, currentTargetVelocityMps, dtMs,
+                                   strategyCeiling);
 }
 
 // The taper a fixture evaluation should produce: the speed from which 1.0 m/s^2
@@ -105,6 +107,8 @@ void expectRefusal(ev::MotionProfileStatus expectedStatus,
     TEST_ASSERT_TRUE(command.taperCeilingMps == 0.0);
     TEST_ASSERT_TRUE(command.accelCeilingMps == 0.0);
     TEST_ASSERT_TRUE(command.decelCeilingMps == 0.0);
+    TEST_ASSERT_TRUE(command.strategyCeilingMps == 0.0);
+    TEST_ASSERT_FALSE(command.strategyCeilingActive);
 }
 
 void expectDuration(double expectedS, const ev::MotionDurationEstimate& estimate) {
@@ -129,7 +133,8 @@ void expectSummary(double expectedTravelS, double expectedTotalS, double expecte
 ev::MotionProfileCommand commandAt(double targetVelocityMps) {
     return ev::MotionProfileCommand(targetVelocityMps, ev::MotionProfileStatus::Ok,
                                     ev::MotionProfilePhase::Cruising,
-                                    ev::MotionProfileLimit::CruiseCeiling, 2.0, 2.0, 2.0, 2.0);
+                                    ev::MotionProfileLimit::CruiseCeiling, 2.0, 2.0, 2.0, 2.0,
+                                    0.0, false);
 }
 
 }  // namespace
@@ -889,6 +894,328 @@ void test_the_target_never_exceeds_the_ceilings_or_flips_itself(void) {
     }
 }
 
+// --- The optional strategy ceiling -------------------------------------------
+//
+// Competition strategy is allowed to slow the bottle phases through one optional
+// ceiling on the shaping input. The contract under test: inactive changes
+// nothing; an active ceiling can only tighten a target (never raise one, never
+// bypass a rate limit); a sudden reduction is ramped at the deceleration limit
+// rather than stepped; a malformed active ceiling refuses the step; a stop stays
+// a stop; and the reversal street is untouched.
+
+// The fixture profile settled at its cruise target: 200 steps of 20 ms at the
+// 0.5 m/s^2 acceleration limit from rest, with 100 m still to travel so neither
+// the taper nor the brake offset is involved.
+double settleAtCruiseMps(const ev::MotionProfileLimits& limits) {
+    double targetMps = 0.0;
+    for (int step = 0; step < 200; ++step) {
+        targetMps =
+            ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U), limits).targetVelocityMps;
+    }
+    return targetMps;
+}
+
+void test_an_inactive_strategy_ceiling_changes_nothing(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+
+    // The default form of the input (no ceiling stated) and the explicit
+    // inactive value must produce the identical command.
+    const ev::MotionProfileInputs withInactive =
+        travelForward(0.30, 0.50, 20U, ev::inactiveStrategyVelocityCeiling());
+    const ev::MotionProfileCommand baseline =
+        ev::nextTargetVelocity(travelForward(0.30, 0.50, 20U), limits);
+    const ev::MotionProfileCommand explicitInactive =
+        ev::nextTargetVelocity(withInactive, limits);
+
+    TEST_ASSERT_TRUE(baseline.targetVelocityMps > 0.0);
+    TEST_ASSERT_TRUE(ev::validateStrategyVelocityCeiling(withInactive.strategyCeiling).ok);
+    TEST_ASSERT_TRUE(explicitInactive.targetVelocityMps == baseline.targetVelocityMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(baseline.status),
+                          static_cast<int>(explicitInactive.status));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(baseline.phase),
+                          static_cast<int>(explicitInactive.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(baseline.binding),
+                          static_cast<int>(explicitInactive.binding));
+    TEST_ASSERT_TRUE(explicitInactive.strategyCeilingMps == 0.0);
+    TEST_ASSERT_FALSE(explicitInactive.strategyCeilingActive);
+}
+
+void test_a_strategy_ceiling_above_the_desired_target_changes_nothing(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+
+    // A state where the taper, not the cruise, is what the geometry asks for.
+    const ev::MotionProfileCommand baseline =
+        ev::nextTargetVelocity(travelForward(0.30, 0.50, 20U), limits);
+    const ev::MotionProfileCommand withHighCeiling = ev::nextTargetVelocity(
+        travelForward(0.30, 0.50, 20U, ev::activeStrategyVelocityCeiling(5.0)), limits);
+
+    TEST_ASSERT_TRUE(withHighCeiling.targetVelocityMps == baseline.targetVelocityMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(baseline.status),
+                          static_cast<int>(withHighCeiling.status));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(baseline.binding),
+                          static_cast<int>(withHighCeiling.binding));
+    TEST_ASSERT_TRUE(withHighCeiling.strategyCeilingActive);
+    TEST_ASSERT_TRUE(withHighCeiling.strategyCeilingMps == 5.0);
+}
+
+void test_a_lower_strategy_ceiling_only_tightens_the_target(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const double cruise = settleAtCruiseMps(limits);
+    TEST_ASSERT_TRUE(std::fabs(cruise - 2.0) <= kVelocityToleranceMps);
+
+    const ev::StrategyVelocityCeiling ceiling = ev::activeStrategyVelocityCeiling(0.9);
+
+    // The first step after the ceiling appears is a deceleration-limited ramp,
+    // not a step to 0.9.
+    const ev::MotionProfileCommand first =
+        ev::nextTargetVelocity(travelForward(cruise, 100.0, 20U, ceiling), limits);
+    TEST_ASSERT_TRUE(std::fabs(first.targetVelocityMps - 1.98) <= kVelocityToleranceMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::RampLimit),
+                          static_cast<int>(first.binding));
+    TEST_ASSERT_TRUE(first.strategyCeilingActive);
+    TEST_ASSERT_TRUE(first.strategyCeilingMps == 0.9);
+
+    // Ramp the rest of the way down under the ceiling.
+    double targetMps = first.targetVelocityMps;
+    for (int step = 0; step < 400; ++step) {
+        targetMps =
+            ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U, ceiling), limits)
+                .targetVelocityMps;
+    }
+    TEST_ASSERT_TRUE(std::fabs(targetMps - 0.9) <= kVelocityToleranceMps);
+
+    // Settled, the ceiling is what the target sits at, and it names it.
+    const ev::MotionProfileCommand settled =
+        ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U, ceiling), limits);
+    TEST_ASSERT_TRUE(std::fabs(settled.targetVelocityMps - 0.9) <= kVelocityToleranceMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::StrategyCeiling),
+                          static_cast<int>(settled.binding));
+
+    // A ceiling above the target changes nothing at all: it does not bind, so the
+    // command is identical to the inactive baseline at the same state.
+    const ev::MotionProfileCommand above = ev::nextTargetVelocity(
+        travelForward(targetMps, 100.0, 20U, ev::activeStrategyVelocityCeiling(2.5)), limits);
+    const ev::MotionProfileCommand withoutCeiling =
+        ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U), limits);
+    TEST_ASSERT_TRUE(above.targetVelocityMps == withoutCeiling.targetVelocityMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(withoutCeiling.binding),
+                          static_cast<int>(above.binding));
+}
+
+void test_an_active_malformed_strategy_ceiling_fails_closed(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+
+    const double badValues[] = {kNaN, kInf, -kInf, -0.1};
+    for (double bad : badValues) {
+        const ev::MotionProfileInputs inputs =
+            travelForward(1.0, 5.0, 20U, ev::activeStrategyVelocityCeiling(bad));
+        TEST_ASSERT_FALSE(ev::validateStrategyVelocityCeiling(inputs.strategyCeiling).ok);
+        expectRefusal(ev::MotionProfileStatus::InvalidStrategyCeiling,
+                      ev::nextTargetVelocity(inputs, limits));
+    }
+
+    // The two malformed reasons are told apart for diagnosis: a NaN/infinity is
+    // not the same fact as a negative ceiling.
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::StrategyVelocityCeilingError::NonFiniteValue),
+        static_cast<int>(ev::validateStrategyVelocityCeiling(
+                             ev::activeStrategyVelocityCeiling(kNaN))
+                             .error));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::StrategyVelocityCeilingError::NegativeValue),
+        static_cast<int>(ev::validateStrategyVelocityCeiling(
+                             ev::activeStrategyVelocityCeiling(-0.1))
+                             .error));
+
+    // Zero is a legal ACTIVE ceiling (it asks for no shaped magnitude), and
+    // inactive is valid by definition - it is the absence of a ceiling.
+    TEST_ASSERT_TRUE(
+        ev::validateStrategyVelocityCeiling(ev::activeStrategyVelocityCeiling(0.0)).ok);
+    TEST_ASSERT_TRUE(
+        ev::validateStrategyVelocityCeiling(ev::inactiveStrategyVelocityCeiling()).ok);
+}
+
+void test_a_sudden_strategy_ceiling_reduction_is_ramped_not_stepped(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const ev::StrategyVelocityCeiling ceiling = ev::activeStrategyVelocityCeiling(0.4);
+
+    double targetMps = settleAtCruiseMps(limits);
+    const double cruise = targetMps;
+    bool reachedCeiling = false;
+    for (int step = 0; step < 400 && !reachedCeiling; ++step) {
+        const ev::MotionProfileCommand command =
+            ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U, ceiling), limits);
+        // Never a step: the drop is bounded by the deceleration limit, and the
+        // target never rises while the ceiling is below it.
+        TEST_ASSERT_TRUE(command.targetVelocityMps >=
+                         targetMps - 0.02 - kVelocityToleranceMps);
+        TEST_ASSERT_TRUE(command.targetVelocityMps <= targetMps + kVelocityToleranceMps);
+        targetMps = command.targetVelocityMps;
+        reachedCeiling = std::fabs(targetMps - 0.4) <= 0.02 + kVelocityToleranceMps;
+        if (step == 0) {
+            // The first step is nowhere near the new ceiling: the reduction is a
+            // ramp, not a target step.
+            TEST_ASSERT_TRUE(command.targetVelocityMps > 0.4 + 0.02);
+        }
+    }
+    TEST_ASSERT_TRUE(reachedCeiling);
+    TEST_ASSERT_TRUE(cruise > 1.0);
+    TEST_ASSERT_TRUE(targetMps <= 0.4 + 0.02 + kVelocityToleranceMps);
+
+    // At the ceiling the binding names it, and the phase reports cruising rather
+    // than a stopped or accelerating transition.
+    const ev::MotionProfileCommand settled =
+        ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U, ceiling), limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::StrategyCeiling),
+                          static_cast<int>(settled.binding));
+}
+
+void test_a_strategy_ceiling_can_never_increase_a_target(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const double remainingsM[] = {0.05, 0.5, 5.0, 100.0};
+    const double currentsMps[] = {0.0, 0.3, 1.0, 2.0};
+    const double ceilingsMps[] = {0.0, 0.05, 0.3, 1.0, 2.0, 2.5, 100.0};
+
+    for (double remainingM : remainingsM) {
+        for (double currentMps : currentsMps) {
+            const ev::MotionProfileCommand baseline =
+                ev::nextTargetVelocity(travelForward(currentMps, remainingM, 20U), limits);
+            for (double ceilingMps : ceilingsMps) {
+                const ev::MotionProfileCommand command = ev::nextTargetVelocity(
+                    travelForward(currentMps, remainingM, 20U,
+                                  ev::activeStrategyVelocityCeiling(ceilingMps)),
+                    limits);
+
+                // Never raises the target: the shaped magnitude is at or below the
+                // no-ceiling baseline, and it is bounded by the previous target
+                // and the ceiling together - the rate-limited descent from a
+                // higher previous target is the one case where the current target
+                // is still above a newly lowered ceiling, and that descent never
+                // exceeds where it started.
+                TEST_ASSERT_TRUE(std::fabs(command.targetVelocityMps) <=
+                                 std::fabs(baseline.targetVelocityMps) + kVelocityToleranceMps);
+                TEST_ASSERT_TRUE(std::fabs(command.targetVelocityMps) <=
+                                 std::fmax(std::fabs(currentMps), ceilingMps) +
+                                     kVelocityToleranceMps);
+                TEST_ASSERT_TRUE(command.targetVelocityMps >= -kVelocityToleranceMps);
+                TEST_ASSERT_TRUE(command.strategyCeilingActive);
+                TEST_ASSERT_TRUE(command.strategyCeilingMps == ceilingMps);
+            }
+        }
+    }
+}
+
+void test_a_zero_strategy_ceiling_ramps_to_no_powered_effort(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const ev::StrategyVelocityCeiling ceiling = ev::activeStrategyVelocityCeiling(0.0);
+
+    double targetMps = settleAtCruiseMps(limits);
+    int steps = 0;
+    while (targetMps != 0.0 && steps < 400) {
+        const ev::MotionProfileCommand command =
+            ev::nextTargetVelocity(travelForward(targetMps, 100.0, 20U, ceiling), limits);
+        TEST_ASSERT_TRUE(command.targetVelocityMps >=
+                         targetMps - 0.02 - kVelocityToleranceMps);
+        TEST_ASSERT_TRUE(command.targetVelocityMps <= targetMps + kVelocityToleranceMps);
+        targetMps = command.targetVelocityMps;
+        ++steps;
+    }
+    TEST_ASSERT_TRUE(targetMps == 0.0);
+
+    // At zero the target stays exactly zero - no powered effort - and the binding
+    // names the ceiling that is holding it there.
+    const ev::MotionProfileCommand held =
+        ev::nextTargetVelocity(travelForward(0.0, 100.0, 20U, ceiling), limits);
+    TEST_ASSERT_TRUE(held.targetVelocityMps == 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::StrategyCeiling),
+                          static_cast<int>(held.binding));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfilePhase::Stopped),
+                          static_cast<int>(held.phase));
+}
+
+void test_an_active_strategy_ceiling_leaves_a_stop_request_alone(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const ev::StrategyVelocityCeiling ceiling = ev::activeStrategyVelocityCeiling(0.2);
+
+    const ev::MotionProfileCommand baseline = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Stop, ev::MotionDirection::Forward, 5.0,
+                                1.0, 20U),
+        limits);
+    const ev::MotionProfileCommand withCeiling = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Stop, ev::MotionDirection::Forward, 5.0,
+                                1.0, 20U, ceiling),
+        limits);
+
+    // A stop is already a zero desired magnitude, and a ceiling cannot lower it
+    // further or raise it: the commands are identical.
+    TEST_ASSERT_TRUE(withCeiling.targetVelocityMps == baseline.targetVelocityMps);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::StopRequested),
+                          static_cast<int>(withCeiling.status));
+    TEST_ASSERT_TRUE(withCeiling.strategyCeilingActive);
+
+    // A long enough step reaches exactly zero and stays there.
+    const ev::MotionProfileCommand stopped = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Stop, ev::MotionDirection::Forward, 5.0,
+                                0.0, 1000U, ceiling),
+        limits);
+    TEST_ASSERT_TRUE(stopped.targetVelocityMps == 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::StopRequested),
+                          static_cast<int>(stopped.status));
+}
+
+void test_a_reversal_with_an_active_strategy_ceiling_still_passes_through_zero(void) {
+    const ev::MotionProfileLimits limits = fixtureLimits();
+    const ev::StrategyVelocityCeiling ceiling = ev::activeStrategyVelocityCeiling(0.5);
+
+    // Moving forward at 1.0 m/s, the run asks for reverse: the ramp-down is
+    // unchanged by the ceiling - the ceiling limits a magnitude in the *new*
+    // direction, and the old direction is still ramping to zero.
+    const ev::MotionProfileCommand holding = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                1.0, 20U, ceiling),
+        limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileStatus::DirectionChangeHold),
+                          static_cast<int>(holding.status));
+    TEST_ASSERT_TRUE(std::fabs(holding.targetVelocityMps - 0.98) <= kVelocityToleranceMps);
+    TEST_ASSERT_FALSE(
+        ev::targetVelocityPointsAlongLeg(holding, ev::MotionDirection::Reverse, limits));
+
+    // The sign never flips before the magnitude has reached zero.
+    double targetMps = holding.targetVelocityMps;
+    for (int step = 0; step < 200 && targetMps > 0.0; ++step) {
+        const ev::MotionProfileCommand command = ev::nextTargetVelocity(
+            ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse,
+                                    5.0, targetMps, 20U, ceiling),
+            limits);
+        TEST_ASSERT_TRUE(command.targetVelocityMps <= targetMps + kVelocityToleranceMps);
+        targetMps = command.targetVelocityMps;
+        TEST_ASSERT_TRUE(targetMps >= 0.0);
+    }
+    TEST_ASSERT_TRUE(targetMps == 0.0);
+
+    // From zero the reverse ramp may begin - and the ceiling caps it on the new
+    // side, so the reversal invariant and the ceiling hold at the same time.
+    double reverseMps = 0.0;
+    for (int step = 0; step < 200; ++step) {
+        const ev::MotionProfileCommand command = ev::nextTargetVelocity(
+            ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse,
+                                    5.0, reverseMps, 20U, ceiling),
+            limits);
+        TEST_ASSERT_TRUE(command.targetVelocityMps <= kVelocityToleranceMps);
+        TEST_ASSERT_TRUE(std::fabs(command.targetVelocityMps) <= 0.5 + kVelocityToleranceMps);
+        reverseMps = command.targetVelocityMps;
+    }
+    TEST_ASSERT_TRUE(std::fabs(reverseMps + 0.5) <= kVelocityToleranceMps);
+    const ev::MotionProfileCommand settled = ev::nextTargetVelocity(
+        ev::MotionProfileInputs(ev::MotionProfileIntent::Travel, ev::MotionDirection::Reverse, 5.0,
+                                reverseMps, 20U, ceiling),
+        limits);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotionProfileLimit::StrategyCeiling),
+                          static_cast<int>(settled.binding));
+    TEST_ASSERT_TRUE(
+        ev::targetVelocityPointsAlongLeg(settled, ev::MotionDirection::Reverse, limits));
+}
+
 // --- The along-leg gate -------------------------------------------------------
 
 void test_a_shaped_target_points_along_the_leg_it_is_for(void) {
@@ -996,6 +1323,16 @@ int main(int, char**) {
     RUN_TEST(test_the_directional_limits_are_selected_by_direction);
 
     RUN_TEST(test_the_target_never_exceeds_the_ceilings_or_flips_itself);
+
+    RUN_TEST(test_an_inactive_strategy_ceiling_changes_nothing);
+    RUN_TEST(test_a_strategy_ceiling_above_the_desired_target_changes_nothing);
+    RUN_TEST(test_a_lower_strategy_ceiling_only_tightens_the_target);
+    RUN_TEST(test_an_active_malformed_strategy_ceiling_fails_closed);
+    RUN_TEST(test_a_sudden_strategy_ceiling_reduction_is_ramped_not_stepped);
+    RUN_TEST(test_a_strategy_ceiling_can_never_increase_a_target);
+    RUN_TEST(test_a_zero_strategy_ceiling_ramps_to_no_powered_effort);
+    RUN_TEST(test_an_active_strategy_ceiling_leaves_a_stop_request_alone);
+    RUN_TEST(test_a_reversal_with_an_active_strategy_ceiling_still_passes_through_zero);
 
     RUN_TEST(test_a_shaped_target_points_along_the_leg_it_is_for);
     RUN_TEST(test_a_reversal_in_progress_does_not_point_along_the_new_leg);

@@ -385,7 +385,7 @@ void test_the_announced_delay_is_bounded_by_the_policy(void) {
         measured(5.0), measured(1.0),
         ev::NearZeroConfig(measured(0.05), measured(0.2),
                            ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured)),
-        measured(0.10),
+        measured(0.10), measured(0.30), measured(0.30), measured(0.30),
         ev::BottleEvidenceConfig(measured(0.10), measured(0.20), measured(0.05)));
     const ev::ReversalConfig reversal(
         ev::NearZeroConfig(measured(0.05), measured(0.2),

@@ -128,6 +128,25 @@ constexpr double kPlannedDecelMps2 = 1.0;
 // this; until then it is a placeholder and no run may be announced on it.
 constexpr double kPlannedMinimumCruiseMps = 0.10;
 
+// Bottle-phase strategy ceilings: the speeds competition strategy wants the
+// three bottle phases travelled at, metres per second (Approach, Capture, Push).
+// They only ever tighten - `MotionProfile` takes the smallest of the cruise
+// ceiling, the distance taper and the active phase ceiling - so they cannot
+// raise a shaped target, cannot bypass an acceleration/deceleration limit, and a
+// phase change is ramped, never a step.
+//
+// These are placeholders, and the placeholder value is deliberately the
+// configured cruise: no per-phase speed has been established on this vehicle, so
+// an unmeasured ceiling must not slow (or speed) anything. While they are
+// `Provisional`, `validateRunPhaseConfig()` refuses the whole run policy - exactly
+// as it already does for the planned-cruise floor - so no run can be announced or
+// armed on them, and the ceilings are unusable until the bottle-integration
+// protocol (P-H8) establishes real per-phase speeds. Do not tune these to make a
+// run move.
+constexpr double kPlannedApproachCeilingMps = kPlannedCruiseMps;
+constexpr double kPlannedCaptureCeilingMps = kPlannedCruiseMps;
+constexpr double kPlannedPushCeilingMps = kPlannedCruiseMps;
+
 // Regulator placeholders. None is a tuning result (`VERIFIED_STATE.md` #8).
 constexpr double kPlannedFeedForwardPermillePerMps = 250.0;
 constexpr double kPlannedProportionalPermillePerMps = 150.0;
@@ -461,7 +480,10 @@ inline ev::RunPhaseConfig runPhaseConfig() {
                               provisionalValue(kPlannedFinalStopTimeoutS),
                               provisionalValue(kPlannedFinalApproachDistanceM),
                               finalStopVerification(),
-                              provisionalValue(kPlannedMinimumCruiseMps), bottleEvidenceConfig());
+                              provisionalValue(kPlannedMinimumCruiseMps),
+                              provisionalValue(kPlannedApproachCeilingMps),
+                              provisionalValue(kPlannedCaptureCeilingMps),
+                              provisionalValue(kPlannedPushCeilingMps), bottleEvidenceConfig());
 }
 
 inline ev::ReversalConfig reversalConfig() {
@@ -594,6 +616,9 @@ inline bool allPromotedValuesCiteEvidence() {
                             provenance::cited(phase.finalStopTimeoutS) &&
                             provenance::cited(phase.finalApproachDistanceM) &&
                             provenance::cited(phase.minimumPlannedCruiseMps) &&
+                            provenance::cited(phase.approachCeilingMps) &&
+                            provenance::cited(phase.captureCeilingMps) &&
+                            provenance::cited(phase.pushCeilingMps) &&
                             provenance::cited(phase.bottleEvidence.contactLeadDistanceM) &&
                             provenance::cited(phase.bottleEvidence.captureAdvanceDistanceM) &&
                             provenance::cited(phase.bottleEvidence.pushMarginDistanceM);

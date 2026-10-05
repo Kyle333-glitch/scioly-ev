@@ -2035,6 +2035,79 @@ void test_the_run_enters_capture_when_the_capture_window_opens_without_claiming_
     expectTraceInvariants(harness);
 }
 
+void test_a_capture_phase_ceiling_slows_only_capture_through_the_one_shaper(void) {
+    // Two runs of identical stated evidence: the nominal fixtures, and a copy whose
+    // Capture strategy ceiling is far below the fixture cruise. This is the
+    // capability S6 adds - transit and capture speeds differ through the one target
+    // shaper - with no second controller, no bypassed taper and no bypassed rate
+    // limit. The clock, the encoder script and the progression evidence are the
+    // same in both runs, so any difference in the trace is the ceiling's.
+    evscenario::ScenarioFixtures slowCapture = evscenario::nominalFixtures();
+    slowCapture.phase.captureCeilingMps = evscenario::measuredValue(0.30);
+
+    ScenarioHarness nominal(fixtures());
+    ScenarioHarness slowed(slowCapture);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(nominal.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(slowed.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_TRUE(nominal.arm());
+    TEST_ASSERT_TRUE(slowed.arm());
+
+    NominalDriver nominalDriver;
+    NominalDriver slowedDriver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(nominal, ev::RunPhase::Push, nominalDriver),
+                             "the nominal run never passed Capture");
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(slowed, ev::RunPhase::Push, slowedDriver),
+                             "the slowed run never passed Capture");
+
+    // The ceiling changes the shaped target, never the sequencing: same trace
+    // length, same phase every cycle.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(nominal.trace().size()),
+                          static_cast<int>(slowed.trace().size()));
+
+    bool sawFirstCapture = false;
+    double captureEntryDifferenceMps = 0.0;
+    uint32_t captureCycles = 0U;
+    uint32_t tightenedCaptureCycles = 0U;
+    for (uint32_t index = 0U; index < static_cast<uint32_t>(nominal.trace().size()); ++index) {
+        const CycleRecord& nominalRecord = nominal.trace()[index];
+        const CycleRecord& slowedRecord = slowed.trace()[index];
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(nominalRecord.phase),
+                              static_cast<int>(slowedRecord.phase));
+        // Only ever tightens, in every phase and every cycle.
+        TEST_ASSERT_TRUE(std::fabs(slowedRecord.shapedTargetVelocityMps) <=
+                         std::fabs(nominalRecord.shapedTargetVelocityMps) + 1e-9);
+
+        if (nominalRecord.phase == ev::RunPhase::Capture) {
+            ++captureCycles;
+            if (!sawFirstCapture) {
+                sawFirstCapture = true;
+                captureEntryDifferenceMps =
+                    std::fabs(nominalRecord.shapedTargetVelocityMps) -
+                    std::fabs(slowedRecord.shapedTargetVelocityMps);
+            }
+            if (std::fabs(slowedRecord.shapedTargetVelocityMps) <
+                std::fabs(nominalRecord.shapedTargetVelocityMps) - 1e-9) {
+                ++tightenedCaptureCycles;
+            }
+        }
+    }
+
+    // The capture window the fixture geometry gives is several cycles wide, the
+    // ceiling tightened the shaped target in it, and the first cycle of Capture
+    // was a deceleration-limited ramp away from the approach target - not a step.
+    TEST_ASSERT_TRUE(captureCycles >= 5U);
+    TEST_ASSERT_TRUE(tightenedCaptureCycles >= captureCycles - 1U);
+    TEST_ASSERT_TRUE(captureEntryDifferenceMps > 0.0);
+    TEST_ASSERT_TRUE(captureEntryDifferenceMps <= 0.04 + 1e-9);
+
+    // And the slowed run reached Push: the ceiling delays a phase instead of
+    // wedging the run.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Push),
+                          static_cast<int>(slowed.phase()));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -2066,5 +2139,6 @@ int main(int, char**) {
     RUN_TEST(test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields);
     RUN_TEST(test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_at);
     RUN_TEST(test_the_run_enters_capture_when_the_capture_window_opens_without_claiming_contact);
+    RUN_TEST(test_a_capture_phase_ceiling_slows_only_capture_through_the_one_shaper);
     return UNITY_END();
 }

@@ -2,6 +2,7 @@
 
 #include "BottleEvidence.h"
 #include "Motion.h"
+#include "MotionProfile.h"
 #include "NearZeroVerifier.h"
 #include "ReversalSequencer.h"
 #include "RunConfig.h"
@@ -304,6 +305,9 @@ struct RunPhaseConfig {
                              Sourced<double> finalApproachDistanceM_,
                              NearZeroConfig stopVerification_,
                              Sourced<double> minimumPlannedCruiseMps_,
+                             Sourced<double> approachCeilingMps_,
+                             Sourced<double> captureCeilingMps_,
+                             Sourced<double> pushCeilingMps_,
                              BottleEvidenceConfig bottleEvidence_)
         : maximumOptionalDelayS(maximumOptionalDelayS_),
           approachTimeoutS(approachTimeoutS_),
@@ -315,6 +319,9 @@ struct RunPhaseConfig {
           finalApproachDistanceM(finalApproachDistanceM_),
           stopVerification(stopVerification_),
           minimumPlannedCruiseMps(minimumPlannedCruiseMps_),
+          approachCeilingMps(approachCeilingMps_),
+          captureCeilingMps(captureCeilingMps_),
+          pushCeilingMps(pushCeilingMps_),
           bottleEvidence(bottleEvidence_) {}
 
     // The *most* deliberate pre-travel delay a run may spend, seconds. The delay
@@ -363,6 +370,24 @@ struct RunPhaseConfig {
     // wait on a number nobody measured.
     Sourced<double> minimumPlannedCruiseMps;
 
+    // The strategy velocity ceilings the run may travel the three bottle phases
+    // at, metres per second: Approach, Capture, Push. Competition strategy uses
+    // them to slow those phases without touching the cruise ceiling, the safety
+    // velocity ceiling or any rate limit - they enter the target shaper's desired
+    // magnitude before the acceleration/deceleration limits, so they can only
+    // tighten a shaped target, never raise one, and a phase change is a ramped
+    // transition rather than a target step (`MotionProfile.h`).
+    //
+    // `Measured`-only like everything else here, and placeholders today: no
+    // per-phase speed has been established on this vehicle, so the run policy
+    // stays refused and the ceilings are unusable until the bottle-integration
+    // protocol establishes them (P-H8). A phase ceiling that is not a positive
+    // speed is refused, because a phase carries travel and a zero ceiling would
+    // be a standstill the run cannot complete.
+    Sourced<double> approachCeilingMps;
+    Sourced<double> captureCeilingMps;
+    Sourced<double> pushCeilingMps;
+
     // The bottle-interaction distances the run's execution plan derives its forward
     // progression thresholds from (`BottleEvidence.h` distances,
     // `RunExecutionPlan.h` thresholds). The forward phases cannot exit without those
@@ -382,6 +407,7 @@ enum class RunPhaseConfigError : uint8_t {
     NonPositiveFinalApproachDistanceM,  // the final approach distance is not > 0
     StopVerificationNotUsable,        // the NearZeroConfig failed its own validation
     NonPositiveMinimumCruise,         // the planned-cruise floor is not > 0
+    NonPositiveStrategyCeiling,       // a bottle-phase strategy ceiling is not > 0
     BottleEvidenceNotUsable,          // the BottleEvidenceConfig failed its own validation
 };
 
@@ -412,7 +438,9 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !config.captureTimeoutS.isMeasured() || !config.pushTimeoutS.isMeasured() ||
         !config.reverseTimeoutS.isMeasured() || !config.finalApproachTimeoutS.isMeasured() ||
         !config.finalStopTimeoutS.isMeasured() || !config.finalApproachDistanceM.isMeasured() ||
-        !config.minimumPlannedCruiseMps.isMeasured()) {
+        !config.minimumPlannedCruiseMps.isMeasured() ||
+        !config.approachCeilingMps.isMeasured() || !config.captureCeilingMps.isMeasured() ||
+        !config.pushCeilingMps.isMeasured()) {
         return {false, RunPhaseConfigError::ValuesAreNotMeasured};
     }
     if (!std::isfinite(config.maximumOptionalDelayS.value) ||
@@ -422,7 +450,10 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !std::isfinite(config.finalApproachTimeoutS.value) ||
         !std::isfinite(config.finalStopTimeoutS.value) ||
         !std::isfinite(config.finalApproachDistanceM.value) ||
-        !std::isfinite(config.minimumPlannedCruiseMps.value)) {
+        !std::isfinite(config.minimumPlannedCruiseMps.value) ||
+        !std::isfinite(config.approachCeilingMps.value) ||
+        !std::isfinite(config.captureCeilingMps.value) ||
+        !std::isfinite(config.pushCeilingMps.value)) {
         return {false, RunPhaseConfigError::NonFiniteValue};
     }
     if (config.maximumOptionalDelayS.value < 0.0) {
@@ -432,6 +463,14 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
     // a standstill; the floor exists so the plan never crawls.
     if (!(config.minimumPlannedCruiseMps.value > 0.0)) {
         return {false, RunPhaseConfigError::NonPositiveMinimumCruise};
+    }
+    // A phase ceiling must be a positive speed: the phases it belongs to carry
+    // travel, and a zero (or negative) ceiling would configure a standstill the
+    // run cannot complete. The shaper itself accepts an active zero as a legal
+    // request for no shaped magnitude; the run policy is stricter on purpose.
+    if (!(config.approachCeilingMps.value > 0.0) || !(config.captureCeilingMps.value > 0.0) ||
+        !(config.pushCeilingMps.value > 0.0)) {
+        return {false, RunPhaseConfigError::NonPositiveStrategyCeiling};
     }
     if (!validateBottleEvidenceConfig(config.bottleEvidence).ok) {
         return {false, RunPhaseConfigError::BottleEvidenceNotUsable};
@@ -448,6 +487,46 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         return {false, RunPhaseConfigError::StopVerificationNotUsable};
     }
     return {true, RunPhaseConfigError::None};
+}
+
+// The strategy velocity ceiling the run policy applies to one phase.
+//
+// Competition strategy is allowed to slow the three bottle phases - Approach,
+// Capture and Push - and this is the one mapping from the phase the run itself
+// named onto the ceiling its configuration carries for that phase. It decides
+// nothing: the state machine never reads the ceilings, the vehicle layer hands
+// the result to `MotionProfile`, and every other phase (the delay, the ramps,
+// the brake, the reverse leg) is explicitly inactive - so a stop, a reversal or
+// the final approach is never shaped by a bottle-phase ceiling, and no ceiling
+// can reach the one-way reversal street.
+//
+// The ceilings are `Sourced` and validated with the rest of the run policy: while
+// any of them is not `Measured`, `validateRunPhaseConfig()` refuses and no run can
+// be announced or armed, so a placeholder phase ceiling is unusable rather than
+// quietly ignored.
+inline StrategyVelocityCeiling strategyVelocityCeilingForPhase(const RunPhaseConfig& config,
+                                                               RunPhase phase) {
+    switch (phase) {
+        case RunPhase::Approach:
+            return activeStrategyVelocityCeiling(config.approachCeilingMps.value);
+        case RunPhase::Capture:
+            return activeStrategyVelocityCeiling(config.captureCeilingMps.value);
+        case RunPhase::Push:
+            return activeStrategyVelocityCeiling(config.pushCeilingMps.value);
+        case RunPhase::Idle:
+        case RunPhase::ParameterValid:
+        case RunPhase::Armed:
+        case RunPhase::OptionalDelay:
+        case RunPhase::ForwardDecel:
+        case RunPhase::BrakeZeroSpeed:
+        case RunPhase::Reverse:
+        case RunPhase::FinalApproach:
+        case RunPhase::FinalBrake:
+        case RunPhase::Done:
+        case RunPhase::Fault:
+            return inactiveStrategyVelocityCeiling();
+    }
+    return inactiveStrategyVelocityCeiling();
 }
 
 // The deliberate pre-travel delay a *specific* announcement may spend, in

@@ -76,11 +76,16 @@ ev::BottleEvidenceConfig fixtureBottleConfig() {
 // Fixture policy: a 0.2 s stop verification, a 3 s reversal bound, phase bounds
 // long enough that only the test that starves a phase sees them, and a
 // planned-cruise floor the plan tests can build on.
+// The three bottle-phase strategy ceilings are fixture values like every other
+// number here: measured so the production validator accepts them, and no claim
+// about any vehicle. `0.30` is deliberately unrelated to the fixture cruise, so
+// a test that cares can change one ceiling and see only its own phase move.
 ev::RunPhaseConfig phaseConfig(double maximumOptionalDelayS) {
     return ev::RunPhaseConfig(
         measured(maximumOptionalDelayS), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
         measured(5.0), measured(5.0), measured(1.0),
-        stopConfig(measured(0.05), measured(0.2)), measured(0.10), fixtureBottleConfig());
+        stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
+        measured(0.30), fixtureBottleConfig());
 }
 
 ev::ReversalConfig reversalConfig() {
@@ -420,7 +425,7 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     const ev::RunPhaseConfig placeholderDelay = ev::RunPhaseConfig(
         provisional(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
         measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
-        fixtureBottleConfig());
+        measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(placeholderDelay, reversalConfig(), 1000U);
     TEST_ASSERT_FALSE(harness.machine.configUsable());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
@@ -644,8 +649,8 @@ void test_a_bound_below_a_millisecond_expires_rather_than_never(void) {
     const ev::RunPhaseConfig shortBounds =
         ev::RunPhaseConfig(measured(0.0), measured(0.0005), measured(1.0), measured(5.0),
                            measured(5.0), measured(5.0), measured(5.0), measured(1.0),
-                           stopConfig(measured(0.05), measured(0.2)), measured(0.10),
-                           fixtureBottleConfig());
+                           stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30),
+                           measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(shortBounds, reversalConfig(), 1000U);
     announceValidRun(harness);
     TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));
@@ -1423,7 +1428,7 @@ void test_cited_rule_derived_optional_delay_passes(void) {
     const ev::RunPhaseConfig config(
         citedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
         measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
-        measured(0.10), fixtureBottleConfig());
+        measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
     ev::CompetitionStateMachine machine(config, reversalConfig());
     TEST_ASSERT_TRUE(machine.configUsable());
@@ -1434,7 +1439,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     const ev::RunPhaseConfig provisionalConfig(
         provisional(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
         measured(5.0), measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
-        measured(0.10), fixtureBottleConfig());
+        measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
                           static_cast<int>(ev::validateRunPhaseConfig(provisionalConfig).error));
@@ -1446,13 +1451,89 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     const ev::RunPhaseConfig uncitedConfig(
         uncitedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
         measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
-        measured(0.10), fixtureBottleConfig());
+        measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(uncitedConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
                           static_cast<int>(ev::validateRunPhaseConfig(uncitedConfig).error));
 
     // A measured bound still passes, so the fix did not narrow the old path.
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(phaseConfig(1.0)).ok);
+}
+
+// The bottle-phase strategy ceilings are the run policy's per-phase speeds, and
+// the run layer selects one by the phase the run itself named. This pins the
+// mapping and its limits: only Approach/Capture/Push carry a ceiling, and every
+// other phase is explicitly without one, so a ramp, a stop or the reverse leg is
+// never shaped by a bottle-phase ceiling.
+void test_the_bottle_phase_ceilings_are_selected_by_phase(void) {
+    const ev::RunPhaseConfig config(
+        measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(0.11), measured(0.22), measured(0.33), fixtureBottleConfig());
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
+
+    const ev::StrategyVelocityCeiling approach =
+        ev::strategyVelocityCeilingForPhase(config, ev::RunPhase::Approach);
+    TEST_ASSERT_TRUE(approach.active);
+    TEST_ASSERT_TRUE(approach.velocityMps == 0.11);
+
+    const ev::StrategyVelocityCeiling capture =
+        ev::strategyVelocityCeilingForPhase(config, ev::RunPhase::Capture);
+    TEST_ASSERT_TRUE(capture.active);
+    TEST_ASSERT_TRUE(capture.velocityMps == 0.22);
+
+    const ev::StrategyVelocityCeiling push =
+        ev::strategyVelocityCeilingForPhase(config, ev::RunPhase::Push);
+    TEST_ASSERT_TRUE(push.active);
+    TEST_ASSERT_TRUE(push.velocityMps == 0.33);
+
+    const ev::RunPhase ceilinglessPhases[] = {
+        ev::RunPhase::Idle,          ev::RunPhase::ParameterValid, ev::RunPhase::Armed,
+        ev::RunPhase::OptionalDelay, ev::RunPhase::ForwardDecel,  ev::RunPhase::BrakeZeroSpeed,
+        ev::RunPhase::Reverse,       ev::RunPhase::FinalApproach,  ev::RunPhase::FinalBrake,
+        ev::RunPhase::Done,          ev::RunPhase::Fault};
+    for (ev::RunPhase phase : ceilinglessPhases) {
+        const ev::StrategyVelocityCeiling ceiling =
+            ev::strategyVelocityCeilingForPhase(config, phase);
+        TEST_ASSERT_FALSE(ceiling.active);
+        TEST_ASSERT_TRUE(ceiling.velocityMps == 0.0);
+    }
+}
+
+// Every production bottle-phase ceiling is a Provisional placeholder today, so
+// the whole run policy refuses and the ceilings are unusable: no run can be
+// announced or armed on them. These are the refusals the bottle-phase
+// measurements must earn their way past (P-H8), and no value may be guessed in
+// the meantime to make a run move.
+void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
+    // Provisional provenance: refused before anything is sequenced.
+    const ev::RunPhaseConfig provisionalCeilings(
+        measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        provisional(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
+    TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalCeilings).ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
+                          static_cast<int>(ev::validateRunPhaseConfig(provisionalCeilings).error));
+    ev::CompetitionStateMachine placeholderMachine(provisionalCeilings, reversalConfig());
+    TEST_ASSERT_FALSE(placeholderMachine.configUsable());
+
+    // A measured ceiling that is not a positive speed is refused: the phases it
+    // belongs to carry travel, and a zero ceiling would be a standstill the run
+    // cannot complete.
+    const ev::RunPhaseConfig zeroCeiling(
+        measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(0.0), measured(0.30), measured(0.30), fixtureBottleConfig());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonPositiveStrategyCeiling),
+                          static_cast<int>(ev::validateRunPhaseConfig(zeroCeiling).error));
+
+    // A NaN ceiling is told apart from a non-positive one.
+    const ev::RunPhaseConfig nanCeiling(
+        measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(0.30), measured(std::nan("")), measured(0.30), fixtureBottleConfig());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonFiniteValue),
+                          static_cast<int>(ev::validateRunPhaseConfig(nanCeiling).error));
 }
 
 int main(int, char**) {
@@ -1498,5 +1579,7 @@ int main(int, char**) {
     RUN_TEST(test_reversal_refusals_map_to_faults);
     RUN_TEST(test_cited_rule_derived_optional_delay_passes);
     RUN_TEST(test_uncited_and_provisional_optional_delay_fail);
+    RUN_TEST(test_the_bottle_phase_ceilings_are_selected_by_phase);
+    RUN_TEST(test_a_placeholder_bottle_phase_ceiling_is_unusable);
     return UNITY_END();
 }

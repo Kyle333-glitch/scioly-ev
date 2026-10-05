@@ -23,6 +23,14 @@ namespace ev {
 //   vehicle could still stop inside the remaining distance, using the caller's
 //   deceleration limit and the caller's measured brake offset. As the remaining
 //   distance shrinks the cap shrinks with it, so the target can only fall.
+// * Optional strategy ceiling: the run strategy may place one extra ceiling on
+//   the target magnitude for the phase it is in (`StrategyVelocityCeiling`,
+//   supplied per cycle). It joins the desired-magnitude calculation *before* the
+//   rate limits - desired = min(cruise ceiling, distance taper, strategy
+//   ceiling) - so it can only tighten a target, never raise one, and a sudden
+//   reduction is still ramped down at the deceleration limit instead of
+//   stepping. An inactive ceiling changes nothing, and an active malformed one
+//   refuses the step.
 // * Rate-limited ramping: the target magnitude never changes faster than the
 //   configured acceleration limit going up or the deceleration limit coming
 //   down, regardless of how the inputs jump. A commanded reversal is ramped to
@@ -45,6 +53,10 @@ namespace ev {
 //   shaping value is written down here - with one exception: the cruise may be
 //   a cited `ValueSource::Derived` plan output (`cruiseProvenanceIsEstablished()`),
 //   because the run's timing plan computes it from measured inputs (D35).
+//   The optional strategy ceiling is the module's one non-`Sourced` input: it is
+//   a run-strategy choice, conveyed explicitly as active or inactive, and the
+//   phase configuration that produces it (`RunPhaseConfig`) is where its
+//   provenance is validated.
 // * It has no friction, motor, driver or battery model. The only physics in it
 //   are the kinematic relations between distance, speed, acceleration and time,
 //   all evaluated with caller-supplied limits.
@@ -733,16 +745,101 @@ inline MotionProfileLimitsValidation validateMotionProfileLimits(
     return {true, MotionProfileLimitsError::None};
 }
 
+// ---------------------------------------------------------------------------
+// The optional strategy ceiling
+// ---------------------------------------------------------------------------
+//
+// Competition strategy may want a phase of the run - the bottle approach, the
+// capture, the push - travelled slower than whatever the cruise ceiling and the
+// distance taper currently ask for. That is one number for the cycle, and it
+// belongs to the shaping input rather than to the limits: the limits describe the
+// vehicle and are selected by direction, while a phase ceiling is a run-strategy
+// choice that changes as the run advances through its phases.
+//
+// It is deliberately explicit about being optional. `active == false` is the
+// value that changes nothing, and it is stated rather than implied: a ceiling of
+// zero is a legitimate ACTIVE value (it asks for no shaped magnitude at all), so
+// "zero" cannot double as "no ceiling". There is no default constructor and no
+// silent fallback.
+//
+// The shaper's contract: an active ceiling participates in the desired magnitude
+// BEFORE the acceleration/deceleration rate limits - desired = min(cruise
+// ceiling, distance taper, strategy ceiling) - so it can only tighten a target
+// and can never raise one, and a sudden reduction is a desired value the existing
+// deceleration limit ramps down instead of a target step. An ACTIVE ceiling that
+// is not a finite nonnegative number fails closed: the shaping step is refused
+// (zero target) rather than shaped as if the ceiling were absent.
+struct StrategyVelocityCeiling {
+    constexpr StrategyVelocityCeiling(bool active_, double velocityMps_)
+        : active(active_), velocityMps(velocityMps_) {}
+
+    // False means no ceiling is supplied this cycle and shaping is untouched.
+    bool active;
+
+    // The ceiling, metres per second, when active. An inactive ceiling carries
+    // exactly 0.0, so an accidental read cannot look like a stated ceiling.
+    double velocityMps;
+};
+
+// No default constructor: whether a phase is slowed is a decision the caller
+// states, not something a type may assume.
+static_assert(!std::is_default_constructible<StrategyVelocityCeiling>::value,
+              "a strategy ceiling must state whether it is active");
+
+// The ceiling that changes nothing: no strategy limit is in force this cycle.
+inline constexpr StrategyVelocityCeiling inactiveStrategyVelocityCeiling() {
+    return StrategyVelocityCeiling(false, 0.0);
+}
+
+// A ceiling of `velocityMps` metres per second. Zero is legal (it asks for no
+// shaped magnitude); a negative or non-finite value is caught by
+// `validateStrategyVelocityCeiling()` when the shaper runs.
+inline constexpr StrategyVelocityCeiling activeStrategyVelocityCeiling(double velocityMps) {
+    return StrategyVelocityCeiling(true, velocityMps);
+}
+
+enum class StrategyVelocityCeilingError : uint8_t {
+    None = 0,
+    NonFiniteValue,  // active and NaN or infinite
+    NegativeValue,   // active and below zero
+};
+
+struct StrategyVelocityCeilingValidation {
+    // Invariant: error == None exactly when ok is true.
+    bool ok;
+    StrategyVelocityCeilingError error;
+};
+
+// Inactive is always valid: it is the absence of a ceiling, not a ceiling of
+// zero. An active ceiling must be a finite number that is not negative; a
+// nonnegative value including zero is legal.
+inline StrategyVelocityCeilingValidation validateStrategyVelocityCeiling(
+    const StrategyVelocityCeiling& ceiling) {
+    if (!ceiling.active) {
+        return {true, StrategyVelocityCeilingError::None};
+    }
+    if (!std::isfinite(ceiling.velocityMps)) {
+        return {false, StrategyVelocityCeilingError::NonFiniteValue};
+    }
+    if (ceiling.velocityMps < 0.0) {
+        return {false, StrategyVelocityCeilingError::NegativeValue};
+    }
+    return {true, StrategyVelocityCeilingError::None};
+}
+
 // Per-cycle inputs. No default constructor: an unstated travel is not a travel.
 struct MotionProfileInputs {
     constexpr MotionProfileInputs(MotionProfileIntent intent_, MotionDirection direction_,
                                   double remainingDistanceM_, double currentTargetVelocityMps_,
-                                  uint32_t dtMs_)
+                                  uint32_t dtMs_,
+                                  StrategyVelocityCeiling strategyCeiling_ =
+                                      inactiveStrategyVelocityCeiling())
         : intent(intent_),
           direction(direction_),
           remainingDistanceM(remainingDistanceM_),
           currentTargetVelocityMps(currentTargetVelocityMps_),
-          dtMs(dtMs_) {}
+          dtMs(dtMs_),
+          strategyCeiling(strategyCeiling_) {}
 
     // What the run is asking for this cycle.
     MotionProfileIntent intent;
@@ -773,6 +870,15 @@ struct MotionProfileInputs {
     // current target's sign, the hold collapses to exactly zero instead of
     // handing back a target in the direction the run has just left.
     uint32_t dtMs;
+
+    // The optional strategy ceiling for this cycle (`StrategyVelocityCeiling`
+    // above). Inactive changes nothing; active can only lower the desired
+    // magnitude, before the rate limits, and an active malformed value refuses
+    // the step (`InvalidStrategyCeiling`) instead of being ignored. The default
+    // is the explicit inactive value, never a silently chosen ceiling: a caller
+    // that states nothing gets exactly the shaping that existed before phase
+    // ceilings, and a caller that wants one states it.
+    StrategyVelocityCeiling strategyCeiling;
 };
 
 // Why the target is what it is. Diagnostic only: the target is the output.
@@ -784,6 +890,7 @@ enum class MotionProfileStatus : uint8_t {
     LimitsAreNotUsable,     // not Measured, or malformed limits: no target is shaped
     InvalidDistance,        // non-finite or negative remaining distance
     InvalidTarget,          // non-finite current target
+    InvalidStrategyCeiling, // the active strategy ceiling is non-finite or negative
     TimeDidNotAdvance,      // dtMs == 0: the previous target is held, or dropped to zero when the requested direction contradicts its sign
 };
 
@@ -800,6 +907,7 @@ enum class MotionProfilePhase : uint8_t {
 enum class MotionProfileLimit : uint8_t {
     None = 0,        // no ceiling applies (a held or refused target)
     CruiseCeiling,   // the cruise/velocity ceiling is what the target sits at
+    StrategyCeiling, // the run strategy's phase ceiling is what the target sits at
     DistanceTaper,   // the remaining-distance taper is what caps the target
     RampLimit,       // the acceleration/deceleration rate limit is what caps it
     BrakeOffset,     // the brake offset reaches the target point
@@ -811,7 +919,8 @@ struct MotionProfileCommand {
     constexpr MotionProfileCommand(double targetVelocityMps_, MotionProfileStatus status_,
                                    MotionProfilePhase phase_, MotionProfileLimit binding_,
                                    double cruiseCeilingMps_, double taperCeilingMps_,
-                                   double accelCeilingMps_, double decelCeilingMps_)
+                                   double accelCeilingMps_, double decelCeilingMps_,
+                                   double strategyCeilingMps_, bool strategyCeilingActive_)
         : targetVelocityMps(targetVelocityMps_),
           status(status_),
           phase(phase_),
@@ -819,7 +928,9 @@ struct MotionProfileCommand {
           cruiseCeilingMps(cruiseCeilingMps_),
           taperCeilingMps(taperCeilingMps_),
           accelCeilingMps(accelCeilingMps_),
-          decelCeilingMps(decelCeilingMps_) {}
+          decelCeilingMps(decelCeilingMps_),
+          strategyCeilingMps(strategyCeilingMps_),
+          strategyCeilingActive(strategyCeilingActive_) {}
 
     // Signed target velocity in the command convention, metres per second. 0.0
     // means "no powered motion is being asked for", which is the only thing this
@@ -831,14 +942,29 @@ struct MotionProfileCommand {
     MotionProfileLimit binding;
 
     // The ceilings behind the decision, reported for telemetry and for
-    // comparing candidate configurations. All four are 0.0 on a refusal.
+    // comparing candidate configurations. All five are 0.0 on a refusal, and the
+    // strategy ceiling is additionally inactive there.
     double cruiseCeilingMps;  // the lower of cruiseVelocityMps and velocityCeilingMps
     double taperCeilingMps;   // the taper, capped by cruiseCeilingMps
     double accelCeilingMps;   // current magnitude plus the acceleration allowed in dtMs
     double decelCeilingMps;   // current magnitude minus the deceleration allowed in dtMs
+
+    // The strategy ceiling supplied this cycle, metres per second, and whether a
+    // ceiling was supplied at all. 0.0 with `strategyCeilingActive == false` means
+    // "no ceiling"; 0.0 with `true` is a legal active ceiling of zero - which is
+    // why the flag exists rather than "0.0 means none". The value is reported as
+    // supplied (validated); whether it actually tightened the target is
+    // `binding == MotionProfileLimit::StrategyCeiling`.
+    double strategyCeilingMps;
+    bool strategyCeilingActive;
 };
 
 // The caller-held target velocity the stateless shaper needs.
+//
+// The optional strategy ceiling defaults to inactive (`MotionProfileInputs`), so
+// the baseline shaping is unchanged for every caller that does not use strategy
+// ceilings, and the explicit `inactiveStrategyVelocityCeiling()` remains
+// available for a caller that wants to state the absence.
 //
 // MotionProfile holds no state, so the previous target is an argument on every
 // call. This holder is that argument and nothing else: its zero value is exactly
@@ -875,9 +1001,11 @@ public:
     // Builds this cycle's inputs with the held target already filled in, so the
     // handoff cannot be passed by hand.
     MotionProfileInputs inputsFor(MotionProfileIntent intent, MotionDirection direction,
-                                  double remainingDistanceM, uint32_t dtMs) const {
+                                  double remainingDistanceM, uint32_t dtMs,
+                                  StrategyVelocityCeiling strategyCeiling =
+                                      inactiveStrategyVelocityCeiling()) const {
         return MotionProfileInputs(intent, direction, remainingDistanceM, targetVelocityMps_,
-                                   dtMs);
+                                   dtMs, strategyCeiling);
     }
 
 private:
@@ -914,17 +1042,26 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
     if (!validateMotionProfileLimits(limits).ok) {
         return MotionProfileCommand{0.0, MotionProfileStatus::LimitsAreNotUsable,
                                     MotionProfilePhase::Stopped, MotionProfileLimit::None, 0.0, 0.0,
-                                    0.0, 0.0};
+                                    0.0, 0.0, 0.0, false};
     }
     if (!std::isfinite(inputs.remainingDistanceM) || inputs.remainingDistanceM < 0.0) {
         return MotionProfileCommand{0.0, MotionProfileStatus::InvalidDistance,
                                     MotionProfilePhase::Stopped, MotionProfileLimit::None, 0.0, 0.0,
-                                    0.0, 0.0};
+                                    0.0, 0.0, 0.0, false};
     }
     if (!std::isfinite(inputs.currentTargetVelocityMps)) {
         return MotionProfileCommand{0.0, MotionProfileStatus::InvalidTarget,
                                     MotionProfilePhase::Stopped, MotionProfileLimit::None, 0.0, 0.0,
-                                    0.0, 0.0};
+                                    0.0, 0.0, 0.0, false};
+    }
+    // A malformed ACTIVE strategy ceiling is a refusal, never an excuse to shape
+    // as if the ceiling were absent: a strategy that asked for a slower phase must
+    // not get a faster one because its own input was unreadable. An inactive
+    // ceiling is always valid and changes nothing.
+    if (!validateStrategyVelocityCeiling(inputs.strategyCeiling).ok) {
+        return MotionProfileCommand{0.0, MotionProfileStatus::InvalidStrategyCeiling,
+                                    MotionProfilePhase::Stopped, MotionProfileLimit::None, 0.0, 0.0,
+                                    0.0, 0.0, 0.0, false};
     }
 
     const double cruiseCeilingMps = limits.cruiseVelocityMps.value < limits.velocityCeilingMps.value
@@ -950,6 +1087,14 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
     const double cappedTaperCeilingMps =
         taperCeilingMps < cruiseCeilingMps ? taperCeilingMps : cruiseCeilingMps;
 
+    // The strategy ceiling joins the desired magnitude BEFORE the rate limits: it
+    // can only lower what the geometry asks for, and a sudden reduction produces
+    // a desired value the deceleration ceiling below ramps down - never a target
+    // step. An active zero ceiling therefore reaches exactly zero through the
+    // same ramp a stop request takes.
+    const bool strategyCeilingBinds =
+        inputs.strategyCeiling.active && inputs.strategyCeiling.velocityMps < cappedTaperCeilingMps;
+
     if (inputs.dtMs == 0U) {
         // No time passed. The target is held exactly as it was, even if the
         // geometry now points elsewhere: a changed target with no elapsed time
@@ -972,7 +1117,9 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
                                     MotionProfileStatus::TimeDidNotAdvance,
                                     profilePhaseForMagnitude(heldMagnitudeMps, currentMagnitudeMps),
                                     MotionProfileLimit::None, cruiseCeilingMps,
-                                    cappedTaperCeilingMps, heldMagnitudeMps, heldMagnitudeMps};
+                                    cappedTaperCeilingMps, heldMagnitudeMps, heldMagnitudeMps,
+                                    inputs.strategyCeiling.velocityMps,
+                                    inputs.strategyCeiling.active};
     }
 
     const double dtS = static_cast<double>(inputs.dtMs) / 1000.0;
@@ -986,6 +1133,9 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
     } else if (withinBrakeOffset) {
         desiredMagnitudeMps = 0.0;
         desiredBinding = MotionProfileLimit::BrakeOffset;
+    } else if (strategyCeilingBinds) {
+        desiredMagnitudeMps = inputs.strategyCeiling.velocityMps;
+        desiredBinding = MotionProfileLimit::StrategyCeiling;
     } else {
         desiredMagnitudeMps = cappedTaperCeilingMps;
         desiredBinding = cappedTaperCeilingMps < cruiseCeilingMps
@@ -1037,7 +1187,9 @@ inline MotionProfileCommand nextTargetVelocity(const MotionProfileInputs& inputs
     return MotionProfileCommand{targetVelocityMps, status,
                                 profilePhaseForMagnitude(magnitudeMps, currentMagnitudeMps),
                                 binding, cruiseCeilingMps, cappedTaperCeilingMps,
-                                accelCeilingMps, decelCeilingMps};
+                                accelCeilingMps, decelCeilingMps,
+                                inputs.strategyCeiling.velocityMps,
+                                inputs.strategyCeiling.active};
 }
 
 // Whether a shaped target points along the run's commanded leg.
