@@ -9,9 +9,15 @@
 #include <RunConfig.h>
 #include <Units.h>
 
-// Contract tests for the run axis: the announced geometry mapped from
-// RunConfig, the tick-sign polarity applied exactly once, and the two remaining
-// distances the run layer consumes.
+// Contract tests for the run axis: the announced *rule* geometry mapped from
+// RunConfig, the tick-sign polarity applied exactly once, and the generic
+// remaining-distance arithmetic that takes an explicit caller-supplied target.
+//
+// S2 separates official rule geometry from vehicle execution geometry. Every
+// landmark below is a rule landmark (Target Point, Bottle Start Point, Bottle
+// Line); no physical forward stop target exists here and none is invented. The
+// one pre-S3/S4 compatibility mapping for the forward leg's execution target is
+// pinned as compatibility behaviour, never as physical truth.
 //
 // Every value below is a test fixture, not a measurement and not an announced
 // competition configuration. A passing test is arithmetic verification only: it
@@ -29,11 +35,13 @@ static_assert(!std::is_default_constructible<ev::RunAxisPosition>::value,
 // without a check.
 static_assert(static_cast<int>(ev::RunAxisStatus::Usable) == 0,
               "the usable status must stay the zero value");
-// The turn-around is the Target Point plus the announced Bottle Line Distance.
-static_assert(ev::RunAxisGeometry(5.0, 1.0, 2.0).turnAroundPositionM() == 6.0,
-              "the turn-around must be the Target Point plus the Bottle Line Distance");
-static_assert(ev::RunAxisGeometry(0.0, 0.0, 0.0).turnAroundPositionM() == 0.0,
-              "the zero geometry must be exactly the axis origin");
+// The Bottle Line is the official rule landmark: the Target Point plus the
+// announced Bottle Line Distance (rule 8.j). It is not the vehicle's physical
+// turnaround and this file asserts no such thing.
+static_assert(ev::RunAxisGeometry(5.0, 1.0, 2.0).bottleLinePositionM() == 6.0,
+              "the Bottle Line must be the Target Point plus the Bottle Line Distance");
+static_assert(ev::RunAxisGeometry(0.0, 0.0, 0.0).bottleLinePositionM() == 0.0,
+              "the zero geometry's Bottle Line must be exactly the axis origin");
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -65,6 +73,15 @@ ev::Sourced<ev::MotionDirection> placeholderPolarity(ev::MotionDirection directi
     return ev::Sourced<ev::MotionDirection>(direction, ev::ValueSource::Provisional);
 }
 
+// The Regional fixture announcement: 5.00 m Target Distance, 1.00 m Bottle Line
+// Distance, the Regional 2.0 m bottle placement. Its rule landmarks are the
+// Target Point at 5.0 m, the Bottle Start Point at 2.0 m and the Bottle Line at
+// 6.0 m.
+ev::RunAxisGeometry regionalGeometry() {
+    return ev::RunAxisGeometry::fromRunConfig(
+        ev::RunConfig(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0));
+}
+
 void expectPosition(ev::RunAxisStatus expectedStatus, bool expectedUsable,
                     double expectedPositionM, const ev::RunAxisPosition& position) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(expectedStatus), static_cast<int>(position.status));
@@ -78,7 +95,7 @@ void expectPosition(ev::RunAxisStatus expectedStatus, bool expectedUsable,
 
 }  // namespace
 
-// --- The announced geometry --------------------------------------------------
+// --- The announced rule geometry ---------------------------------------------
 
 void test_the_announced_configuration_maps_onto_the_run_axis(void) {
     // The Regional fixture announcement: 5.00 m Target Distance, 1.00 m Bottle
@@ -86,27 +103,31 @@ void test_the_announced_configuration_maps_onto_the_run_axis(void) {
     const ev::RunConfig config(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0);
     const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(config);
 
+    // The three rule landmarks, each on its own.
     TEST_ASSERT_TRUE(geometry.targetPointPositionM == 5.0);
-    TEST_ASSERT_TRUE(geometry.bottleLineDistanceM == 1.0);
     TEST_ASSERT_TRUE(geometry.bottleStartPositionM == 2.0);
-    TEST_ASSERT_TRUE(geometry.turnAroundPositionM() == 6.0);
+    TEST_ASSERT_TRUE(geometry.bottleLineDistanceM == 1.0);
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() == 6.0);
 }
 
 void test_a_different_announcement_moves_every_position_with_it(void) {
     // A State-grid announcement: 5.25 m and 1.25 m, with the State 3.0 m bottle
-    // placement. The turn-around is 6.50 m, not the 6.00 m of the Regional case.
+    // placement. The Bottle Line is 6.50 m, not the 6.00 m of the Regional case.
     const ev::RunConfig config(ev::TournamentLevel::State, 5.25, 10.0, 1.25, 3.0);
     const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(config);
 
     TEST_ASSERT_TRUE(geometry.targetPointPositionM == 5.25);
-    TEST_ASSERT_TRUE(geometry.bottleLineDistanceM == 1.25);
     TEST_ASSERT_TRUE(geometry.bottleStartPositionM == 3.0);
-    TEST_ASSERT_TRUE(geometry.turnAroundPositionM() == 6.5);
+    TEST_ASSERT_TRUE(geometry.bottleLineDistanceM == 1.25);
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() == 6.5);
 }
 
-void test_the_turn_around_is_the_target_plus_the_announced_bottle_line(void) {
+void test_the_bottle_line_is_the_target_plus_the_announced_bottle_line_distance(void) {
     const ev::RunAxisGeometry geometry(7.0, 2.5, 4.0);
-    TEST_ASSERT_TRUE(geometry.turnAroundPositionM() == 9.5);
+    TEST_ASSERT_TRUE(geometry.targetPointPositionM == 7.0);
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() == 9.5);
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() ==
+                     geometry.targetPointPositionM + geometry.bottleLineDistanceM);
 }
 
 // --- Position on the run axis ------------------------------------------------
@@ -217,45 +238,84 @@ void test_the_usable_invariant_holds_across_the_input_combinations(void) {
     }
 }
 
-// --- Remaining distances ------------------------------------------------------
+// --- Explicit-target remaining distance --------------------------------------
 
-void test_the_remaining_distance_to_the_target_point_is_signed_by_the_leg(void) {
-    const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(
-        ev::RunConfig(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0));
+void test_the_generic_arithmetic_uses_the_explicit_target_not_the_bottle_line(void) {
+    // The rule geometry is 5.0 m Target Point / 6.0 m Bottle Line, and it must
+    // not leak into the arithmetic: the caller names the target.
+    const ev::RunAxisGeometry geometry = regionalGeometry();
+    TEST_ASSERT_TRUE(geometry.targetPointPositionM == 5.0);
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() == 6.0);
 
-    // Forward leg: positive while short of the point, zero at it, negative past
+    const double positionM = 4.0;
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(geometry.targetPointPositionM, positionM, true) == 1.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(geometry.bottleLinePositionM(), positionM, true) == 2.0);
+    // A target that is neither landmark is still honoured exactly, so the Bottle
+    // Line (or any other landmark) cannot secretly stand in for it.
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(7.0, positionM, true) == 3.0);
+}
+
+void test_two_different_explicit_targets_give_two_different_remaining_distances(void) {
+    // Same position, same rule geometry, two caller-supplied targets: the answer
+    // tracks the target the caller named.
+    const ev::RunAxisGeometry geometry = regionalGeometry();
+    const double positionM = 4.0;
+
+    const double toNearTargetM = ev::remainingDistanceTo(5.0, positionM, true);
+    const double toFarTargetM = ev::remainingDistanceTo(6.5, positionM, true);
+    TEST_ASSERT_TRUE(toNearTargetM == 1.0);
+    TEST_ASSERT_TRUE(toFarTargetM == 2.5);
+    TEST_ASSERT_TRUE(toFarTargetM != toNearTargetM);
+    // The rule geometry is unchanged by either call.
+    TEST_ASSERT_TRUE(geometry.bottleLinePositionM() == 6.0);
+}
+
+void test_the_signed_remaining_distance_follows_the_leg(void) {
+    // Forward leg: positive while short of the target, zero at it, negative past
     // it - an overshoot is evidence, so it is not clamped away.
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, true, 4.0) == 1.0);
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, true, 5.0) == 0.0);
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, true, 5.5) == -0.5);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 4.0, true) == 1.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 5.0, true) == 0.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 5.5, true) == -0.5);
 
-    // Reverse leg: the same point, approached from the far side.
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, false, 5.5) == 0.5);
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, false, 5.0) == 0.0);
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, false, 4.5) == -0.5);
+    // Reverse leg: the same explicit target, approached from the far side.
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 5.5, false) == 0.5);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 5.0, false) == 0.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceTo(5.0, 4.5, false) == -0.5);
 }
 
-void test_the_leg_remaining_is_never_below_zero(void) {
-    const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(
-        ev::RunConfig(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0));
+void test_the_clamped_remaining_distance_is_never_below_zero(void) {
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 4.0, true) == 1.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 5.0, true) == 0.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 6.0, true) == 0.0);
 
-    // Forward leg ends at the turn-around, 6.0 m.
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, true, 5.0) == 1.0);
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, true, 6.0) == 0.0);
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, true, 7.0) == 0.0);
-
-    // Reverse leg ends at the Target Point, 5.0 m.
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, false, 6.5) == 1.5);
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, false, 5.0) == 0.0);
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, false, 4.0) == 0.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 6.5, false) == 1.5);
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 5.0, false) == 0.0);
+    TEST_ASSERT_TRUE(ev::remainingDistanceToClamped(5.0, 4.0, false) == 0.0);
 }
 
-void test_a_standstill_at_the_origin_has_the_whole_first_leg_ahead(void) {
-    const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(
-        ev::RunConfig(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0));
+// --- The temporary pre-S3/S4 compatibility seam -------------------------------
 
-    TEST_ASSERT_TRUE(ev::remainingToTargetM(geometry, true, 0.0) == 5.0);
-    TEST_ASSERT_TRUE(ev::legRemainingM(geometry, true, 0.0) == 6.0);
+void test_the_compatibility_seam_maps_the_forward_leg_onto_the_bottle_line_landmark(void) {
+    // This pins TEMPORARY pre-S3/S4 COMPATIBILITY BEHAVIOUR so that changing it
+    // is a deliberate act. It is NOT an assertion that the Bottle Line is the
+    // vehicle's physical turnaround, forward-leg endpoint or forward stop target.
+    const ev::RunAxisGeometry geometry = regionalGeometry();
+    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(geometry, true) ==
+                     geometry.bottleLinePositionM());
+    // The reverse leg's target is the rule Target Point and is not temporary.
+    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(geometry, false) ==
+                     geometry.targetPointPositionM);
+    // A different announcement moves the seam's forward target with the rule
+    // landmark it stands in for - the behaviour S3/S4 must replace.
+    const ev::RunAxisGeometry wider(5.0, 2.5, 2.0);
+    TEST_ASSERT_TRUE(ev::temporaryLegExecutionTargetM(wider, true) == 7.5);
+}
+
+void test_the_planned_travel_is_the_rule_course_out_and_back(void) {
+    // Forward out to the Bottle Line (6.0 m) then the reverse leg back to the
+    // Target Point (1.0 m): a rule quantity used to size the timing plan.
+    const ev::RunAxisGeometry geometry = regionalGeometry();
+    TEST_ASSERT_TRUE(ev::plannedTravelDistanceM(geometry) == 7.0);
 }
 
 int main(int, char**) {
@@ -263,7 +323,7 @@ int main(int, char**) {
 
     RUN_TEST(test_the_announced_configuration_maps_onto_the_run_axis);
     RUN_TEST(test_a_different_announcement_moves_every_position_with_it);
-    RUN_TEST(test_the_turn_around_is_the_target_plus_the_announced_bottle_line);
+    RUN_TEST(test_the_bottle_line_is_the_target_plus_the_announced_bottle_line_distance);
 
     RUN_TEST(test_a_positive_tick_delta_is_forward_travel_under_a_measured_forward_polarity);
     RUN_TEST(test_a_measured_reverse_polarity_turns_the_tick_sign_around);
@@ -274,9 +334,13 @@ int main(int, char**) {
     RUN_TEST(test_a_position_never_survives_an_unusable_scale);
     RUN_TEST(test_the_usable_invariant_holds_across_the_input_combinations);
 
-    RUN_TEST(test_the_remaining_distance_to_the_target_point_is_signed_by_the_leg);
-    RUN_TEST(test_the_leg_remaining_is_never_below_zero);
-    RUN_TEST(test_a_standstill_at_the_origin_has_the_whole_first_leg_ahead);
+    RUN_TEST(test_the_generic_arithmetic_uses_the_explicit_target_not_the_bottle_line);
+    RUN_TEST(test_two_different_explicit_targets_give_two_different_remaining_distances);
+    RUN_TEST(test_the_signed_remaining_distance_follows_the_leg);
+    RUN_TEST(test_the_clamped_remaining_distance_is_never_below_zero);
+
+    RUN_TEST(test_the_compatibility_seam_maps_the_forward_leg_onto_the_bottle_line_landmark);
+    RUN_TEST(test_the_planned_travel_is_the_rule_course_out_and_back);
 
     return UNITY_END();
 }

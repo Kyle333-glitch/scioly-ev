@@ -19,16 +19,17 @@ namespace ev {
 //
 // * The one production owner of the run-axis arithmetic the run layer needs:
 //
-//     - the announced geometry of a run, on a single axis measured in metres
-//       from the Start Point: the Target Point, the Bottle Start Point and the
-//       turn-around position (the Target Point plus the announced Bottle Line
-//       Distance, rule 8.j);
+//     - the announced *rule* geometry of a run, on a single axis measured in
+//       metres from the Start Point: the Target Point (rule 8.h), the Bottle
+//       Start Point (rule 7.c.ii.(5)) and the Bottle Line rule landmark (the
+//       Target Point plus the announced Bottle Line Distance, rule 8.j);
 //     - the vehicle's position on that axis from the production
 //       tick-to-distance conversion, with the measured tick-sign polarity
 //       applied exactly once;
-//     - the two remaining distances the run layer consumes: the remaining
-//       distance to the Target Point, and the remaining distance on the current
-//       leg.
+//     - the generic remaining-distance arithmetic the run layer consumes, which
+//       takes an explicit, caller-supplied target rather than choosing one
+//       itself; and the one temporary pre-S3/S4 compatibility mapping for the
+//       forward leg's execution target.
 //
 // * Pure arithmetic. No clock, no pin, no interrupt, no allocation, no
 //   filtering, and no decision about a run.
@@ -44,7 +45,7 @@ namespace ev {
 //   values are validated at the announcement boundary and then not kept, and no
 //   phase transition derives geometry from them. The run layer therefore has to
 //   hold them, and holding them without an owner is how two places start
-//   disagreeing about which end of the axis the turn-around is.
+//   disagreeing about where a rule landmark is.
 //   `RunAxisGeometry` is that owner, built from the announced `RunConfig`
 //   through one mapping.
 //
@@ -94,19 +95,26 @@ struct RunAxisGeometry {
     // Target Distance (rule 8.h).
     double targetPointPositionM;
 
-    // The announced Bottle Line Distance (rule 8.j): how far beyond the Target
-    // Point the forward travel is required to go.
+    // The announced Bottle Line Distance (rule 8.j): how far the Bottle Line
+    // landmark sits beyond the Target Point.
     double bottleLineDistanceM;
 
     // Position of the Bottle Start Point, metres from the Start Point (rule
     // 7.c.ii.(5)). Announced rather than derived; the run waits for the
-    // mechanism's contact evidence, not for this number.
+    // mechanism's contact evidence, not for this number. Official rule landmark.
     double bottleStartPositionM;
 
-    // The far end of the forward leg: the Target Point plus the Bottle Line
-    // Distance. Forward travel is required to reach it, and it is where the
-    // reverse leg starts from.
-    constexpr double turnAroundPositionM() const {
+    // Position of the **Bottle Line**, metres from the Start Point: the event's
+    // official rule landmark (rule 8.j), the Target Point plus the announced
+    // Bottle Line Distance.
+    //
+    // This is rule geometry only. It is **not** the vehicle's physical
+    // turn-around point, its forward-leg endpoint or its forward stop target -
+    // those are execution geometry, which the vehicle layer decides explicitly
+    // (S3's immutable `RunExecutionPlan`, S4's single forward stop target). The
+    // one pre-S3/S4 compatibility mapping that currently stands in for the
+    // forward execution target is `temporaryLegExecutionTargetM()` below.
+    constexpr double bottleLinePositionM() const {
         return targetPointPositionM + bottleLineDistanceM;
     }
 };
@@ -200,41 +208,72 @@ inline RunAxisPosition runAxisPositionM(int32_t originTicks, int32_t currentTick
     return RunAxisPosition(signedTravelM, true, RunAxisStatus::Usable);
 }
 
-// The whole travel an announced run covers, metres: the forward leg out to the
-// turn-around position (the Target Point plus the announced Bottle Line
-// Distance, rule 8.j) and the reverse leg back to the Target Point. This is the
-// distance a timing plan is sized against - the run must travel it, not just the
-// announced Target Distance - and it is derived from the announced geometry, so
-// there is no second, competing distance for a run's budget.
+// The whole rule-mandated travel an announced run covers, metres: forward out to
+// the Bottle Line rule landmark (rule 8.j) and back to the Target Point (rule
+// 8.h). This is the distance a timing plan is sized against - the run must
+// travel it, not just the announced Target Distance - and it is derived from the
+// announced rule geometry, so there is no second, competing distance for a run's
+// budget. It is a rule quantity used to size the plan, not an execution target.
 inline double plannedTravelDistanceM(const RunAxisGeometry& geometry) {
-    return geometry.turnAroundPositionM() + geometry.bottleLineDistanceM;
+    return geometry.bottleLinePositionM() + geometry.bottleLineDistanceM;
 }
 
-// Distance still to travel along the run axis to the Target Point, metres, on
-// the leg being travelled: positive while the point is still ahead, zero at it,
-// and negative once it has been passed.
+// Remaining distance from the current position to an **explicit,
+// caller-supplied target**, metres, along the leg being travelled: positive
+// while the target is still ahead, zero at it, and negative once it has been
+// passed.
+//
+// The target is an argument and is never chosen here. This is the generic
+// arithmetic the run layer consumes: a caller measuring to the Target Point
+// passes `targetPointPositionM`, and a caller measuring to the forward leg's
+// execution target passes whatever its execution plan named - so this arithmetic
+// cannot substitute a rule landmark (such as the Bottle Line) for the target a
+// consumer actually asked about.
 //
 // Deliberately not clamped. An overshoot is evidence, and clamping it to zero
 // would hide it from the caller and from a log, exactly as clamping a stale
 // number to something plausible would.
-inline double remainingToTargetM(const RunAxisGeometry& geometry, bool forwardLeg,
-                                 double positionM) {
-    return forwardLeg ? (geometry.targetPointPositionM - positionM)
-                      : (positionM - geometry.targetPointPositionM);
+inline double remainingDistanceTo(double targetPositionM, double currentPositionM,
+                                  bool forwardLeg) {
+    return forwardLeg ? (targetPositionM - currentPositionM)
+                      : (currentPositionM - targetPositionM);
 }
 
-// Distance still to travel to the end of the current leg, metres, never below
-// zero: the turn-around position on the forward leg, the Target Point on the
-// reverse leg.
+// The same explicit-target arithmetic, never below zero.
 //
 // This is the distance a travel taper is sized from. A leg that has finished its
 // distance reports exactly zero rather than a negative number, because a
 // negative "remaining" handed to a taper is arithmetic about a journey that no
 // longer exists.
-inline double legRemainingM(const RunAxisGeometry& geometry, bool forwardLeg, double positionM) {
-    const double remainingM = forwardLeg ? (geometry.turnAroundPositionM() - positionM)
-                                         : (positionM - geometry.targetPointPositionM);
+inline double remainingDistanceToClamped(double targetPositionM, double currentPositionM,
+                                         bool forwardLeg) {
+    const double remainingM = remainingDistanceTo(targetPositionM, currentPositionM, forwardLeg);
     return remainingM > 0.0 ? remainingM : 0.0;
+}
+
+// ===========================================================================
+// TEMPORARY PRE-S3/S4 COMPATIBILITY SEAM - S3/S4 MUST REMOVE THIS
+// ===========================================================================
+//
+// S2 separates official rule geometry from vehicle execution geometry. This is
+// the ONE place that preserves the old behaviour - the forward leg's execution
+// target is taken to be the Bottle Line rule landmark - so the firmware keeps
+// its current deterministic behaviour until S3's immutable `RunExecutionPlan`
+// and S4's single forward stop target land.
+//
+// It is a compatibility mapping, **not architecture truth**:
+//
+//   * it is not a claim that the Bottle Line is the vehicle's measured physical
+//     turn-around point, forward-leg endpoint or forward stop target;
+//   * it contains no calibration constant and invents no physical value;
+//   * the reverse leg's target is the rule Target Point and is not temporary.
+//
+// S3/S4: delete this function and have the consumers read the execution plan's
+// explicit forward stop target instead. Recorded as debt in `DEVELOPMENT_LOG.md`
+// (D39) and the S2 stage report.
+inline constexpr double temporaryLegExecutionTargetM(const RunAxisGeometry& geometry,
+                                                     bool forwardLeg) {
+    return forwardLeg ? geometry.bottleLinePositionM() : geometry.targetPointPositionM;
 }
 
 }  // namespace ev

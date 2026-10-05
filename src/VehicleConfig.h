@@ -175,7 +175,7 @@ constexpr double kPlannedMaximumOptionalDelayS = ev::rules2027::kTargetTimeMaxS;
 
 // Bottle-interaction placeholders: how far before the Bottle Start Point the
 // pusher is taken to touch the bottle, how far past that the bottle counts as
-// captured, and how far past the turn-around position the push must carry it.
+// captured, and how far past the Bottle Line position the push must carry it.
 // None of these is a mechanism measurement - the pusher's reach, the funnel's
 // capture length and where the bottle ends up relative to the line are exactly
 // what the bottle-integration protocol (P-H8) measures against independently

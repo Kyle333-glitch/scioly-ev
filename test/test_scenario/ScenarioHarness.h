@@ -114,7 +114,8 @@
 //     ev::runStopEffort()                    CompetitionStateMachine.h
 //     ev::runCommandNamesForwardLeg()        CompetitionStateMachine.h
 //     ev::RunAxisGeometry / runAxisPositionM()
-//     ev::remainingToTargetM() / legRemainingM()   RunAxis.h
+//     ev::remainingDistanceTo() / remainingDistanceToClamped()   RunAxis.h
+//     ev::temporaryLegExecutionTargetM()            RunAxis.h (pre-S3/S4 seam)
 //     ev::tickPolarityAgrees()               SafetyLimits.h
 //
 //   A change to any of those decisions changes the scenarios with it, which is
@@ -753,9 +754,14 @@ public:
         runAxisPositionM_ = runAxisPosition.positionM;
         const bool positionUsable = odometryReady.usable && runAxisPosition.usable;
         const double remainingToTargetM =
-            ev::remainingToTargetM(axisGeometry_, legForward_, runAxisPositionM_);
-        const double legRemainingM =
-            ev::legRemainingM(axisGeometry_, legForward_, runAxisPositionM_);
+            ev::remainingDistanceTo(axisGeometry_.targetPointPositionM, runAxisPositionM_,
+                                    legForward_);
+        // The forward leg's execution target comes from the one temporary
+        // pre-S3/S4 compatibility mapping; the reverse leg's is the rule Target
+        // Point. Mirrors the vehicle layer's wiring exactly.
+        const double legRemainingM = ev::remainingDistanceToClamped(
+            ev::temporaryLegExecutionTargetM(axisGeometry_, legForward_), runAxisPositionM_,
+            legForward_);
 
         // 4. The evidence packet the run policy consumes this cycle.
         ev::RunInputs inputs;
@@ -935,7 +941,7 @@ public:
     const ev::RunAxisGeometry& axisGeometry() const { return axisGeometry_; }
     double targetPointPositionM() const { return axisGeometry_.targetPointPositionM; }
     double bottleStartPositionM() const { return axisGeometry_.bottleStartPositionM; }
-    double turnAroundPositionM() const { return axisGeometry_.turnAroundPositionM(); }
+    double bottleLinePositionM() const { return axisGeometry_.bottleLinePositionM(); }
 
     // The tick reading the run's origin was taken at, i.e. run-axis position
     // zero. Exposed so a test can compute its own independent position oracle

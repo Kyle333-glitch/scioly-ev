@@ -5984,3 +5984,88 @@ were corrected to match. Historical log entries were not rewritten.
 - All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration/limit
   value remains `Provisional`; the two brake-offset numbers still require the P-H7
   physical characterization.
+
+---
+
+## D39 / S2 - 2026-10-05 - Rule geometry separated from execution geometry
+
+**Kind of change.** Software + documentation. S2 of the pack
+`EV-V5-current-to-competition-2026-10-04-v2`. This entry is the repository-side
+record of the S2 milestone; the full stage report is kept in the pack's local
+agent workspace (not committed). No physical fact was promoted, no hardware
+action was taken (no upload, no powered test, no measurement), and nothing was
+committed, merged, pushed or uploaded by this stage.
+
+**The problem.** `ev::RunAxisGeometry` conflated the event's official rule
+geometry with the vehicle's execution geometry: `turnAroundPositionM()` returned
+the Target Point plus the announced Bottle Line Distance and was named and
+treated as the vehicle's forward-leg endpoint and turn-around position, so the
+Bottle Line rule landmark was architecture-truth for the physical forward-stop
+target. Decision A separates the two.
+
+**What changed.**
+
+- `RunAxisGeometry` now owns **rule landmarks only**: `targetPointPositionM`
+  (rule 8.h), `bottleStartPositionM` (rule 7.c.ii.(5)) and the new
+  `bottleLinePositionM()` (rule 8.j, the Target Point plus the announced Bottle
+  Line Distance). `turnAroundPositionM()` is gone; the Bottle Line is documented
+  as an official rule landmark and explicitly **not** the vehicle's physical
+  turn-around, forward-leg endpoint or forward stop target.
+- The run-axis remaining-distance arithmetic is now generic and takes an
+  **explicit, caller-supplied target**: `ev::remainingDistanceTo(targetPositionM,
+  currentPositionM, forwardLeg)` (signed, deliberately unclamped) and
+  `ev::remainingDistanceToClamped(...)` (the taper distance, never negative). The
+  old geometry-coupled `remainingToTargetM()` / `legRemainingM()` were removed,
+  so the arithmetic can no longer choose an execution target, and it cannot
+  substitute a rule landmark (such as the Bottle Line) for the target a consumer
+  asked about.
+- `ev::deriveBottleEvidence()` consumes the Bottle Line rule landmark truthfully
+  (`geometry.bottleLinePositionM()`) for the push-complete position; its comments
+  now name the rule landmark rather than the "turn-around position".
+- `plannedTravelDistanceM()` is expressed from the rule landmarks; behaviour is
+  unchanged.
+
+**Temporary pre-S3/S4 compatibility seam (debt).**
+`ev::temporaryLegExecutionTargetM(geometry, forwardLeg)` in
+`lib/evcore/src/RunAxis.h` is the ONE place that preserves the old behaviour: the
+forward leg's execution target is taken to be the Bottle Line rule landmark (the
+reverse leg's target is the rule Target Point and is not temporary). It is a
+compatibility mapping, not a physical claim, and it contains no calibration
+constant. `src/VehicleRuntime.cpp` and the host scenario harness route their leg
+distance through it, so there is a single seam, not several copies.
+**S3/S4 must remove it**: S3 owns the immutable `RunExecutionPlan` and S4 owns the
+single forward physical stop target everywhere. **No physical forward-stop value
+was invented.**
+
+**Callers migrated.** `src/VehicleRuntime.cpp`,
+`test/test_scenario/ScenarioHarness.h`, `test/test_scenario/test_main.cpp`,
+`test/test_operator_policy/test_main.cpp`, `test/test_run_timing/test_main.cpp`,
+`test/test_bottle_evidence/test_main.cpp` (naming), and the affected
+documentation (`SOFTWARE_ARCHITECTURE.md`).
+
+**Tests.** `test/test_run_axis/test_main.cpp` was rebuilt for the S2 contract: the
+Target Point, Bottle Start Point and Bottle Line positions; the Bottle Line
+identity `bottleLinePositionM() == targetPointPositionM + bottleLineDistanceM`;
+the explicit-target arithmetic (two different explicit targets give two different
+remaining distances while the rule geometry is unchanged; the Bottle Line does
+not override the caller's target; leg/direction sign behaviour), and the
+compatibility seam pinned **as compatibility behaviour, not physical truth**. No
+test asserts that the vehicle's turnaround inherently equals the Bottle Line.
+
+**Software verification (not physical verification).**
+
+- `pio test -e native`: **556/556 test cases succeeded** (553 at D38 plus 3 net
+  new run-axis cases), 0 warnings.
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog`: 3 SUCCESS, 0 warnings,
+  RAM/Flash identical to the D38 baseline (6292/71884, 6492/78728, 6476/78156) -
+  behaviour- and footprint-preserving.
+- `git diff --check`: clean.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; every calibration/limit
+  value remains `Provisional`; the `Provisional` lockout still refuses to arm.
+- No gate, provenance label or safety path was changed, and no blocking `delay()`
+  was added.
+
+**Next.** S3 - an immutable `RunExecutionPlan` with dependency validity, which
+owns the explicit vehicle execution target (including the forward stop position);
+S4 then makes motion shaping and forward progression consume that one target and
+removes the S2 compatibility seam. This entry does not start S3.

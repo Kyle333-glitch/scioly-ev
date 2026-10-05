@@ -59,7 +59,7 @@ void expectRefused(ev::RunTimingPlanStatus expected, const ev::RunTimingPlan& pl
 }  // namespace
 
 // The planned travel is the whole announced course, not just the Target Distance:
-// the run goes out to the turn-around (the Target Point plus the announced Bottle
+// the run goes out to the Bottle Line (the Target Point plus the announced Bottle
 // Line Distance) and comes back to the Target Point.
 void test_the_planned_travel_is_the_whole_announced_course(void) {
     TEST_ASSERT_TRUE(ev::plannedTravelDistanceM(kRegionalGeometry) == 7.0);

@@ -19,7 +19,7 @@ namespace ev {
 //
 //       the forward travel has reached the Bottle Start Point  -> bottleContactDetected
 //       ... and a configured advance beyond that point          -> captureComplete
-//       ... and the turn-around position (the Bottle Line)      -> pushComplete
+//       ... and the Bottle Line rule landmark (rule 8.j)        -> pushComplete
 //
 // * Deterministic, monotone in the vehicle's own position, and pure: no clock,
 //   no pin, no interrupt, no allocation. It takes the run-axis position with its
@@ -80,10 +80,12 @@ struct BottleEvidenceConfig {
     // before the bottle counts as captured rather than merely touched, metres.
     Sourced<double> captureAdvanceDistanceM;
 
-    // How far past the turn-around position (the Bottle Line) the bottle must be
-    // carried before the push counts as complete, metres. Pushing the bottle to
-    // the line means the vehicle has to reach the line at least; 0 means "the
-    // vehicle reaching the turn-around position is the push".
+    // How far past the Bottle Line rule landmark the bottle must be carried
+    // before the push counts as complete, metres. Pushing the bottle to the line
+    // means the vehicle has to reach the line at least; 0 means "the vehicle
+    // reaching the Bottle Line is the push". This is the event's rule landmark,
+    // not the vehicle's physical forward stop target (that is execution geometry
+    // owned by S3/S4).
     Sourced<double> pushMarginDistanceM;
 };
 
@@ -163,7 +165,7 @@ inline BottleEvidence deriveBottleEvidence(const RunAxisGeometry& geometry, bool
     evidence.contactPositionM = geometry.bottleStartPositionM - config.contactLeadDistanceM.value;
     evidence.capturePositionM =
         evidence.contactPositionM + config.captureAdvanceDistanceM.value;
-    evidence.pushPositionM = geometry.turnAroundPositionM() + config.pushMarginDistanceM.value;
+    evidence.pushPositionM = geometry.bottleLinePositionM() + config.pushMarginDistanceM.value;
 
     if (!validateBottleEvidenceConfig(config).ok) {
         return evidence;

@@ -146,7 +146,7 @@ public:
                 break;
             case ev::RunPhase::Push:
                 script.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
-                script.pushComplete = harness.runAxisPositionM() >= harness.turnAroundPositionM();
+                script.pushComplete = harness.runAxisPositionM() >= harness.bottleLinePositionM();
                 break;
             case ev::RunPhase::ForwardDecel:
             case ev::RunPhase::BrakeZeroSpeed:
@@ -833,19 +833,19 @@ void test_an_invalid_configuration_never_starts_a_run(void) {
 
 void test_a_run_configuration_cannot_be_changed_at_an_illegal_time(void) {
     // A second, genuinely different but valid announcement: 5.25 m and 1.25 m at
-    // the Regional grid, so its turn-around point is 6.50 m instead of 6.00 m.
+    // the Regional grid, so its Bottle Line landmark is 6.50 m instead of 6.00 m.
     const ev::RunConfig first = evscenario::validRunConfig();
     const ev::RunConfig second(ev::TournamentLevel::RegionalInvitational, 5.25, 10.0, 1.25, 2.0);
     TEST_ASSERT_TRUE(ev::validateRunConfig(second).ok);
 
     ScenarioHarness harness(fixtures());
     announceAndArm(harness);
-    const double firstTurnAround = harness.turnAroundPositionM();
+    const double firstBottleLine = harness.bottleLinePositionM();
 
     // While the run is announced but not started...
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::RunAlreadyActive),
                           static_cast<int>(harness.announce(second)));
-    TEST_ASSERT_TRUE(harness.turnAroundPositionM() == firstTurnAround);
+    TEST_ASSERT_TRUE(harness.bottleLinePositionM() == firstBottleLine);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::ParameterValid),
                           static_cast<int>(harness.phase()));
 
@@ -854,14 +854,14 @@ void test_a_run_configuration_cannot_be_changed_at_an_illegal_time(void) {
     TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Armed, driver));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::RunAlreadyActive),
                           static_cast<int>(harness.announce(second)));
-    TEST_ASSERT_TRUE(harness.turnAroundPositionM() == firstTurnAround);
+    TEST_ASSERT_TRUE(harness.bottleLinePositionM() == firstBottleLine);
 
     // ...and while it is underway. The refusal is not a fault and does not
     // disturb the run that already has the announcement.
     TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Approach, driver));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::RunAlreadyActive),
                           static_cast<int>(harness.announce(second)));
-    TEST_ASSERT_TRUE(harness.turnAroundPositionM() == firstTurnAround);
+    TEST_ASSERT_TRUE(harness.bottleLinePositionM() == firstBottleLine);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Approach),
                           static_cast<int>(harness.phase()));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
@@ -887,9 +887,9 @@ void test_a_run_configuration_cannot_be_changed_at_an_illegal_time(void) {
                           static_cast<int>(harness.last().commandedMode));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
                           static_cast<int>(harness.announce(second)));
-    TEST_ASSERT_TRUE(harness.turnAroundPositionM() ==
+    TEST_ASSERT_TRUE(harness.bottleLinePositionM() ==
                      second.targetDistanceM + second.bottleLineDistanceM);
-    TEST_ASSERT_TRUE(second.targetDistanceM + second.bottleLineDistanceM != firstTurnAround);
+    TEST_ASSERT_TRUE(second.targetDistanceM + second.bottleLineDistanceM != firstBottleLine);
 
     // While a fault is of record, no announcement is even considered.
     TEST_ASSERT_TRUE(harness.arm());
@@ -1809,7 +1809,7 @@ void test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields(void) 
     const ev::RunConfig announced = evscenario::validRunConfig();
     TEST_ASSERT_TRUE(harness.targetPointPositionM() == announced.targetDistanceM);
     TEST_ASSERT_TRUE(harness.bottleStartPositionM() == announced.bottleStartDistanceM);
-    TEST_ASSERT_TRUE(harness.turnAroundPositionM() ==
+    TEST_ASSERT_TRUE(harness.bottleLinePositionM() ==
                      announced.targetDistanceM + announced.bottleLineDistanceM);
 
     // Every recorded position is the raw tick travel with the polarity applied

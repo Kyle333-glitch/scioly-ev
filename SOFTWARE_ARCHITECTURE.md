@@ -288,16 +288,19 @@ that the value is an unverified, configurable placeholder.
   (`remainingDistanceM` in MotionProfile.h carries the same warning from the
   other side).
 - **The run axis has one owner.** `ev::RunAxisGeometry`, `ev::runAxisPositionM()`,
-  `ev::remainingToTargetM()` and `ev::legRemainingM()` in
-  `lib/evcore/src/RunAxis.h` are the production owner of the competition
+  `ev::remainingDistanceTo()` and `ev::remainingDistanceToClamped()` in
+  `lib/evcore/src/RunAxis.h` are the production owner of the official *rule*
   geometry and of where the vehicle is on it:
   - `RunAxisGeometry::fromRunConfig()` is the one mapping from the announced
     `RunConfig` to the axis: the Target Point position (rule 8.h), the Bottle
     Line Distance (rule 8.j) and the Bottle Start Point (rule 7.c.ii.(5)), with
-    the turn-around position as the Target Point plus the Bottle Line Distance.
-    The state machine deliberately stores no geometry, so the run layer has to
-    hold it, and holding it without an owner is how two places start disagreeing
-    about which end of the axis the turn-around is.
+    the Bottle Line position as the Target Point plus the announced Bottle Line
+    Distance. The Bottle Line is an official **rule landmark**, not the vehicle's
+    physical turnaround, forward-leg endpoint or forward stop target - that is
+    execution geometry, owned by the later immutable `RunExecutionPlan` (S3) and
+    its single forward stop target (S4). The state machine deliberately stores no
+    geometry, so the run layer has to hold it, and holding it without an owner is
+    how two places start disagreeing about where a rule landmark is.
   - `runAxisPositionM()` applies the measured tick-sign polarity **once**, to the
     travel rather than to a position, so an origin that is not zero cannot invert
     the sign. Its `RunAxisStatus` separates the two refusals - no tick travel at
@@ -306,12 +309,22 @@ that the value is an unverified, configurable placeholder.
     verdict it hands to the boundary and the run policy. A placeholder polarity
     still reports a diagnostic number under the placeholder sign, exactly like a
     `Provisional` scale, and may not reach control.
-  - `remainingToTargetM()` is signed and deliberately unclamped (an overshoot is
-    evidence, not something to hide from a log), while `legRemainingM()` is the
-    travel taper's distance and is never negative. Both take the leg as an
-    argument and are computed from the leg the run named in the previous cycle,
-    which is the leg whose distance the run consumes this cycle; neither decides
-    that a position was reached and neither stops anything.
+  - `remainingDistanceTo()` is the generic remaining-distance arithmetic and takes
+    an **explicit, caller-supplied target** - the caller names the landmark (or,
+    once S3/S4 land, the execution target) it is measuring to, so the arithmetic
+    cannot substitute a rule landmark for the target a consumer asked about. It is
+    signed and deliberately unclamped (an overshoot is evidence, not something to
+    hide from a log); `remainingDistanceToClamped()` is the same arithmetic for
+    the travel taper and is never negative. Both take the leg as an argument and
+    are computed from the leg the run named in the previous cycle, which is the
+    leg whose distance the run consumes this cycle; neither decides that a
+    position was reached and neither stops anything.
+  - `temporaryLegExecutionTargetM()` is the one **temporary pre-S3/S4
+    compatibility seam**: it maps the current leg's execution target to the Bottle
+    Line rule landmark (forward) or the rule Target Point (reverse), so the
+    firmware keeps its current deterministic behaviour until the execution plan
+    exists. It is a compatibility mapping, not a physical claim, and S3/S4 remove
+    it.
 - Sample age is computed once, by `ev::sampleAge()` in `Snapshots.h`:
   `ageMs = nowMs - sampleMs` with unsigned subtraction, fresh up to a
   caller-supplied `maxAgeMs` inclusive, so a stamp from the future is never
@@ -414,9 +427,9 @@ another's, and none is a run state machine.
     estimated travel duration and its margin against Target Time are reported.
     **The strategy that spends the margin is now decided (D34):**
     `ev::planRunTiming()` in this module is the run layer's timing owner - it takes
-    the announced Target Time, the announced geometry (the whole course: out to
-    the turn-around and back) and the measured limits, and produces the cruise the
-    run is shaped with (the *slowest* cruise whose estimated travel fits the
+    the announced Target Time, the announced rule geometry (the whole course: out
+    to the Bottle Line and back) and the measured limits, and produces the cruise
+    the run is shaped with (the *slowest* cruise whose estimated travel fits the
     announced time, never above the configured or safety ceiling, never below the
     configured planned-cruise floor) and the deliberate pre-travel delay that
     spends the remaining slack. An announced Target Time shorter than the fastest
@@ -659,7 +672,7 @@ dwell interval? It combines exactly the three facts the safety contract names -
   `ev::deriveBottleEvidence()` (`BottleEvidence.h`) derives contact, capture and
   push from the run-axis position and the announced geometry - a lead distance
   before the Bottle Start Point, a capture advance beyond contact, and the
-  turn-around position plus a configured margin. Every distance arrives as
+  Bottle Line position plus a configured margin. Every distance arrives as
   `Sourced` configuration and must be `Measured` before the run policy is usable,
   so the inference never rests on a placeholder; and it is the firmware's
   position-derived *belief*, not an observation of the bottle. The

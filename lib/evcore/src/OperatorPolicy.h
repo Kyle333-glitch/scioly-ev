@@ -76,10 +76,11 @@ inline RunConfig completedRunConfig(const RunConfigFields& fields) {
                      fields.bottleLineDistanceM, bottleStartDistanceM(level));
 }
 
-// The run-axis geometry the announced configuration implies: the Target Point
-// (rule 8.h), the Bottle Line Distance (rule 8.j) and the turn-around point
-// beyond the Target Point. Reported to the operator so the geometry a run will
-// use is visible, not inferred from the four typed values.
+// The run-axis rule geometry the announced configuration implies: the Target
+// Point (rule 8.h), the Bottle Line Distance (rule 8.j) and the Bottle Line rule
+// landmark a Bottle Line Distance beyond the Target Point. Reported to the
+// operator so the rule geometry a run will use is visible, not inferred from the
+// four typed values.
 inline RunAxisGeometry runAxisGeometryFor(const RunConfigFields& fields) {
     return RunAxisGeometry::fromRunConfig(completedRunConfig(fields));
 }

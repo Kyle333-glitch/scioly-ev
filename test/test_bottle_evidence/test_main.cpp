@@ -30,13 +30,13 @@ ev::Sourced<double> provisional(double value) {
 }
 
 // Fixture policy: contact 0.10 m before the Bottle Start Point, capture complete
-// 0.20 m after contact, push complete 0.05 m past the turn-around.
+// 0.20 m after contact, push complete 0.05 m past the Bottle Line landmark.
 ev::BottleEvidenceConfig fixtureConfig() {
     return ev::BottleEvidenceConfig(measured(0.10), measured(0.20), measured(0.05));
 }
 
 // A Regional run: 5.00 m Target Distance, 1.00 m Bottle Line Distance, bottle at
-// 2.00 m (rules 8.h, 8.j, 7.c.ii.(5)). The turn-around is therefore 6.00 m.
+// 2.00 m (rules 8.h, 8.j, 7.c.ii.(5)). The Bottle Line is therefore 6.00 m.
 ev::RunAxisGeometry geometry() {
     return ev::RunAxisGeometry(5.0, 1.0, 2.0);
 }

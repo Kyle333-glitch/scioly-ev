@@ -60,7 +60,7 @@ ev::Sourced<double> measuredValue(double value) {
 // The plan the vehicle layer builds for the fixture configuration, through the
 // production arithmetic (`planRunTiming()`) rather than a hand-built struct: State
 // level with a 7.50 m target and a 1.00 m Bottle Line Distance means 9.50 m of
-// announced travel (rule 8.j puts the turn-around a bottle-line beyond the Target
+// announced travel (rule 8.j puts the Bottle Line a bottle-line beyond the Target
 // Point and the run comes back), and 15.0 s is an announced time those limits can
 // meet.
 ev::RunTimingPlan planForTargetTime(double targetTimeS) {
@@ -259,9 +259,10 @@ void test_in_range_but_off_grid_is_left_to_the_whole_configuration_check(void) {
                           static_cast<int>(held.error));
 }
 
-// The geometry the run will use is reported, not left for the operator to
-// reconstruct: the Target Point, the announced Bottle Line Distance, and the
-// Bottle Start Point the level fixes.
+// The rule geometry the run will use is reported, not left for the operator to
+// reconstruct: the Target Point, the announced Bottle Line Distance, the Bottle
+// Start Point the level fixes, and the Bottle Line rule landmark the first two
+// define.
 void test_run_axis_geometry_matches_the_configuration(void) {
     const ev::RunConfigFields fields = validStateConfig();
     const ev::RunAxisGeometry geometry = ev::runAxisGeometryFor(fields);
@@ -271,7 +272,7 @@ void test_run_axis_geometry_matches_the_configuration(void) {
     expectValue(ev::bottleStartDistanceM(ev::TournamentLevel::State),
                 geometry.bottleStartPositionM);
     expectValue(fields.targetDistanceM + fields.bottleLineDistanceM,
-                geometry.turnAroundPositionM());
+                geometry.bottleLinePositionM());
 }
 
 // ---------------------------------------------------------------------------

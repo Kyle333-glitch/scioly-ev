@@ -183,8 +183,15 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
                              vehicleConfig::positiveTicksDirection());
     positionUsable_ = odometryReady.usable && axisPosition.usable;
     const double remainingToTargetM =
-        ev::remainingToTargetM(axisGeometry_, legForward_, axisPosition.positionM);
-    const double legRemainingM = ev::legRemainingM(axisGeometry_, legForward_, axisPosition.positionM);
+        ev::remainingDistanceTo(axisGeometry_.targetPointPositionM, axisPosition.positionM,
+                                legForward_);
+    // The leg's execution target: the forward leg's is the single temporary
+    // pre-S3/S4 compatibility mapping (`temporaryLegExecutionTargetM()`, RunAxis.h);
+    // the reverse leg's is the rule Target Point. S3/S4 replace the forward target
+    // with the execution plan's explicit forward stop target.
+    const double legRemainingM = ev::remainingDistanceToClamped(
+        ev::temporaryLegExecutionTargetM(axisGeometry_, legForward_), axisPosition.positionM,
+        legForward_);
 
     // ---------------------------------------------------------------- stage 3
     // Raw inputs. Nothing here is converted or interpreted: the counts are counts
