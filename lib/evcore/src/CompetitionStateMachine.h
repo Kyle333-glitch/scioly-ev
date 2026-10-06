@@ -708,6 +708,26 @@ struct RunTimeline {
     uint32_t finalStopVerifiedAtMs = 0U;
 };
 
+// True while the run's own clock is *running*: it has been actuated, it has not
+// finished (`Done`), and it has not faulted. This is the one definition of the
+// interval a run-scoped bound applies to, and the run layer is handed it rather
+// than re-deriving "is this run still going" for itself.
+//
+// The deliberate pre-travel delay is inside the interval, and deliberately so:
+// the run's own time begins at actuation (rule 8.o, and the same convention
+// `RunTimeline` records for the internal Run Time), so a delay cannot be used to
+// escape a run-duration bound. `Done` and `Fault` end it: a completed run has no
+// motion left to bound, and a faulted run is already stopped by the authority's
+// own fault response, so a second bound firing there could only add noise.
+//
+// This reads no clock and holds no state - the run's own recorded facts are the
+// input - so a run boundary (`reset()`) ends the interval and a new actuation
+// begins a fresh one by construction.
+inline bool runDurationClockActive(const RunTimeline& timeline, RunPhase phase,
+                                   FaultCode fault) {
+    return timeline.actuated && fault == FaultCode::None && phase != RunPhase::Done;
+}
+
 // Maps a reversal refusal onto the fault it raises. This is the one place the
 // two vocabularies meet; the sequencer itself never names a fault.
 inline FaultCode faultForReversalRefusal(ReversalRefusal refusal) {

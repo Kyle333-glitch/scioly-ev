@@ -6913,3 +6913,155 @@ it does not make that plan usable. With the provisional configuration the plan
 still refuses with `MissingForwardExecutionTarget`, and `plan` is exactly the
 command that says so from the vehicle. Physical validation of anything the plan
 describes remains H8's work.
+
+## D47 / S10 - 2026-10-05 - The maximum run duration has a runtime consumer, and an absent battery sensor is a capability, not a missing measurement
+
+S10 closes two real safety-policy gaps without fabricating a sensor or weakening a
+gate. Neither gap could be closed by relabelling a value: the first had no runtime
+consumer at all, and the second could not be satisfied by any measurement this
+vehicle is able to take.
+
+### A. The global run-duration bound
+
+**The gap.** `SafetyLimits::maxRunDurationS` had only a plan-time consumer:
+`planRunTiming()` refuses a plan whose intended total exceeds it
+(`PlanExceedsMaxRunDuration`). That estimate is diagnostic (S7), and no runtime
+path bounded a run that was already going. The per-phase bounds
+(`RunPhaseConfig`) catch a phase that never received its evidence; nothing caught
+the run as a whole, so a run that changed phase often enough could outlast any
+single phase's bound with no global limit at all.
+
+**The change.** One new pure module, `ev::RunDurationGuard`
+(`lib/evcore/src/RunDurationGuard.h`), is the **run-scoped elapsed timer**:
+
+- `ev::runDurationLimitUsable()` makes the bound conditional on a `Measured`,
+  finite, positive duration. A placeholder is data with no runtime effect, so a
+  guessed limit cannot stop a legal run - and it cannot be armed on either
+  (`SafetyLimitsValid` still requires `maxRunDurationS` to be measured).
+- `ev::runDurationVerdict()` is the whole evaluation: an unsigned
+  `nowMs - runStartedAtMs` (so it is correct across the ~49.7-day `millis()` wrap),
+  the bound converted through the one shared `msFromSeconds()` conversion, and an
+  inclusive `>=` comparison. A stamp from the future reads as over the bound - the
+  same safe direction `sampleAge()` takes.
+- `ev::runDurationFault()` maps the verdict onto one identity,
+  `FaultCode::RunDurationExceeded`, and nothing else.
+
+The module holds **no start of its own**. The run's actuation reading has one
+owner, `RunTimeline::actuatedAtMs` (S8), and the interval the bound applies to has
+one definition, `ev::runDurationClockActive()` (`CompetitionStateMachine.h`):
+actuated, not `Done`, not faulted. That interval deliberately includes the
+deliberate pre-travel delay (the run's own time begins at actuation, rule 8.o)
+and ends at `Done`/`Fault`, so a boundary (`reset()`) ends it and a new actuation
+begins a fresh one by construction - there is no path by which one run inherits
+another's elapsed time.
+
+**The wiring.** The vehicle layer evaluates the verdict in stage 4
+(`FaultEvaluation`) and merges it into this cycle's observed fault
+(`ev::RunDurationGuard.h` is why the arithmetic lives in `lib/`): the run policy
+latches it as its fault of record through the ordinary `RunInputs::detectedFault`
+path, and `SafetyAuthority` latches it too and answers with its single
+deterministic fault stop (`Disable`, `ForcedFaultStop`). A driver fault is kept
+first so a real electrical fault is never masked by a run that also overran. The
+bound is computed inside the control tick, in every phase - it is independent of
+the per-phase timeouts and of the serial interface by construction, not by
+discipline. `faultStopPolicyFor()` maps the new identity to `Disable`.
+
+### B. The absent battery sensor is a capability
+
+**The audit.** On this hardware `SafetyLimitsValid` (`validateSafetyLimits()`) was
+**permanently impossible**: it required `SafetyLimits::isFullyEstablished()`, which
+required `minBatteryV.isMeasured()`, and the assembled vehicle has no battery-sense
+circuit - `safetyLimits()` supplies `provisionalValue(kPlannedMinBatteryV)`, so the
+value could only ever become `Measured` by fabricating a measurement. Since
+`SafetyReadiness::limitsUsable` is `checks.safetyLimitsValid`, the arming gate was
+permanently impossible for a quantity the vehicle cannot sense. (`RunPolicyUsable`
+is a separate fact - `CompetitionStateMachine::configUsable()` - and does not
+depend on the battery value at all; its own refusal comes from the provisional
+phase bounds.)
+
+**The policy.** `ev::BatteryVoltageCapability` (`SafetyLimits.h`) states whether a
+battery-sense circuit exists, exactly as `DriverFaultCapability` (D32) states the
+same kind of fact about the external nFAULT line. `validateSafetyLimits()` is now
+capability-aware:
+
+| Capability | `minBatteryV` | Verdict |
+| --- | --- | --- |
+| `Installed` | `Measured` | pass (unchanged from before) |
+| `Installed` | placeholder | refuse `NotFullyMeasured` (unchanged from before) |
+| `NotInstalled` | any value | provenance **not applicable** - no circuit to read, so no voltage is required |
+
+`Installed` is the zero value and the default argument, so a forgotten assignment
+keeps the voltage gate *required*; only an explicit statement that the circuit does
+not exist may pass without a measured voltage. The numeric checks stay
+unconditional (a non-positive or non-finite ceiling is malformed whatever the
+capability) and no other limit is relaxed: `maxRunDurationS`, the velocity
+ceilings and the effort ceiling are still required. Nothing is relabelled and no
+A1/A2 count becomes a measurement; `vehicleConfig::kPlannedBatteryVoltageCapability`
+is `NotInstalled`, and a future build that installs the sensing must set it back to
+`Installed`, measure the pack, and build the runtime comparison separately
+(`docs/limitations.md`).
+
+### Telemetry, vocabulary and wire schema
+
+`FaultCode::RunDurationExceeded` is added to the existing fault vocabulary, with its
+name added to `telemetryFaultName()` and to the mirrored Python `schema.FAULTS`
+(pinned by `test_schema_mirror`). The wire schema stays **v3**: the change *gains* a
+value of an existing field, it renames nothing, and it adds no field - the
+project's rule is that a vocabulary may gain entries but not rename one.
+`kTelemetrySchemaVersion` is therefore unchanged.
+
+### Tests
+
+- **New suite `test_run_duration_guard` (+8 cases, pure module):** usability of the
+  limit (Measured/Provisional/RuleDerived/Derived, NaN/inf/zero/negative); an
+  inactive run reports no elapsed time and never exceeds; the elapsed time across a
+  `uint32` wrap (512 ms across `0xFFFFFF00 -> 0x00000100`); the bound is inclusive
+  at exactly the limit; a placeholder never bounds a run; a future stamp reads as
+  over the bound; the identity is its own and not `PhaseTimeout`; and a re-stamped
+  start (reset/re-arm) reports a fresh, short run.
+- **`test_core_types` (+2):** the capability-aware `isFullyEstablished()` /
+  `validateSafetyLimits()` - `Installed` refuses a placeholder battery voltage and
+  `NotInstalled` does not; the default is the conservative `Installed`; the other
+  limits stay required; malformed numeric values still refuse; and both capability
+  spellings are stable.
+- **`test_scenario` (+1, whole chain):** a run whose fixture maximum is a
+  `Measured` 1.0 s (twenty times shorter than the 5.0 s approach bound) is driven
+  into `Approach` and then starved; it must fault with `RunDurationExceeded` (not
+  `PhaseTimeout`), with the authority's own `ForcedFaultStop`, no effort and no
+  direction, and the fault must arrive far inside the approach bound's window. The
+  fault-identity sweep also injects the new identity in every phase.
+- **`test_competition_state` (+1 assertion):** `faultStopPolicyFor(RunDurationExceeded)`
+  is `Disable`, alongside the other run-policy faults.
+- **`test_telemetry_format`:** the fault-name loop now covers the whole vocabulary
+  (it previously stopped at `RunSequencingError`, leaving the last two unexamined);
+  the longest-name pin (22, `ProvisionalCalibration`) is unchanged.
+- **`tools/telemetry/tests/test_schema_mirror`** passes with the new fault name -
+  the C++ vocabulary and the Python mirror agree.
+
+### Validation (clean build, on the frozen tree)
+
+Native **616/616** test cases in 34 suites, exit 0, 0 warnings (605 at S9; +11: the
+8 new guard cases, 2 core-types cases and 1 scenario case). `nano_r4`, `bench` and
+`bench-watchdog` all SUCCESS with 0 warnings from a clean build: RAM
+6772/6972/6956 (unchanged) and Flash 74540/81380/80808 (+136/+144/+144: the guard,
+the new fault name and the capability name). `tools/telemetry` **119/119 OK**.
+`git diff --check` clean; every changed file 100% CRLF.
+
+### Not changed
+
+The legal-parameter host sweep (S11) and the remaining documentation
+synchronisation (S12) are untouched. The telemetry wire schema stays **v3**. No
+calibration or limit value moved, no evidence was promoted (all twelve
+`VERIFIED_STATE.md` rows remain UNVERIFIED), no hardware was touched and no
+measurement was taken.
+
+### What this stage does not claim
+
+The run-duration bound has **never been observed on a vehicle**: while
+`kPlannedMaxRunDurationS` is a placeholder the bound is inert, and no run can be
+armed to test it. The battery-voltage gate is **N/A on this build, not enforced**:
+nothing can read the pack voltage, and the runtime comparison a real gate would
+need does not exist. What S10 establishes is that the run-duration bound has a
+runtime path, that a run-duration overrun is a named fault with a deterministic
+stop, and that the arming gate is no longer permanently impossible because of a
+quantity this vehicle cannot sense.

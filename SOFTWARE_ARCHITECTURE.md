@@ -107,14 +107,35 @@ These invariants are frozen and are not negotiable for convenience:
   `VehicleCalibration::isFullyMeasured()` and
   `SafetyLimits::isFullyEstablished()` exist so a later stage can refuse to arm
   on incomplete data. They are data-completeness checks, not the arming
-  decision, and not a substitute for the arming authority.
-- The chain consumes only `SafetyLimits::maxEffortPermille` today, through the
-  vehicle layer's derivation of the velocity regulator's own ceiling
-  (`ev::effortCeilingsAgree()` is that check; section 13). Maximum velocity per
-  direction, maximum run duration and minimum battery voltage have no
-  enforcement point yet: the profile/ceiling selection, the run timer and the
-  battery check that will own them are not built. They stay data with no
-  runtime effect, and nothing treats them as satisfied.
+  decision, and not a substitute for the arming authority. The limits check is
+  capability-aware about the battery voltage (`BatteryVoltageCapability`):
+  `validateSafetyLimits()` is the entry point that applies it, and a build with
+  no battery-sense circuit does not require a measured `minBatteryV` (below).
+- The chain consumes `SafetyLimits::maxEffortPermille` through the vehicle
+  layer's derivation of the velocity regulator's own ceiling
+  (`ev::effortCeilingsAgree()` is that check; section 13). The per-direction
+  **maximum velocity** is the target shaper's own travel ceiling: the shaped
+  cruise is the lower of the configured cruise and that ceiling
+  (`MotionProfile.h`, section 13).
+- The **maximum run duration** (`maxRunDurationS`) is enforced at run time by the
+  vehicle layer's run-scoped bound (`lib/evcore/src/RunDurationGuard.h`, S10): one
+  elapsed timer begun at the run's own actuation reading (the single owner,
+  `RunTimeline`), evaluated every control tick and in every phase, independent of
+  the per-phase timeouts and of the serial interface. A run that passes the bound
+  raises its own identity, `FaultCode::RunDurationExceeded`, which the run policy
+  and the safety boundary latch and answer exactly as they answer any other
+  observed fault. The bound bites only while the value is `Measured`; while it is
+  a placeholder it is data with no runtime effect, and no run may be armed on it
+  either (`SafetyLimitsValid`).
+- The **minimum battery voltage** is a capability-aware arming precondition, not a
+  runtime comparison. `BatteryVoltageCapability` (`SafetyLimits.h`, mirroring
+  D32's driver-fault capability) states whether this vehicle has a battery-sense
+  circuit at all: on `NotInstalled` the `Measured`-`minBatteryV` requirement is
+  **not applicable** rather than outstanding, so production arming is not
+  permanently impossible for a quantity the vehicle cannot sense. No voltage is
+  measured either way - no divider ratio, shunt value or ADC reference
+  relationship is documented, so no raw-to-volts comparison and therefore no
+  runtime voltage gate exists (`docs/limitations.md`).
 
 ## 8. Rule source contract
 
@@ -829,9 +850,20 @@ dwell interval? It combines exactly the three facts the safety contract names -
   `ReversalNotVerified` and `DisarmedDuringRun` (a run that loses the armed state
   it started with is stopped and latched rather than left asking for motion the
   authority is refusing), plus `RunSequencingError` for a sequencing
-  inconsistency the policy must not act on. All of them are software conditions
-  with no measured electrical answer, so `faultStopPolicyFor()` maps every one to
-  `Disable`, exactly like the faults that came before them.
+  inconsistency the policy must not act on, and `RunDurationExceeded` for a run
+  that passed its validated maximum duration (S10, `RunDurationGuard.h`) - a
+  whole-run bound, deliberately distinct from the per-phase `PhaseTimeout`.
+  All of them are software conditions with no measured electrical answer, so
+  `faultStopPolicyFor()` maps every one to `Disable`, exactly like the faults that
+  came before them.
+- **A global bound is evaluated by the vehicle layer, not by a phase.** The
+  run-scoped maximum-duration bound is one timer over the whole run, not a
+  fourth phase timeout: the vehicle layer evaluates it once per tick from the
+  run's own actuation reading (`ev::runDurationClockActive()` owns the interval,
+  `ev::runDurationVerdict()` owns the wrap-safe arithmetic) and feeds the
+  resulting identity in through the same `RunInputs::detectedFault` field any
+  other observed fault uses. Nothing about it depends on the serial interface, and
+  it keeps no timer of its own in `SafetyAuthority` or in the run machine.
 
 ## 15. Runtime, scheduling, and the hardware boundary contract
 

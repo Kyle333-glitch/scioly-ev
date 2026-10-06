@@ -50,6 +50,15 @@ enum class FaultCode : uint8_t {
     // claimed, because an unverified polarity would turn a healthy driver into a
     // fault or a real fault into a log entry nobody acts on.
     DriverFaultBar,
+    // A run exceeded its validated maximum duration (`RunDurationGuard.h`): the
+    // whole run, measured from its actuation, went on longer than
+    // `SafetyLimits::maxRunDurationS` allows. This is deliberately a distinct
+    // identity from `PhaseTimeout`: a phase bound catches one phase that never
+    // received its evidence, while this catches the run as a whole however many
+    // phases it passed through. It is raised only when the configured maximum is
+    // a `Measured` duration, so a placeholder can never stop a run for a reason
+    // nobody established.
+    RunDurationExceeded,
 };
 
 // A fault together with when it happened and whether it is latched. Fault

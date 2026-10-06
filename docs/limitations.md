@@ -390,14 +390,33 @@ or what remains provisional about the numbers it justified.
   `MeasuredValuesCiteEvidence` reports false while placeholders remain. This is a
   deliberate limit: it is the check that stops a provisional number from
   authorizing motion while looking like a measured one.
-- **Three safety ceilings have no enforcement point yet.** Maximum velocity per
-  direction, maximum run duration, and minimum battery voltage are data with no
-  runtime effect; the profile/ceiling selection, the run timer and the battery
-  check that would own them are **not built**
-  (`SOFTWARE_ARCHITECTURE.md` section 7). Only `maxEffortPermille` is enforced
-  today, through the regulator's own ceiling.
-- **No battery sensing exists.** Battery-condition correlations (a listed
-  analysis goal) cannot be produced yet.
+- **The maximum run duration is now enforced, but only once it is measured (S10).**
+  The vehicle layer evaluates a run-scoped elapsed bound every control tick
+  (`lib/evcore/src/RunDurationGuard.h`) and faults a run that passes it
+  (`FaultCode::RunDurationExceeded`), independent of the per-phase timeouts and of
+  the serial interface. The bound bites only while `maxRunDurationS` is
+  `Measured`; on this build it is still a `Provisional` placeholder, so nothing is
+  bounded by it - and no run could be armed on it either. The bound firing has
+  never been observed on a vehicle.
+- **Two other safety ceilings have no independent runtime enforcement.**
+  `maxEffortPermille` is enforced through the regulator's own ceiling, and the
+  per-direction maximum velocity is the target shaper's own travel ceiling, but
+  neither is a separate runtime comparison; the minimum battery voltage is not
+  compared at run time at all (below).
+- **No battery sensing exists, and the voltage gate is not applicable rather than
+  unbuilt-and-required.** The assembled vehicle has no battery divider, so
+  `vehicleConfig::kPlannedBatteryVoltageCapability` is `NotInstalled` and the
+  arming-time requirement for a `Measured` `minBatteryV` is **not applicable** on
+  this build (`ev::validateSafetyLimits()`, mirroring D32's driver-fault
+  capability). What that does **not** mean: no voltage was measured, the A1 counts
+  are still raw ADC counts of an unconnected input and are never a voltage, and no
+  firmware path can stop the vehicle for a low battery - the runtime comparison a
+  real gate would need is not built (no divider ratio, shunt value or ADC
+  reference is documented anywhere in this project). A future build that installs
+  the sensing must set the capability back to `Installed`, measure the pack so
+  `kPlannedMinBatteryV` can be promoted with evidence, and build the comparison
+  separately - flipping the capability does not imply one. Battery-condition
+  correlations (a listed analysis goal) therefore cannot be produced yet.
 - **Several policy values are explicitly "policy, not measurement"**: the
   estimator window (20 ms), the no-edge timeout (100 ms) and the stop-evidence
   age limit (3200 ms) have no demonstration that they suit this encoder

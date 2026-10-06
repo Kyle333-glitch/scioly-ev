@@ -44,6 +44,7 @@ inline FaultStopPolicy faultStopPolicyFor(FaultCode code) {
         case FaultCode::ReversalNotVerified:
         case FaultCode::DisarmedDuringRun:
         case FaultCode::RunSequencingError:
+        case FaultCode::RunDurationExceeded:
             return FaultStopPolicy::Disable;
         default:
             // New enumerators must be mapped explicitly; this default is the
@@ -65,10 +66,14 @@ struct SafetyReadiness {
     bool limitsUsable = false;        // required SafetyLimits are established
 
     // `limitsUsable` must be derived from validateSafetyLimits(), so this class
-    // never interprets raw Sourced values. Enforcing maxRunDurationS and
-    // minBatteryV at runtime has no owner yet: the run timer and the battery
-    // check that will own them are not built, and this class does not enforce
-    // them.
+    // never interprets raw Sourced values. The maximum run duration is enforced
+    // upstream: the vehicle layer evaluates the run-scoped bound
+    // (`ev::runDurationVerdict()`) and feeds the resulting identity in as an
+    // observed fault, which this class latches and answers with a fault stop
+    // like any other - it keeps no timer of its own. Minimum battery voltage is
+    // not enforced here either; it is a capability-aware arming precondition
+    // (`SafetyLimits.h`), and the runtime voltage comparison it would gate is
+    // not built (there is no raw-to-volts conversion on this project).
 
     constexpr bool allReady() const {
         return configurationValid && calibrationUsable && limitsUsable;

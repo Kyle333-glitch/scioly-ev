@@ -2,6 +2,7 @@
 
 #include <MotorDriverPlan.h>
 #include <NearZeroVerifier.h>
+#include <RunDurationGuard.h>
 #include <SafetyLimits.h>
 #include <Snapshots.h>
 
@@ -252,6 +253,30 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
         ev::observedDriverFault(rawInputs_.driverFaultCapability, rawInputs_.driverFaultBarLow,
                                 vehicleConfig::plannedDriverFaultPolarity());
 
+    // The run-scoped maximum-duration bound (S10): one elapsed timer, begun at
+    // the run's own actuation reading and evaluated once per cycle, in every
+    // phase. It is deliberately global rather than per-phase - the per-phase
+    // bounds catch a phase that never got its evidence, this catches the run as
+    // a whole - and it is computed here, inside the control tick, so no host,
+    // USB state or serial command can postpone it. `runDurationClockActive()`
+    // owns which interval is bounded (the run's own timeline and phase, the one
+    // owner of the actuation reading), `ev::runDurationVerdict()` owns the
+    // wrap-safe elapsed arithmetic, and the bound only bites while
+    // `maxRunDurationS` is a `Measured` duration - a placeholder cannot stop a
+    // run (it already refuses arming through `SafetyLimitsValid`).
+    const ev::RunTimeline runClock = run_.timeline();
+    const ev::RunDurationVerdict runDuration =
+        ev::runDurationVerdict(ev::runDurationClockActive(runClock, run_.phase(), run_.faultCode()),
+                              runClock.actuatedAtMs, nowMs, safetyLimits_.maxRunDurationS);
+    // This cycle's one observed fault. The run-policy fault the duration bound
+    // raises takes exactly the same path as any other observed fault: the run
+    // latches it (its fault of record), and the authority latches it too and
+    // answers with its single deterministic fault stop. The driver fault is kept
+    // first so a real electrical fault is never masked by a run that overran.
+    const ev::FaultCode cycleFault =
+        observedFault != ev::FaultCode::None ? observedFault
+                                             : ev::runDurationFault(runDuration);
+
     // ---------------------------------------------------------------- stage 5
     // The run policy, fed only this cycle's evidence. The distance it consumes is
     // the previous cycle's leg (the leg this cycle will name does not exist yet),
@@ -283,7 +308,7 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     runInputs.stopEvidence = ev::composeStopEvidence(
         estimate_, hasEstimate_, lastValidEstimate_, hasLastValidEstimate_, nowMs,
         vehicleConfig::kMaxSampleAgeMs, vehicleConfig::kStopEvidenceMaxAgeMs);
-    runInputs.detectedFault = observedFault;
+    runInputs.detectedFault = cycleFault;
 
     const ev::RunStatus status = run_.update(nowMs, runInputs);
 
@@ -383,7 +408,7 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     safetyState.atZeroSpeed = status.stopVerified;
     safetyState.nowMs = nowMs;
     safetyState.detectedFault =
-        status.fault != ev::FaultCode::None ? status.fault : observedFault;
+        status.fault != ev::FaultCode::None ? status.fault : cycleFault;
 
     const ev::AuthorizationResult authorized = authority_.authorize(effort, safetyState, safetyLimits_);
 

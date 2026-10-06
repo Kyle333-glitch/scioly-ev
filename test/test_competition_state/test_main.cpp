@@ -1417,6 +1417,11 @@ void test_reversal_refusals_map_to_faults(void) {
     TEST_ASSERT_EQUAL_INT(
         static_cast<int>(ev::FaultStopPolicy::Disable),
         static_cast<int>(ev::faultStopPolicyFor(ev::FaultCode::RunSequencingError)));
+    // The run-scoped duration bound is a software condition too (S10): it raises a
+    // whole-run identity, and it gets the same "remove output" response.
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::FaultStopPolicy::Disable),
+        static_cast<int>(ev::faultStopPolicyFor(ev::FaultCode::RunDurationExceeded)));
 }
 
 // D35: the maximum optional delay is a rule value (rule 8.i), not a

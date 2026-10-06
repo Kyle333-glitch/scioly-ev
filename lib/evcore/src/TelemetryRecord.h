@@ -207,6 +207,8 @@ inline const char* telemetryFaultName(FaultCode code) {
             return "RunSequencingError";
         case FaultCode::DriverFaultBar:
             return "DriverFaultBar";
+        case FaultCode::RunDurationExceeded:
+            return "RunDurationExceeded";
     }
     return "?";
 }

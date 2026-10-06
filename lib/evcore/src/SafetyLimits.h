@@ -9,6 +9,58 @@
 
 namespace ev {
 
+// Whether this vehicle has a battery-voltage sensing circuit at all.
+//
+// This is a *capability* fact, separate from the `minBatteryV` limit's value and
+// provenance, and it is separate on purpose: "what voltage is too low" and "is
+// there a circuit that could ever read the voltage" are different questions, and
+// the assembled V5 vehicle answers the second one **no** - battery sensing is
+// not installed (`src/PinMap.h`; the A1 counts this firmware reports are raw ADC
+// counts of an unconnected input, not a voltage).
+//
+// A firmware that collapsed the two would either keep demanding a measured
+// `minBatteryV` for a quantity nothing can measure - making production arming
+// permanently impossible for a limit the vehicle cannot sense - or relabel the
+// floating counts as a measurement. Neither is the truth, so the capability is
+// its own type and every reader of the battery voltage states it.
+//
+// What this type is NOT: a measurement. Nobody measured anything; the fact comes
+// from the assembled vehicle's sensing record (`src/PinMap.h`). It is
+// deliberately not a `Sourced` value, because there is no `ValueSource` for
+// "stated by the team" and promoting it to `Measured` would be exactly the
+// fabrication the project's rules exist to stop. It mirrors
+// `DriverFaultCapability` (`DriverFault.h`, D32), which states the same kind of
+// fact about the external nFAULT line.
+//
+// What it does NOT change: an `Installed` vehicle still requires a `Measured`
+// `minBatteryV` before it may be armed, exactly as before. What changes is only
+// whether that requirement is a condition of *this* vehicle.
+//
+// `Installed` is the zero value on purpose, and it is the conservative one: a
+// forgotten assignment (or a default-constructed value) leaves the voltage gate
+// *required*, which refuses arming while `minBatteryV` is a placeholder - it
+// never silently drops the gate. Only an explicit statement that the circuit
+// does not exist may pass validation without a measured voltage.
+enum class BatteryVoltageCapability : uint8_t {
+    // The battery divider exists on this vehicle and `minBatteryV` must be
+    // measured before the vehicle may be armed.
+    Installed = 0,
+    // No battery-sense circuit exists on this vehicle. Nothing can read the pack
+    // voltage, so no level is a measurement, and the arming-time voltage
+    // requirement is *not applicable* rather than satisfied.
+    NotInstalled = 1,
+};
+
+inline const char* batteryVoltageCapabilityName(BatteryVoltageCapability capability) {
+    switch (capability) {
+        case BatteryVoltageCapability::Installed:
+            return "Installed";
+        case BatteryVoltageCapability::NotInstalled:
+            return "NotInstalled";
+    }
+    return "?";
+}
+
 // Ceilings the vehicle must never exceed. Kept separate from
 // VehicleCalibration (what the vehicle does measure) and from RunConfig (what
 // the event supervisor announces).
@@ -33,22 +85,35 @@ struct SafetyLimits {
     // Lowest battery voltage at which motion is allowed, volts.
     Sourced<double> minBatteryV;
 
-    // What the chain does with these today: only maxEffortPermille is consumed,
-    // and only through the vehicle layer that derives the regulator's own
-    // ceiling from it (see effortCeilingsAgree() below). maxRunDurationS and
-    // minBatteryV have no enforcement point: the run timer and the battery
-    // check that will own them are not built, so they are data with no runtime
-    // effect. They are deliberately not treated as satisfied - nothing has
-    // consumed them to declare a run legal.
+    // What the chain does with these today: maxEffortPermille is consumed through
+    // the vehicle layer that derives the regulator's own ceiling from it (see
+    // effortCeilingsAgree() below); maxRunDurationS is consumed at run time by the
+    // vehicle layer's run-scoped bound (see `RunDurationGuard.h`); and
+    // minBatteryV is a capability-aware arming precondition, not a runtime check
+    // (`validateSafetyLimits()` below): the voltage comparison it would gate does
+    // not exist, because no raw-to-volts conversion is documented on this
+    // project.
 
-    // True only when every limit is backed by recorded measurement.
+    // True only when every limit that *this build requires* is backed by recorded
+    // measurement.
+    //
+    // The `capability` argument is what makes the battery-voltage requirement
+    // conditional: on a build with no battery-sense circuit (NotInstalled), a
+    // measured `minBatteryV` is not a condition of the vehicle and the value may
+    // stay a placeholder. The default is `Installed`, the conservative direction -
+    // a caller that says nothing gets the strict requirement, so the voltage gate
+    // is never dropped by omission. Every other limit is always required.
     //
     // This is a data-completeness check, not an arming decision; deciding when
-    // the vehicle may be armed belongs to a later stage.
-    constexpr bool isFullyEstablished() const {
+    // the vehicle may be armed belongs to the arming authority, which reads it
+    // through `validateSafetyLimits()`.
+    constexpr bool isFullyEstablished(
+        BatteryVoltageCapability batteryCapability =
+            BatteryVoltageCapability::Installed) const {
         return maxEffortPermille.isMeasured() && maxForwardVelocityMps.isMeasured() &&
                maxReverseVelocityMps.isMeasured() && maxRunDurationS.isMeasured() &&
-               minBatteryV.isMeasured();
+               (batteryCapability == BatteryVoltageCapability::NotInstalled ||
+                minBatteryV.isMeasured());
     }
 };
 
@@ -66,13 +131,44 @@ struct SafetyLimitsValidation {
     SafetyLimitsError error;
 };
 
-// Single entry point for safety-ceiling validation. Checks provenance first,
-// then finiteness, then the Motion invariant (permille is 0..1000), then
-// positivity of the remaining ceilings. The vehicle layer must derive
-// SafetyReadiness::limitsUsable from this result so SafetyAuthority never
-// has to interpret raw Sourced values.
-inline SafetyLimitsValidation validateSafetyLimits(const SafetyLimits& limits) {
-    if (!limits.isFullyEstablished()) {
+// Single entry point for safety-ceiling validation, and it is capability-aware
+// about the battery-voltage limit. Checks provenance first, then finiteness,
+// then the Motion invariant (permille is 0..1000), then positivity of the
+// remaining ceilings. The vehicle layer must derive SafetyReadiness::
+// limitsUsable from this result so SafetyAuthority never has to interpret raw
+// Sourced values.
+//
+// The battery-voltage semantics, mirroring `validateDriverFaultConfig()`:
+//
+//   Installed + measured minBatteryV    -> ok    (the circuit exists and the
+//                                                 limit is a recorded value)
+//   Installed + placeholder minBatteryV -> refuse `NotFullyMeasured`
+//                                                 (the voltage gate would rest on
+//                                                 a guess, and no run may be armed
+//                                                 on it)
+//   NotInstalled + anything             -> the provenance of `minBatteryV` is
+//                                                 **not applicable**: there is no
+//                                                 circuit to read, so no voltage
+//                                                 is required and none can be
+//                                                 measured. `NotInstalled` does
+//                                                 not "verify" the value and does
+//                                                 not touch it - the placeholder
+//                                                 stays a placeholder.
+//
+// The numeric checks below stay unconditional, and that is deliberate rather than
+// an oversight: they are configuration hygiene (a non-finite or non-positive
+// ceiling is a malformed value whatever the capability), they are not a claim
+// that the voltage was measured, and every production placeholder for this limit
+// is finite and positive, so they change nothing on a NotInstalled build. Only
+// the *provenance* requirement is relaxed - the one requirement a vehicle with no
+// sensing circuit cannot ever meet.
+//
+// The capability defaults to `Installed` for the same reason the field default is
+// `Installed`: a caller that forgets it gets the strict requirement.
+inline SafetyLimitsValidation validateSafetyLimits(
+    const SafetyLimits& limits,
+    BatteryVoltageCapability batteryCapability = BatteryVoltageCapability::Installed) {
+    if (!limits.isFullyEstablished(batteryCapability)) {
         return {false, SafetyLimitsError::NotFullyMeasured};
     }
     if (!std::isfinite(limits.maxForwardVelocityMps.value) ||

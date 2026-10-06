@@ -101,6 +101,8 @@ const char* faultName(ev::FaultCode fault) {
         case ev::FaultCode::ReversalNotVerified: return "ReversalNotVerified";
         case ev::FaultCode::DisarmedDuringRun: return "DisarmedDuringRun";
         case ev::FaultCode::RunSequencingError: return "RunSequencingError";
+        case ev::FaultCode::DriverFaultBar: return "DriverFaultBar";
+        case ev::FaultCode::RunDurationExceeded: return "RunDurationExceeded";
     }
     return "?";
 }
@@ -623,6 +625,7 @@ void test_every_fault_identity_is_latched_in_every_phase_and_stops_the_boundary(
         ev::FaultCode::MissingSafetyLimits,  ev::FaultCode::InvalidMotorEffort,
         ev::FaultCode::PhaseTimeout,         ev::FaultCode::ReversalNotVerified,
         ev::FaultCode::DisarmedDuringRun,    ev::FaultCode::RunSequencingError,
+        ev::FaultCode::RunDurationExceeded,
     };
 
     for (const ev::RunPhase phase : phases) {
@@ -1080,6 +1083,52 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
                                       static_cast<int>(faulted.faultOfRecord), testCase.name);
         expectTraceInvariants(harness);
     }
+}
+
+// The run-scoped maximum-duration bound is global, not per phase. With the run's
+// validated maximum set far below every phase bound, a run that stalls must end
+// with `RunDurationExceeded`, not with the `PhaseTimeout` that would eventually
+// answer the same stall - and the vehicle must be stopped by the authority's own
+// fault response, exactly as for any other observed fault.
+void test_a_run_that_overruns_its_validated_maximum_faults_on_its_own_identity(void) {
+    evscenario::ScenarioFixtures overrun = fixtures();
+    // A **measured** 1.0 s maximum: twenty times shorter than the fixture's 5.0 s
+    // approach bound, so the two cannot be confused about which one fired.
+    overrun.limits.maxRunDurationS = ev::Sourced<double>(1.0, ev::ValueSource::Measured);
+    ScenarioHarness harness(overrun);
+    announceAndArm(harness);
+
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run did not reach Approach inside its maximum");
+    const uint32_t cyclesWhenApproaching = harness.cycles();
+
+    // The encoder keeps moving, but Approach's own completion is never stated, so
+    // only the global bound can end this run.
+    CycleScript rolling;
+    rolling.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
+    const CycleRecord faulted = starveUntilFault(harness, rolling, 3000U);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(faulted.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::RunDurationExceeded),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    // The stop is the authority's own single fault response: nothing powered, no
+    // direction, no effort.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::ActuationClass::Drive),
+                          static_cast<int>(faulted.commandedClass));
+    TEST_ASSERT_EQUAL_UINT16(0U, faulted.commandedPermille);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(faulted.commandedDirection));
+    // It fired long before the 5.0 s (250-cycle) approach bound could have, which
+    // is exactly the independence the bound claims.
+    TEST_ASSERT_TRUE_MESSAGE(harness.cycles() - cyclesWhenApproaching < 100U,
+                             "the duration bound did not beat the phase bound");
+    expectTraceInvariants(harness);
 }
 
 void test_a_vehicle_that_never_comes_near_zero_faults_instead_of_reversing(void) {
@@ -2125,6 +2174,7 @@ int main(int, char**) {
     RUN_TEST(test_stale_odometry_never_ends_the_reverse_leg_early);
     RUN_TEST(test_stale_stop_evidence_never_earns_the_reversal);
     RUN_TEST(test_a_phase_that_never_gets_its_evidence_times_out);
+    RUN_TEST(test_a_run_that_overruns_its_validated_maximum_faults_on_its_own_identity);
     RUN_TEST(test_a_vehicle_that_never_comes_near_zero_faults_instead_of_reversing);
     RUN_TEST(test_a_vehicle_that_never_moves_again_never_finishes_the_reverse_leg);
     RUN_TEST(test_a_direct_reverse_request_is_refused_and_the_run_reverses_legally);

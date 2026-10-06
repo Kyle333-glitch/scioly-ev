@@ -106,9 +106,13 @@ constexpr double kPlannedReverseBrakeOffsetM = 0.05;
 // constant, because the two must be numerically equal (`effortCeilingsAgree()`).
 constexpr uint16_t kPlannedMaxEffortPermille = 300U;
 
-// Safety ceilings. None of these has an enforcement point yet except the effort
-// ceiling: the run timer and the battery check that will own the other three are
-// not built (`SOFTWARE_ARCHITECTURE.md` section 7).
+// Safety ceilings. The effort ceiling is enforced through the regulator's own
+// ceiling; the maximum run duration is enforced at run time by the vehicle
+// layer's run-scoped bound (`RunDurationGuard.h`), which only bounds a run once
+// this value is `Measured`; and the battery voltage is a capability-aware arming
+// precondition rather than a runtime comparison (see
+// `kPlannedBatteryVoltageCapability`). Every value here is a placeholder, so no
+// run may be armed on it.
 constexpr double kPlannedMaxForwardVelocityMps = 1.2;
 constexpr double kPlannedMaxReverseVelocityMps = 0.8;
 constexpr double kPlannedMaxRunDurationS = 30.0;
@@ -308,6 +312,37 @@ constexpr ev::DriverFaultCapability kPlannedDriverFaultCapability =
 constexpr ev::DriverFaultPolarity kPlannedDriverFaultPolarity =
     ev::DriverFaultPolarity::Unverified;
 
+// **No battery-voltage sensing is installed on this vehicle.** The assembled V5
+// vehicle has no battery divider wired to the Nano, so there is no circuit that
+// could ever read the pack voltage: the A1 counts this firmware reports are raw
+// ADC counts of an unconnected input, not a voltage
+// (`data/evidence/D31-2026-09-29/README.md`, `docs/limitations.md`). This constant
+// states that, and it is the reason the arming gate no longer demands a measured
+// `minBatteryV` on this build: the requirement is *not applicable* rather than
+// outstanding (`ev::validateSafetyLimits()`, `lib/evcore/src/SafetyLimits.h`).
+//
+// What this does NOT say: that the pack voltage is safe. There is no runtime
+// voltage comparison on this project to disable - no divider ratio, shunt value or
+// ADC reference relationship is documented, so no raw-to-volts conversion exists -
+// and `docs/limitations.md` records the consequence: no firmware path can stop the
+// vehicle for a low battery on this hardware, and battery-condition correlations
+// cannot be produced.
+//
+// This is a sensing fact stated by the team, not a measurement, and it is
+// deliberately not a `Sourced` value: there is no `ValueSource` for "stated", and
+// marking it `Measured` would fabricate a measurement that does not exist. It
+// mirrors `kPlannedDriverFaultCapability` (D32). `Installed` is the default, so a
+// forgotten assignment keeps the voltage gate *required*, which refuses arming
+// while `minBatteryV` is a placeholder rather than silently dropping the gate.
+//
+// If a battery-sense circuit is ever installed, the change is two edits: set this
+// back to `Installed`, and measure the pack so `kPlannedMinBatteryV` can be
+// promoted to `Measured` from recorded evidence. The arming gate refuses the
+// vehicle until that is done, and the runtime comparison a real gate would need is
+// a separate, later change - it is not implied by flipping the capability.
+constexpr ev::BatteryVoltageCapability kPlannedBatteryVoltageCapability =
+    ev::BatteryVoltageCapability::NotInstalled;
+
 // ---------------------------------------------------------------------------
 // Provenance helpers
 // ---------------------------------------------------------------------------
@@ -349,6 +384,13 @@ inline ev::Sourced<ev::DriverFaultPolarity> plannedDriverFaultPolarity() {
 // `kPlannedDriverFaultCapability`.
 inline ev::DriverFaultCapability plannedDriverFaultCapability() {
     return kPlannedDriverFaultCapability;
+}
+
+// The battery-voltage sensing capability, as the configuration check reads it.
+// Not a `Sourced` value, and that is stated rather than implied: see
+// `kPlannedBatteryVoltageCapability`.
+inline ev::BatteryVoltageCapability plannedBatteryVoltageCapability() {
+    return kPlannedBatteryVoltageCapability;
 }
 
 // The final stop dwell is the event's Complete Stop (rule 8.p). It is a rule
@@ -676,6 +718,17 @@ inline bool allPromotedValuesCiteEvidence() {
 // vehicle: its external nFAULT line is not installed, so its polarity
 // verification is not applicable rather than outstanding
 // (`driverFaultConfigurationValid`).
+//
+// `safetyLimitsValid` is capability-aware about the battery voltage on this
+// vehicle for the same reason: `kPlannedBatteryVoltageCapability` is
+// `NotInstalled`, so a measured `minBatteryV` is not a condition of this build
+// and that one requirement is not applicable (`validateSafetyLimits()`,
+// `lib/evcore/src/SafetyLimits.h`). The check still fails, and for a reason this
+// vehicle *can* address: `maxEffortPermille`, both velocity ceilings and the
+// maximum run duration are still placeholders, so no run may be armed until they
+// are measured. Making the battery requirement conditional therefore removes a
+// gate this vehicle could never satisfy without fabricating a measurement; it
+// removes no gate the vehicle could meet.
 using ConfigurationBuildChecks = ev::ConfigurationBuildChecks;
 
 // Evaluates the checks against the running chain. `announcedConfigValid` is the
@@ -708,7 +761,8 @@ inline ConfigurationBuildChecks configurationBuildChecks(bool announcedConfigVal
         ev::stopEvidenceLimitSpansDwell(kStopEvidenceMaxAgeMs, reversal.verification);
     checks.stopEvidenceSpansFinalStop =
         ev::stopEvidenceLimitSpansDwell(kStopEvidenceMaxAgeMs, phase.stopVerification);
-    checks.safetyLimitsValid = ev::validateSafetyLimits(limits).ok;
+    checks.safetyLimitsValid =
+        ev::validateSafetyLimits(limits, plannedBatteryVoltageCapability()).ok;
     checks.controllerConfigValid = ev::validateVelocityControllerConfig(controller).ok;
     checks.estimatorConfigValid = ev::validateVelocityEstimatorConfig(estimatorConfig()).ok;
     checks.profileLimitsValid = ev::validateMotionProfileLimits(profile.forward).ok &&

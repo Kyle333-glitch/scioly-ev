@@ -15,6 +15,7 @@
 #include <ReversalSequencer.h>
 #include <RunAxis.h>
 #include <RunConfig.h>
+#include <RunDurationGuard.h>
 #include <RunExecutionPlan.h>
 #include <SafetyAuthority.h>
 #include <SafetyLimits.h>
@@ -840,7 +841,21 @@ public:
         inputs.stopEvidence = ev::composeStopEvidence(
             estimate_, hasEstimate_, lastValidEstimate_, hasLastValidEstimate_, nowMs_,
             fixtures_.maxSampleAgeMs, fixtures_.stopEvidenceMaxAgeMs);
-        inputs.detectedFault = script.fault;
+        // The run-scoped maximum-duration bound, evaluated exactly as the vehicle
+        // layer evaluates it: the run's own actuation reading, its own phase and
+        // fault (the single owner of "is this run still going"), and the fixture's
+        // configured maximum. It is independent of the per-phase bounds - it is
+        // checked in every phase rather than per phase - and there is no serial
+        // path in this harness at all, so nothing here can be postponed by a host.
+        const ev::RunTimeline runClock = run_.timeline();
+        const ev::RunDurationVerdict runDuration = ev::runDurationVerdict(
+            ev::runDurationClockActive(runClock, run_.phase(), run_.faultCode()),
+            runClock.actuatedAtMs, nowMs_, fixtures_.limits.maxRunDurationS);
+        // A fault a scenario stated is kept first, so a scripted fault is never
+        // masked by a run that also overran its bound this cycle.
+        inputs.detectedFault = script.fault != ev::FaultCode::None
+                                   ? script.fault
+                                   : ev::runDurationFault(runDuration);
 
         const ev::RunStatus status = run_.update(nowMs_, inputs);
 
@@ -919,7 +934,7 @@ public:
         state.atZeroSpeed = status.stopVerified;
         state.nowMs = nowMs_;
         state.detectedFault =
-            status.fault != ev::FaultCode::None ? status.fault : script.fault;
+            status.fault != ev::FaultCode::None ? status.fault : inputs.detectedFault;
         const ev::AuthorizationResult authorized =
             authority_.authorize(effort, state, fixtures_.limits);
 

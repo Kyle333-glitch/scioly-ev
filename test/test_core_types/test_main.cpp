@@ -93,6 +93,82 @@ void test_safety_limits_are_fully_established_only_when_every_limit_is_measured(
     TEST_ASSERT_FALSE(limitsWith(ev::ValueSource::RuleDerived).isFullyEstablished());
 }
 
+// The battery-voltage requirement is a capability-aware condition, exactly as the
+// driver-fault polarity requirement is (`DriverFault.h`, D32). On a vehicle with
+// no battery-sense circuit the voltage requirement is *not applicable* rather than
+// outstanding, so production arming is not permanently impossible for a quantity
+// the vehicle cannot sense; on a vehicle that has the circuit, nothing changed.
+void test_battery_voltage_is_required_only_when_the_circuit_exists(void) {
+    const ev::BatteryVoltageCapability installed = ev::BatteryVoltageCapability::Installed;
+    const ev::BatteryVoltageCapability notInstalled = ev::BatteryVoltageCapability::NotInstalled;
+
+    // Every limit measured, with the circuit present: validates as before.
+    const ev::SafetyLimits allMeasured = limitsWith(ev::ValueSource::Measured);
+    TEST_ASSERT_TRUE(allMeasured.isFullyEstablished(installed));
+    TEST_ASSERT_TRUE(ev::validateSafetyLimits(allMeasured, installed).ok);
+
+    // The placeholder battery voltage the production config ships. With the
+    // circuit installed it is refused; with no circuit it is not applicable.
+    ev::SafetyLimits placeholderBattery = limitsWith(ev::ValueSource::Measured);
+    placeholderBattery.minBatteryV = ev::Sourced<double>(9.0, ev::ValueSource::Provisional);
+
+    TEST_ASSERT_FALSE(placeholderBattery.isFullyEstablished(installed));
+    const ev::SafetyLimitsValidation refused =
+        ev::validateSafetyLimits(placeholderBattery, installed);
+    TEST_ASSERT_FALSE(refused.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::SafetyLimitsError::NotFullyMeasured),
+                          static_cast<int>(refused.error));
+
+    TEST_ASSERT_TRUE(placeholderBattery.isFullyEstablished(notInstalled));
+    const ev::SafetyLimitsValidation accepted =
+        ev::validateSafetyLimits(placeholderBattery, notInstalled);
+    TEST_ASSERT_TRUE(accepted.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::SafetyLimitsError::None),
+                          static_cast<int>(accepted.error));
+
+    // The default is the conservative one: a caller that states no capability
+    // gets the strict, Installed requirement, so the gate is never dropped by
+    // omission.
+    TEST_ASSERT_FALSE(placeholderBattery.isFullyEstablished());
+    TEST_ASSERT_FALSE(ev::validateSafetyLimits(placeholderBattery).ok);
+
+    // Every other ceiling is still required on a NotInstalled build: relaxing the
+    // battery requirement must not relax the maximum run duration (or anything
+    // else).
+    ev::SafetyLimits placeholderDuration = limitsWith(ev::ValueSource::Measured);
+    placeholderDuration.maxRunDurationS =
+        ev::Sourced<double>(30.0, ev::ValueSource::Provisional);
+    const ev::SafetyLimitsValidation durationStillRequired =
+        ev::validateSafetyLimits(placeholderDuration, notInstalled);
+    TEST_ASSERT_FALSE(durationStillRequired.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::SafetyLimitsError::NotFullyMeasured),
+                          static_cast<int>(durationStillRequired.error));
+
+    // A value the vehicle cannot sense is still a configured value: a
+    // non-positive or non-finite battery ceiling is malformed whatever the
+    // capability, so the numeric checks stay unconditional.
+    ev::SafetyLimits malformed = limitsWith(ev::ValueSource::Measured);
+    malformed.minBatteryV = ev::Sourced<double>(0.0, ev::ValueSource::Measured);
+    const ev::SafetyLimitsValidation nonPositive =
+        ev::validateSafetyLimits(malformed, notInstalled);
+    TEST_ASSERT_FALSE(nonPositive.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::SafetyLimitsError::NonPositiveLimit),
+                          static_cast<int>(nonPositive.error));
+}
+
+void test_the_battery_voltage_capability_has_a_stable_spelling(void) {
+    // `Installed` is the conservative zero value, so a forgotten assignment
+    // keeps the voltage gate required.
+    const ev::BatteryVoltageCapability defaulted{};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BatteryVoltageCapability::Installed),
+                          static_cast<int>(defaulted));
+    TEST_ASSERT_EQUAL_STRING(
+        "Installed", ev::batteryVoltageCapabilityName(ev::BatteryVoltageCapability::Installed));
+    TEST_ASSERT_EQUAL_STRING("NotInstalled",
+                             ev::batteryVoltageCapabilityName(
+                                 ev::BatteryVoltageCapability::NotInstalled));
+}
+
 // --- Motor command boundary -------------------------------------------------
 
 void test_authorized_motor_command_cannot_be_default_constructed(void) {
@@ -224,6 +300,8 @@ int main(int, char**) {
     RUN_TEST(test_only_measured_values_count_as_measured);
     RUN_TEST(test_calibration_is_fully_measured_only_when_every_value_is_measured);
     RUN_TEST(test_safety_limits_are_fully_established_only_when_every_limit_is_measured);
+    RUN_TEST(test_battery_voltage_is_required_only_when_the_circuit_exists);
+    RUN_TEST(test_the_battery_voltage_capability_has_a_stable_spelling);
     RUN_TEST(test_authorized_motor_command_cannot_be_default_constructed);
     RUN_TEST(test_authorized_motor_command_cannot_be_built_from_a_motor_effort);
     RUN_TEST(test_disabled_motor_mode_is_the_safe_zero_value);
