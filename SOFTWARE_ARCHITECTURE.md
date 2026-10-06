@@ -1023,10 +1023,17 @@ whole-tick stride mapping (`telemetryStrideForRate()`). Nothing else may decide
 that a command is acceptable.
 - **The command vocabulary is frozen, and it is inspection plus intent.**
   `help`, `version`, `status`, `checks`, `boot`, `config show`, `config check`,
-  `config set`, `config clear`, `announce`, `arm`, `disarm`, `reset`,
+  `plan`, `config set`, `config clear`, `announce`, `arm`, `disarm`, `reset`,
   `telemetry on`, `telemetry off`, `telemetry status`, `telemetry rate <hz>`.
   (`boot` re-sends the boot line; like the other inspection commands it changes
-  no run state, so it is admissible in every phase.)
+  no run state, so it is admissible in every phase.) `plan` reads back the run
+  layer's current immutable `RunExecutionPlan` - the announced rule inputs and
+  landmarks, the plan's execution targets, its contact window, its timing state and
+  its deliberate delay - or the plan's own named status when there is no usable
+  plan, as one bounded `PLAN` line. It is an inspection command in the strongest
+  sense: it reads the plan and writes text, so it is admissible while a run is
+  under way, it can change no target, threshold or delay, and control never waits
+  on it.
   **No command commands an effort, a mode or a direction, and none starts a run.**
   The start trigger is a physical input; the closest any command comes to motion
   is the arming intent, which is still a decision the chain's own checks refuse
@@ -1054,7 +1061,7 @@ the operator's, and `disarm` is the command for that.
 - **Formatting is one module, and it emits one line per response.**
   `ev::OperatorResponse` (`lib/evcore/src/OperatorResponse.h`) owns every response
   spelling: the prefix vocabulary (`OK`, `ERR`, `STATUS`, `CONFIG`, `CHECK`,
-  `TELEMETRY`, `VERSION`), the `key=value` field order, the refusal and
+  `PLAN`, `TELEMETRY`, `VERSION`), the `key=value` field order, the refusal and
   arm-refusal text, the `config set` acknowledgement, and the help table. Like a
   telemetry record (section 9), a response is **all or nothing**: it fits the line
   buffer or it is dropped and counted, never emitted truncated. Its worst case is

@@ -807,6 +807,14 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             respondLine(ev::formatConfigEcho(heldConfig_, heldVerdict(), buffer, capacity));
             return;
 
+        case ev::OperatorCommandId::Plan:
+            // The read-only sanity check of the exact plan this vehicle is holding.
+            // It reads the plan and renders it; it adopts nothing, clears nothing
+            // and changes no phase, so it is admissible in every state - including
+            // during a run - and cannot gate the control path.
+            respondLine(ev::formatPlanLine(planView(), buffer, capacity));
+            return;
+
         case ev::OperatorCommandId::ConfigSet:
             applyConfigSet(request.fields);
             return;
@@ -1126,6 +1134,40 @@ ev::OperatorStatusView VehicleRuntime::statusView() const {
     view.state = buildSample();
     view.config = heldConfig_;
     view.configVerdict = heldVerdict();
+    return view;
+}
+
+ev::OperatorPlanView VehicleRuntime::planView() const {
+    ev::OperatorPlanView view;
+    // The plan the run layer is holding: the immutable value adopted at the
+    // announcement boundary, or `NotPlanned` before the first announcement and
+    // after a new-run boundary. Copied field by field, so nothing here can write
+    // to it - the plan is `const` and this is the only read of it.
+    const ev::RunExecutionPlan& plan = executionPlan_.plan();
+    view.status = plan.status;
+    if (plan.valid) {
+        view.earliestContactMpPositionM = plan.earliestContactMpPositionM;
+        view.latestContactMpPositionM = plan.latestContactMpPositionM;
+        view.captureGuaranteedMpPositionM = plan.captureGuaranteedMpPositionM;
+        view.forwardStopMpPositionM = plan.forwardStopMpPositionM;
+        view.reverseStopMpPositionM = plan.reverseStopMpPositionM;
+    }
+    view.timingReady = plan.timingReady;
+    view.predictedMotionTimeS = plan.predictedMotionTimeS;
+    view.initialDelayS = plan.initialDelayS;
+
+    // The announced rule geometry and the announced Target Time, which are facts
+    // about the announcement rather than about the plan: a refused plan still has
+    // one, and reporting it is how "the geometry is what you typed, and the plan
+    // refuses for this reason" can be read off one line. `announcedConfigValid_`
+    // is set at the announcement boundary and cleared at a new-run boundary, which
+    // is exactly the lifetime of the run's announced geometry.
+    if (announcedConfigValid_) {
+        view.ruleGeometryKnown = true;
+        view.geometry = axisGeometry_;
+        view.targetTimeKnown = heldConfig_.hasTargetTimeS;
+        view.targetTimeS = heldConfig_.targetTimeS;
+    }
     return view;
 }
 

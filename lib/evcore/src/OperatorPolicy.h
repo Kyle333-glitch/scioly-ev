@@ -207,6 +207,14 @@ struct CommandAdmissibility {
 // so they are accepted in every state, including mid-run.
 // Telemetry control belongs here too: the sample stride and the enable flag are
 // the telemetry stream's own state, never the run's.
+//
+// `plan` belongs here for the strongest form of the same reason: it renders the
+// run layer's current execution plan and the named reason there is none, reading
+// the plan and writing a line. It holds no run-control state to change and it
+// mutates nothing, so a run that has started is exactly when an operator most
+// needs to read it back - and, like every other inspection command, it is
+// answered inside the same bounded, non-blocking operator pass, so it cannot
+// delay or gate control.
 inline bool isInspectionCommand(OperatorCommandId id) {
     switch (id) {
         case OperatorCommandId::Help:
@@ -216,6 +224,7 @@ inline bool isInspectionCommand(OperatorCommandId id) {
         case OperatorCommandId::Boot:
         case OperatorCommandId::ConfigShow:
         case OperatorCommandId::ConfigCheck:
+        case OperatorCommandId::Plan:
             return true;
         default:
             return false;
@@ -326,6 +335,7 @@ inline CommandAdmissibility admissibilityOf(OperatorCommandId id, const Operator
         case OperatorCommandId::Boot:
         case OperatorCommandId::ConfigShow:
         case OperatorCommandId::ConfigCheck:
+        case OperatorCommandId::Plan:
         case OperatorCommandId::Disarm:
         case OperatorCommandId::TelemetryOn:
         case OperatorCommandId::TelemetryOff:

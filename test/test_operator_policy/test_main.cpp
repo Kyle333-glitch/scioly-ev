@@ -287,6 +287,7 @@ void test_inspection_and_telemetry_are_allowed_in_every_state(void) {
         ev::OperatorCommandId::Version,     ev::OperatorCommandId::Checks,
         ev::OperatorCommandId::Boot,
         ev::OperatorCommandId::ConfigShow,  ev::OperatorCommandId::ConfigCheck,
+        ev::OperatorCommandId::Plan,
         ev::OperatorCommandId::TelemetryOn, ev::OperatorCommandId::TelemetryOff,
         ev::OperatorCommandId::TelemetryStatus,
         ev::OperatorCommandId::TelemetryRate,
@@ -340,6 +341,22 @@ void test_run_control_commands_are_refused_once_underway(void) {
         for (uint8_t index = 0U; index < changingCount; ++index) {
             expectRefused(changing[index], state, ev::CommandRefusal::RunUnderway);
         }
+    }
+}
+
+// S9: the plan report is read-only, so no state restricts it - a run that is
+// underway is exactly when an operator needs to read back the plan the vehicle is
+// actually holding. It is inspection, not telemetry control, and it is not in the
+// vocabulary that would change run-control state.
+void test_the_plan_report_is_read_only_and_ungated(void) {
+    TEST_ASSERT_TRUE(ev::isInspectionCommand(ev::OperatorCommandId::Plan));
+    TEST_ASSERT_FALSE(ev::isTelemetryCommand(ev::OperatorCommandId::Plan));
+
+    for (uint8_t index = 0U; index < kAllPhaseCount; ++index) {
+        ev::OperatorSystemState state = stateOf(kAllPhases[index]);
+        state.armed = true;
+        state.faultLatched = true;
+        expectAdmissible(ev::OperatorCommandId::Plan, state);
     }
 }
 
@@ -656,6 +673,7 @@ int main(int, char**) {
     RUN_TEST(test_inspection_and_telemetry_are_allowed_in_every_state);
     RUN_TEST(test_disarm_is_never_gated);
     RUN_TEST(test_run_control_commands_are_refused_once_underway);
+    RUN_TEST(test_the_plan_report_is_read_only_and_ungated);
     RUN_TEST(test_a_latched_fault_refuses_everything_but_reset);
     RUN_TEST(test_reset_is_available_at_every_boundary);
     RUN_TEST(test_configuration_changes_require_the_idle_boundary);

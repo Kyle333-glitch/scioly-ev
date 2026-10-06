@@ -287,6 +287,7 @@ enum class OperatorCommandId : uint8_t {
     Boot,           // re-send the boot line (this firmware's identity and state)
     ConfigShow,     // echo the held configuration and its rule verdict
     ConfigCheck,    // re-run the rule validation now and echo it
+    Plan,           // read back the announced run's execution plan, or why there is none
     ConfigSet,      // store the supplied fields (never announces anything)
     ConfigClear,    // discard the held configuration
     Announce,       // the deliberate second step: offer the configuration to a run
@@ -317,6 +318,8 @@ inline const char* operatorCommandName(OperatorCommandId id) {
             return "config show";
         case OperatorCommandId::ConfigCheck:
             return "config check";
+        case OperatorCommandId::Plan:
+            return "plan";
         case OperatorCommandId::ConfigSet:
             return "config set";
         case OperatorCommandId::ConfigClear:
@@ -642,7 +645,7 @@ inline CommandParseResult parseOperatorCommand(const char* line, uint16_t length
 
     if (tokenEquals(tokens[0], "status") || tokenEquals(tokens[0], "version") ||
         tokenEquals(tokens[0], "checks") || tokenEquals(tokens[0], "boot") ||
-        tokenEquals(tokens[0], "announce") ||
+        tokenEquals(tokens[0], "plan") || tokenEquals(tokens[0], "announce") ||
         tokenEquals(tokens[0], "arm") || tokenEquals(tokens[0], "disarm") ||
         tokenEquals(tokens[0], "reset")) {
         if (tokenCount != 1U) {
@@ -654,6 +657,7 @@ inline CommandParseResult parseOperatorCommand(const char* line, uint16_t length
                             : tokenEquals(tokens[0], "version")  ? OperatorCommandId::Version
                             : tokenEquals(tokens[0], "checks")   ? OperatorCommandId::Checks
                             : tokenEquals(tokens[0], "boot")     ? OperatorCommandId::Boot
+                            : tokenEquals(tokens[0], "plan")     ? OperatorCommandId::Plan
                             : tokenEquals(tokens[0], "announce") ? OperatorCommandId::Announce
                             : tokenEquals(tokens[0], "arm")      ? OperatorCommandId::Arm
                             : tokenEquals(tokens[0], "disarm")   ? OperatorCommandId::Disarm

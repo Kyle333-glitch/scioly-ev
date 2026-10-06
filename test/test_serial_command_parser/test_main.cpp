@@ -200,6 +200,7 @@ void test_every_command_spelling_parses(void) {
     expectCommand("config show", ev::OperatorCommandId::ConfigShow);
     expectCommand("config check", ev::OperatorCommandId::ConfigCheck);
     expectCommand("config clear", ev::OperatorCommandId::ConfigClear);
+    expectCommand("plan", ev::OperatorCommandId::Plan);
     expectCommand("announce", ev::OperatorCommandId::Announce);
     expectCommand("arm", ev::OperatorCommandId::Arm);
     expectCommand("disarm", ev::OperatorCommandId::Disarm);
@@ -310,6 +311,9 @@ void test_wrong_token_counts_are_rejected(void) {
     expectError("telemetry rate", ev::CommandError::WrongTokenCount);
     expectError("telemetry rate 5 extra", ev::CommandError::WrongTokenCount);
     expectError("telemetry on extra", ev::CommandError::WrongTokenCount);
+    // `plan` takes nothing: it reads the plan the run layer already holds, so an
+    // argument would name a run the firmware is not running.
+    expectError("plan extra", ev::CommandError::WrongTokenCount);
     expectError("config set", ev::CommandError::MissingArgument);
 }
 

@@ -89,6 +89,12 @@ const char* commandForTick(uint16_t tick) {
     switch (tick) {
         case 3U:
             return "status";
+        // S9: the plan report is read back before any announcement (tick 4) and
+        // again while the run is under way (tick 30, `Approach`). Both are
+        // admissions the state restriction grants, and neither may change a
+        // verdict - which is the whole point of this scenario.
+        case 4U:
+            return "plan";
         case 6U:
             return "config set level=state";
         case 8U:
@@ -105,6 +111,8 @@ const char* commandForTick(uint16_t tick) {
             return "arm";
         case 28U:
             return "config clear";
+        case 30U:
+            return "plan";
         case 32U:
             return "reset";
         case 36U:
@@ -155,6 +163,13 @@ struct ConsumerRun {
     // evidence that the stalled host lost records has to be taken while it was
     // still true.
     ev::TelemetryDrops drops;
+    // S9: the plan reports the state restriction admitted, the one it admitted
+    // while a run's phases were under way, and the bytes of the last one - so
+    // "the report is readable during a run" is asserted rather than assumed from a
+    // scenario in which it could merely have been refused.
+    uint32_t planResponsesFormatted;
+    bool planResponseDuringRunUnderway;
+    char planResponse[ev::kSerialLineBufferBytes];
     char lastResponse[ev::kSerialLineBufferBytes];
 };
 
@@ -341,6 +356,21 @@ ControlRun runScenario(bool withConsumers, ConsumerRun* consumers) {
                         written = ev::formatChecksLine(systemState.checks, responseBuffer,
                                                        ev::kSerialLineCapacity);
                         break;
+                    case ev::OperatorCommandId::Plan: {
+                        // The whole report is a rendering of a value the run layer
+                        // holds: this scenario has no run layer, so it renders the
+                        // absent plan and pins only that no control effect follows.
+                        const ev::OperatorPlanView view;
+                        written = ev::formatPlanLine(view, responseBuffer,
+                                                     ev::kSerialLineCapacity);
+                        ++consumers->planResponsesFormatted;
+                        consumers->planResponseDuringRunUnderway =
+                            consumers->planResponseDuringRunUnderway ||
+                            ev::isRunPhaseUnderway(phase);
+                        std::memcpy(consumers->planResponse, responseBuffer,
+                                    static_cast<size_t>(written) + 1U);
+                        break;
+                    }
                     case ev::OperatorCommandId::TelemetryStatus: {
                         ev::OperatorTelemetryView view;
                         view.enabled = session.enabled();
@@ -466,6 +496,19 @@ void test_a_stalled_host_is_counted_not_hidden(void) {
     TEST_ASSERT_TRUE(consumers.ticksWithSampleDue < kTickCount);
 }
 
+// The plan report is admitted in every state, including while the run's phases are
+// under way, and it is a complete line: the read-only report is readable exactly
+// when an operator most needs it. That it changes nothing is the trace assertion
+// above - this test is the other half, that it was not simply refused.
+void test_the_plan_report_is_admitted_during_a_run(void) {
+    ConsumerRun consumers = ConsumerRun{};
+    (void)runScenario(true, &consumers);
+
+    TEST_ASSERT_EQUAL_UINT32(2U, consumers.planResponsesFormatted);
+    TEST_ASSERT_TRUE(consumers.planResponseDuringRunUnderway);
+    TEST_ASSERT_EQUAL_INT(0, strncmp(consumers.planResponse, "PLAN,ready=0,reason=NotPlanned,", 31U));
+}
+
 // The last answer the consumer side produced is a complete line reporting the
 // realized telemetry state, not the requested one: the stride the rate mapping
 // chose is what it says, and a deliberate `off` is not a loss, so its counters are
@@ -484,6 +527,7 @@ int main(int, char**) {
     RUN_TEST(test_ignoring_serial_cannot_change_the_control_path);
     RUN_TEST(test_no_consumer_path_can_arm_the_authority);
     RUN_TEST(test_a_stalled_host_is_counted_not_hidden);
+    RUN_TEST(test_the_plan_report_is_admitted_during_a_run);
     RUN_TEST(test_the_consumer_side_reports_the_realized_state);
     return UNITY_END();
 }

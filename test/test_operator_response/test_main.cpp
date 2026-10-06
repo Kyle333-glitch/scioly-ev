@@ -460,6 +460,173 @@ void test_version_line_reports_identity_and_schema(void) {
     TEST_ASSERT_EQUAL_UINT8(3U, ev::kTelemetrySchemaVersion);
 }
 
+// Every field of a plan line, in the order the contract fixes it. The column order
+// is what makes two plan reports comparable, so it is asserted for the ready form
+// and for the refusal forms alike: a field that moved would break this rather than
+// silently reshuffle a reader's columns.
+void expectPlanFieldOrder(const char* line) {
+    static const char* const kFields[] = {
+        "PLAN,ready=",  ",reason=",       ",target_m=",     ",time_s=",
+        ",line_dist_m=", ",bottle_start_m=", ",bottle_line_m=", ",window_lo_m=",
+        ",window_hi_m=", ",capture_m=",    ",fwd_stop_m=",   ",rev_stop_m=",
+        ",timing_ready=", ",predicted_s=", ",delay_s=",
+    };
+    const uint8_t fieldCount = static_cast<uint8_t>(sizeof(kFields) / sizeof(kFields[0]));
+    const char* cursor = line;
+    for (uint8_t index = 0U; index < fieldCount; ++index) {
+        const char* found = strstr(cursor, kFields[index]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(found, kFields[index]);
+        cursor = found + 1;
+    }
+    // The delay is the last field: past its key there is no further separator, so a
+    // reader can take the tail of the line as the value it names.
+    TEST_ASSERT_NOT_NULL(strstr(line, kFields[fieldCount - 1U]));
+    const char* tail = strstr(line, kFields[fieldCount - 1U]) + strlen(kFields[fieldCount - 1U]);
+    TEST_ASSERT_NULL(strchr(tail, ','));
+}
+
+// The plan report is the read-only sanity check of the exact plan the run layer is
+// holding: the announced rule inputs, the rule landmarks, the plan's execution
+// geometry and its timing state, in one bounded machine-readable line.
+void test_plan_line_pins_the_execution_plan(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+    ev::OperatorPlanView view;
+    view.status = ev::RunExecutionPlanStatus::Planned;
+    view.ruleGeometryKnown = true;
+    view.geometry = ev::RunAxisGeometry(7.50, 1.00, 3.00);
+    view.targetTimeKnown = true;
+    view.targetTimeS = 15.0;
+    view.earliestContactMpPositionM = 2.90;
+    view.latestContactMpPositionM = 3.10;
+    view.captureGuaranteedMpPositionM = 3.35;
+    view.forwardStopMpPositionM = 9.625;
+    view.reverseStopMpPositionM = 7.50;
+    view.timingReady = true;
+    view.predictedMotionTimeS = 12.20;
+    view.initialDelayS = 0.50;
+
+    const uint16_t length = ev::formatPlanLine(view, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(length > 0U);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), length);
+    TEST_ASSERT_EQUAL_STRING(
+        "PLAN,ready=1,reason=none,target_m=7.5000,time_s=15.0000,line_dist_m=1.0000,"
+        "bottle_start_m=3.0000,bottle_line_m=8.5000,window_lo_m=2.9000,window_hi_m=3.1000,"
+        "capture_m=3.3500,fwd_stop_m=9.6250,rev_stop_m=7.5000,timing_ready=1,"
+        "predicted_s=12.2000,delay_s=0.5000",
+        buffer);
+    expectPlanFieldOrder(buffer);
+
+    // The Bottle Line is derived from the announced values, not stored: the
+    // Target Point plus the announced Bottle Line Distance.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",bottle_line_m=8.5000,"));
+}
+
+// A plan that is not usable names the reason in the plan module's own vocabulary,
+// and everything that describes the plan is marked absent rather than printed as a
+// zero - a zero position would read as a landmark at the Start Point.
+void test_plan_line_names_the_reason_a_plan_is_unusable(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+
+    // An announced run whose plan refused: the rule geometry is what the operator
+    // typed, and the named refusal is the one thing that is missing.
+    ev::OperatorPlanView refused;
+    refused.status = ev::RunExecutionPlanStatus::MissingForwardExecutionTarget;
+    refused.ruleGeometryKnown = true;
+    refused.geometry = ev::RunAxisGeometry(7.50, 1.00, 3.00);
+    refused.targetTimeKnown = true;
+    refused.targetTimeS = 15.0;
+
+    TEST_ASSERT_TRUE(ev::formatPlanLine(refused, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "PLAN,ready=0,reason=MissingForwardExecutionTarget,target_m=7.5000,time_s=15.0000,"
+        "line_dist_m=1.0000,bottle_start_m=3.0000,bottle_line_m=8.5000,window_lo_m=-,"
+        "window_hi_m=-,capture_m=-,fwd_stop_m=-,rev_stop_m=-,timing_ready=0,predicted_s=-,"
+        "delay_s=-",
+        buffer);
+    expectPlanFieldOrder(buffer);
+
+    // Before any announcement there is no run axis to report either.
+    const ev::OperatorPlanView nothing;
+    TEST_ASSERT_TRUE(ev::formatPlanLine(nothing, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "PLAN,ready=0,reason=NotPlanned,target_m=-,time_s=-,line_dist_m=-,"
+        "bottle_start_m=-,bottle_line_m=-,window_lo_m=-,window_hi_m=-,capture_m=-,"
+        "fwd_stop_m=-,rev_stop_m=-,timing_ready=0,predicted_s=-,delay_s=-",
+        buffer);
+    expectPlanFieldOrder(buffer);
+
+    // Every plan status is a comma-free name, so the reason field is always one
+    // field whatever refused.
+    for (uint8_t index = 0U;
+         index <= static_cast<uint8_t>(ev::RunExecutionPlanStatus::NotPlanned); ++index) {
+        ev::OperatorPlanView each;
+        each.status = static_cast<ev::RunExecutionPlanStatus>(index);
+        TEST_ASSERT_TRUE(ev::formatPlanLine(each, buffer, ev::kSerialLineCapacity) > 0U);
+        TEST_ASSERT_NULL(strchr(buffer, ' '));
+        const char* name = ev::operatorPlanReasonName(each.status);
+        TEST_ASSERT_NOT_NULL(strstr(buffer, name));
+    }
+}
+
+// A usable plan that is not timing-ready reports `timing_ready=0` and no predicted
+// motion time, but a real deliberate delay of zero: the plan's own contract says
+// its 0.0 predicted time means "not available", while its delay is a value the run
+// spends.
+void test_plan_line_separates_an_absent_time_from_a_zero_delay(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+    ev::OperatorPlanView view;
+    view.status = ev::RunExecutionPlanStatus::Planned;
+    view.ruleGeometryKnown = true;
+    view.geometry = ev::RunAxisGeometry(7.50, 1.00, 3.00);
+    view.targetTimeKnown = true;
+    view.targetTimeS = 15.0;
+    view.earliestContactMpPositionM = 2.90;
+    view.latestContactMpPositionM = 3.10;
+    view.captureGuaranteedMpPositionM = 3.35;
+    view.forwardStopMpPositionM = 9.625;
+    view.reverseStopMpPositionM = 7.50;
+    view.timingReady = false;
+    view.predictedMotionTimeS = 0.0;
+    view.initialDelayS = 0.0;
+
+    TEST_ASSERT_TRUE(ev::formatPlanLine(view, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "PLAN,ready=1,reason=none,target_m=7.5000,time_s=15.0000,line_dist_m=1.0000,"
+        "bottle_start_m=3.0000,bottle_line_m=8.5000,window_lo_m=2.9000,window_hi_m=3.1000,"
+        "capture_m=3.3500,fwd_stop_m=9.6250,rev_stop_m=7.5000,timing_ready=0,"
+        "predicted_s=-,delay_s=0.0000",
+        buffer);
+}
+
+// The report is a rendering of values it was handed: formatting the same view twice
+// produces the same bytes, and a line that does not fit is emitted as nothing
+// rather than truncated.
+void test_plan_line_output_is_stable_and_all_or_nothing(void) {
+    char first[ev::kSerialLineBufferBytes];
+    char second[ev::kSerialLineBufferBytes];
+    ev::OperatorPlanView view;
+    view.status = ev::RunExecutionPlanStatus::Planned;
+    view.ruleGeometryKnown = true;
+    view.geometry = ev::RunAxisGeometry(7.50, 1.00, 3.00);
+    view.forwardStopMpPositionM = 9.625;
+    view.reverseStopMpPositionM = 7.50;
+    view.initialDelayS = 0.0;
+
+    const uint16_t firstLength = ev::formatPlanLine(view, first, ev::kSerialLineCapacity);
+    const uint16_t secondLength = ev::formatPlanLine(view, second, ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(firstLength > 0U);
+    TEST_ASSERT_EQUAL_UINT16(firstLength, secondLength);
+    TEST_ASSERT_EQUAL_STRING(first, second);
+
+    // The same view against a buffer too small for it: nothing, not a prefix.
+    char small[64];
+    small[0] = 'x';
+    small[1] = '\0';
+    TEST_ASSERT_EQUAL_UINT16(ev::kBoundedLineDidNotFit,
+                             ev::formatPlanLine(view, small, 40U));
+    TEST_ASSERT_EQUAL_STRING("", small);
+}
+
 // The declared worst case is the real one, per response family. A table entry
 // that grows breaks this test rather than the transport's buffer assumption.
 void test_worst_case_responses_match_the_declared_bounds(void) {
@@ -541,8 +708,49 @@ void test_worst_case_responses_match_the_declared_bounds(void) {
         ev::formatTelemetryState(wideTelemetry, buffer, ev::kSerialLineCapacity);
     TEST_ASSERT_EQUAL_UINT32(ev::kOperatorTelemetryLineWorstCaseChars, telemetryLength);
 
+    // The plan report: every one of its twelve numeric fields at the widest value
+    // `BoundedText` can write, which is 13 characters for a negative value in the
+    // seven-integer-digit range. The three geometry fields are chosen so that all
+    // three render at 13 characters at once, which is what makes this form the
+    // real worst case rather than an assumed one.
+    ev::OperatorPlanView widePlan;
+    widePlan.status = ev::RunExecutionPlanStatus::Planned;
+    widePlan.ruleGeometryKnown = true;
+    widePlan.geometry = ev::RunAxisGeometry(-6000000.0, -3000000.0, -9999999.9999);
+    widePlan.targetTimeKnown = true;
+    widePlan.targetTimeS = -9999999.9999;
+    widePlan.earliestContactMpPositionM = -9999999.9999;
+    widePlan.latestContactMpPositionM = -9999999.9999;
+    widePlan.captureGuaranteedMpPositionM = -9999999.9999;
+    widePlan.forwardStopMpPositionM = -9999999.9999;
+    widePlan.reverseStopMpPositionM = -9999999.9999;
+    widePlan.timingReady = true;
+    widePlan.predictedMotionTimeS = -9999999.9999;
+    widePlan.initialDelayS = -9999999.9999;
+    const uint16_t planLength =
+        ev::formatPlanLine(widePlan, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_EQUAL_UINT32(ev::kOperatorPlanLineWorstCaseChars, planLength);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), planLength);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",bottle_line_m=-9000000.0000,"));
+
+    // The refusal form, carrying the widest reason name, is inside the same bound:
+    // its plan fields are absent markers while the announced rule geometry is still
+    // reported.
+    ev::OperatorPlanView wideRefusal;
+    wideRefusal.status = ev::RunExecutionPlanStatus::MissingBottleInteractionCalibration;
+    wideRefusal.ruleGeometryKnown = true;
+    wideRefusal.geometry = ev::RunAxisGeometry(-6000000.0, -3000000.0, -9999999.9999);
+    wideRefusal.targetTimeKnown = true;
+    wideRefusal.targetTimeS = -9999999.9999;
+    const uint16_t refusalLength =
+        ev::formatPlanLine(wideRefusal, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(refusalLength > 0U);
+    TEST_ASSERT_TRUE(refusalLength <= ev::kOperatorPlanLineWorstCaseChars);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), refusalLength);
+
     // And every one of them fits the buffer the transport actually allocates.
     TEST_ASSERT_TRUE(ev::kOperatorResponseWorstCaseChars <= ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(ev::kOperatorPlanLineWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(ev::kOperatorStatusLineWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(ev::kOperatorConfigEchoWorstCaseChars <= ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(ev::kOperatorTelemetryLineWorstCaseChars <= ev::kSerialLineCapacity);
@@ -579,6 +787,7 @@ void test_help_table_lists_the_commands(void) {
     bool mentionsTelemetryRate = false;
     bool mentionsStatus = false;
     bool mentionsBoot = false;
+    bool mentionsPlan = false;
     for (uint16_t index = 0U; index < ev::kOperatorHelpLineCount; ++index) {
         const char* line = ev::kOperatorHelpLines[index];
         TEST_ASSERT_NOT_NULL(line);
@@ -588,11 +797,13 @@ void test_help_table_lists_the_commands(void) {
         mentionsDisarm = mentionsDisarm || strncmp(line, "disarm ", 7U) == 0;
         mentionsStatus = mentionsStatus || strncmp(line, "status ", 7U) == 0;
         mentionsBoot = mentionsBoot || strncmp(line, "boot ", 5U) == 0;
+        mentionsPlan = mentionsPlan || strncmp(line, "plan ", 5U) == 0;
         mentionsConfigSet = mentionsConfigSet || strncmp(line, "config set ", 11U) == 0;
         mentionsTelemetryRate = mentionsTelemetryRate || strncmp(line, "telemetry rate ", 15U) == 0;
     }
     TEST_ASSERT_TRUE(mentionsStatus);
     TEST_ASSERT_TRUE(mentionsBoot);
+    TEST_ASSERT_TRUE(mentionsPlan);
     TEST_ASSERT_TRUE(mentionsArm);
     TEST_ASSERT_TRUE(mentionsDisarm);
     TEST_ASSERT_TRUE(mentionsConfigSet);
@@ -615,6 +826,10 @@ int main(int, char**) {
     RUN_TEST(test_status_line_reports_an_empty_vehicle);
     RUN_TEST(test_telemetry_responses_report_the_realized_state);
     RUN_TEST(test_version_line_reports_identity_and_schema);
+    RUN_TEST(test_plan_line_pins_the_execution_plan);
+    RUN_TEST(test_plan_line_names_the_reason_a_plan_is_unusable);
+    RUN_TEST(test_plan_line_separates_an_absent_time_from_a_zero_delay);
+    RUN_TEST(test_plan_line_output_is_stable_and_all_or_nothing);
     RUN_TEST(test_worst_case_responses_match_the_declared_bounds);
     RUN_TEST(test_a_response_that_does_not_fit_emits_nothing);
     RUN_TEST(test_help_table_lists_the_commands);

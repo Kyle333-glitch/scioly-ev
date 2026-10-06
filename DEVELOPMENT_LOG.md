@@ -6799,3 +6799,117 @@ a delay in the drivetrain, or how the officials time the run. H10 must record th
 official time (timekeeper or video) **and** the internal metric for the same
 runs, side by side, and only a series of those pairs can say whether the internal
 number is usable - the same evidentiary rule the timing model itself is held to.
+## D46 / S9 - 2026-10-05 - A read-only plan report: the operator can read the exact plan the run holds, or the named reason there is none
+
+**Scope.** S9 adds one inspection command, `plan`, that renders the run layer's
+current immutable `RunExecutionPlan` as a single bounded `PLAN` line: the announced
+rule inputs and landmarks, the plan's execution targets, contact window and capture
+point, its timing state and its deliberate start delay - or the plan's own named
+status when there is no usable plan. It is read-only in the strongest sense: the
+formatter is handed a value copy of facts the run layer already holds, the accessor
+is `const`, nothing in the path adopts, clears or adjusts a plan, and the command
+is admissible in every state - including while a run is under way - so reading the
+plan can never wait on control or gate it. No calibration value changed, no
+physical behaviour is claimed, and no hardware was touched.
+
+**The command, in the three modules that own it.**
+
+- Parser (`SerialCommandParser.h`): `OperatorCommandId::Plan`, spelled `plan`, one
+  token exactly (`plan extra` is `WrongTokenCount`), and `operatorCommandName()`
+  returns `plan`.
+- Policy (`OperatorPolicy.h`): `isInspectionCommand(Plan)` is true, so
+  `admissibilityOf()` admits it in every phase, armed or faulted, exactly like
+  `status` and `checks`. It is not a telemetry command and it is not in the
+  vocabulary that changes run-control state.
+- Runtime (`VehicleRuntime.h/.cpp`): `planView()`, a `const` method, gathers the
+  view from `executionPlan_.plan()` and the announced rule geometry and Target
+  Time; `applyCommand()` adds the one case that formats and stages the line. The
+  report goes out through the same bounded, non-blocking `respondLine()` every
+  other response uses.
+
+**The output contract** (one line, prefix `PLAN`, fixed field order; a field that
+moves breaks a test):
+
+```
+PLAN,ready=<0|1>,reason=<name|none>,target_m=<v>,time_s=<v>,line_dist_m=<v>,
+bottle_start_m=<v>,bottle_line_m=<v>,window_lo_m=<v>,window_hi_m=<v>,
+capture_m=<v>,fwd_stop_m=<v>,rev_stop_m=<v>,timing_ready=<0|1>,
+predicted_s=<v|->,delay_s=<v|->
+```
+
+- `ready`/`reason`: whether a usable execution plan exists and, when it does not,
+  the named refusal in the plan module's own vocabulary
+  (`runExecutionPlanStatusName()`), with `reason=none` when a plan exists - the
+  `first=none` convention the check report already uses. `ready` is plan
+  readiness, not arming readiness: a run can be `ready=1` and unarmable, and that
+  is what `CHECK`/`arm` report.
+- The rule inputs (`target_m`, `time_s`, `line_dist_m`) and the two rule landmarks
+  (`bottle_start_m`, `bottle_line_m`, the latter derived as the Target Point plus
+  the announced Bottle Line Distance) are reported whenever a run has been
+  announced, **even when the plan refused**: the geometry is a fact about the
+  announcement, so "the geometry is what you typed, and the plan refuses for this
+  named reason" reads off one line.
+- `window_lo_m`/`window_hi_m` are the credible contact window (the earliest
+  approach completion and the latest credible contact), `capture_m` is the
+  capture guarantee, `fwd_stop_m` is the run's single forward execution target
+  (Bottle Line plus the measured margin) and `rev_stop_m` is the announced Target
+  Point the reverse leg ends at.
+- Everything that describes the plan is a one-character absent marker when there
+  is no usable plan, never a zero: a zero position would read as a landmark at the
+  Start Point, which is the one reading a diagnostic must not invent.
+- `predicted_s` is marked absent when the plan is not timing-ready, because the
+  plan's own contract says its `0.0` means "not available"; `delay_s` is a real
+  value whenever a plan exists, including the production `0.0000` - the plan does
+  state the delay the run will spend, and it is zero.
+
+**Boundedness.** `kOperatorPlanLineWorstCaseChars` is **340**, derived field by
+field in the header: twelve numeric fields at `BoundedText::appendFixed()`'s
+13-character bound plus the keys and the `PLAN,ready=1,reason=none` summary. It is
+an upper bound *and* it is reachable - all three geometry fields can render at 13
+characters at once (`target_m=-6000000.0000`, `line_dist_m=-3000000.0000`, so
+`bottle_line_m=-9000000.0000`) - while the widest refusal form is far narrower
+despite carrying the 35-character `MissingBottleInteractionCalibration`. A
+`static_assert` holds it under `kSerialLineCapacity` (576), and the worst-case
+test pins the number, the reachable form and both refusal forms.
+
+**Tests (+6 test cases; native 599 -> 605).**
+
+- `test_serial_command_parser`: `plan` is in the accepted-vocabulary pin, and
+  `plan extra` is `WrongTokenCount`.
+- `test_operator_policy`: the dedicated
+  `test_the_plan_report_is_read_only_and_ungated` pins that `plan` is inspection
+  (not telemetry) and that every phase, armed and faulted, admits it - the state
+  restriction answered for the new command rather than assumed.
+- `test_operator_response` (+4): the ready form pinned byte for byte (including
+  the derived Bottle Line), the refusal forms pinned with the named reason and the
+  absent markers (announced-and-refused, and nothing announced), the separation of
+  an absent predicted time from a real zero delay, output stability (formatting a
+  view twice produces identical bytes, and a line that does not fit produces
+  nothing), the field order asserted for every form, the widest form pinned to
+  `kOperatorPlanLineWorstCaseChars`, and the help table checked to list `plan`.
+- `test_serial_independence` (+1): the scenario types `plan` before any
+  announcement and again while the run's phases are under way, and asserts both
+  were admitted (a complete `PLAN` line) while the recorded control trace stayed
+  bit-identical to the run with no serial consumer at all - the S9 acceptance
+  evidence that disconnecting serial cannot change an outcome, now with the new
+  command in the stream.
+
+**Validation (clean build, on the frozen tree).** Native **605/605** in 33 suites,
+exit 0; `nano_r4`, `bench` and `bench-watchdog` all SUCCESS with 0 warnings from a
+clean build, RAM 6772/6972/6956 (unchanged from S8) and Flash 74404/81236/80664
+(+1160/+1148/+1148: the new formatter and its string table); `tools/telemetry`
+**119/119 OK** (untouched by this stage); `git diff --check` clean; every changed
+file 100% CRLF.
+
+**Not changed (owned elsewhere).** `maxRunDuration` (S10), the legal-parameter
+sweep (S11) and the remaining documentation synchronisation (S12) are untouched,
+as is every safety, stop, reversal, fault and arming behaviour. The telemetry wire
+schema stays **v3** - the plan report is an operator response, not a sample field.
+No `.agent-work` material, no evidence promotion: all twelve `VERIFIED_STATE.md`
+rows remain UNVERIFIED.
+
+**What this stage does not claim.** The report says what the firmware's plan is;
+it does not make that plan usable. With the provisional configuration the plan
+still refuses with `MissingForwardExecutionTarget`, and `plan` is exactly the
+command that says so from the vehicle. Physical validation of anything the plan
+describes remains H8's work.

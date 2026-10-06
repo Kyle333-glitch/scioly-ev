@@ -427,6 +427,15 @@ private:
 
     ev::OperatorSystemState systemState() const;
     ev::OperatorStatusView statusView() const;
+
+    // The run layer's current execution plan, gathered for the `plan` report. A
+    // read-only copy: it reads the immutable plan the run layer holds, the
+    // announced rule geometry and the held Target Time, and touches no run state.
+    // It is a `const` method on purpose - the report is a diagnostic, and a
+    // diagnostic that could adjust the plan it is describing would be a control
+    // path wearing a diagnostic's name.
+    ev::OperatorPlanView planView() const;
+
     ev::OperatorTelemetryView telemetryView() const;
     ev::HeldRunConfigVerdict heldVerdict() const;
 

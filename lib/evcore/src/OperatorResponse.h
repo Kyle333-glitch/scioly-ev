@@ -4,6 +4,7 @@
 
 #include "BoundedText.h"
 #include "OperatorPolicy.h"
+#include "RunExecutionPlan.h"
 #include "TelemetryRecord.h"
 
 namespace ev {
@@ -18,8 +19,8 @@ namespace ev {
 // both. The differences from telemetry are deliberate and few:
 //
 // * **A different prefix** per response kind (`OK`, `ERR`, `STATUS`, `CONFIG`,
-//   `CHECK`, `TELEMETRY`, `VERSION`), so a human scanning a serial monitor sees
-//   what they asked for without decoding field names.
+//   `CHECK`, `PLAN`, `TELEMETRY`, `VERSION`), so a human scanning a serial
+//   monitor sees what they asked for without decoding field names.
 // * **A refusal names its reason.** An `ERR` line carries the reason a command
 //   was not applied, spelled by the vocabulary that owns it: a parse rejection by
 //   `commandErrorName()`, a state restriction by `commandRefusalName()`, an
@@ -49,6 +50,7 @@ constexpr const char* kOperatorErrorPrefix = "ERR";
 constexpr const char* kOperatorStatusPrefix = "STATUS";
 constexpr const char* kOperatorConfigPrefix = "CONFIG";
 constexpr const char* kOperatorChecksPrefix = "CHECK";
+constexpr const char* kOperatorPlanPrefix = "PLAN";
 constexpr const char* kOperatorTelemetryPrefix = "TELEMETRY";
 constexpr const char* kOperatorVersionPrefix = "VERSION";
 
@@ -76,6 +78,11 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 //                   can have, since every check from that one on fails)
 //   TELEMETRY = 88  the widest stride (ten digits) next to the rate it produces
 //                   (six), and two ten-digit drop counters
+//   PLAN    = 340   every plan field with the widest value it can hold and the
+//                   readiness summary that form implies (`reason=none` beside
+//                   `ready=1`), which is wider than the refusal form: a refusal
+//                   names a longer reason but every field that describes the plan
+//                   is then the absent marker, twelve characters narrower each
 constexpr uint16_t kOperatorStatusLineWorstCaseChars = 357U;
 constexpr uint16_t kOperatorConfigEchoWorstCaseChars = 170U;
 constexpr uint16_t kOperatorChecksLineWorstCaseChars = 445U;
@@ -84,13 +91,41 @@ constexpr uint16_t kOperatorTelemetryLineWorstCaseChars = 88U;
 // (`PlanExceedsMaxRunDuration`), four 13-character fixed-point values, and the
 // prefix and field names around them.
 constexpr uint16_t kOperatorAnnounceAckWorstCaseChars = 138U;
+// The plan report. Derived field by field, because it is a fixed-schema line whose
+// bound a later field addition has to break visibly rather than silently:
+//
+//   `PLAN` + `,ready=1` + `,reason=none`                 24  (4 + 8 + 12)
+//   the five rule fields' keys (10 + 8 + 13 + 16 + 15)   62  each with one
+//                                                          13-char value = 127
+//   the five execution fields' keys (13 + 13 + 11 + 12 + 12)  61  each with one
+//                                                          13-char value = 126
+//   `,timing_ready=1` + `,predicted_s=` + `,delay_s=`    37  plus two 13-char
+//                                                          values = 63
+//                                                     ----
+//                                                       340
+//
+// Derivation: `BoundedText::appendFixed()` bounds one finite in-range value at 13
+// characters (sign, seven integer digits, dot, four decimals), and a bool field has
+// one, so 12 values at 13 characters is a hard upper bound on the numeric part of
+// this line - 340 is that bound, and it is *reachable*: the geometry fields can all
+// three render at 13 characters at once (`target_m=-6000000.0000`,
+// `line_dist_m=-3000000.0000`, so `bottle_line_m=-9000000.0000`), which is why the
+// bottle-line derivation does not lower the bound. The refusal forms are narrower:
+// the widest reason name (`MissingBottleInteractionCalibration`, 35 characters) is
+// 23 characters longer than `,reason=none`, while every field that describes the
+// plan becomes a one-character absent marker - twelve characters narrower each. A
+// test pins the number, the reachable form, and both refusal forms inside it.
+constexpr uint16_t kOperatorPlanLineWorstCaseChars = 340U;
 
 // The largest response this module can produce. `config set`'s confirmation is
-// the echo plus a `cmd` field, comfortably under the checks report.
+// the echo plus a `cmd` field, and the plan report is narrower than the checks
+// report, which is the widest line here.
 constexpr uint16_t kOperatorResponseWorstCaseChars = kOperatorChecksLineWorstCaseChars;
 
 static_assert(kOperatorResponseWorstCaseChars <= kSerialLineCapacity,
               "the shared serial line must hold the widest operator response");
+static_assert(kOperatorPlanLineWorstCaseChars <= kSerialLineCapacity,
+              "the shared serial line must hold the widest plan report");
 
 // ---------------------------------------------------------------------------
 // The views
@@ -120,6 +155,65 @@ struct OperatorTelemetryView {
     uint32_t strideTicks = 1U;
     uint16_t controlCadenceHz = 0U;
     TelemetryDrops drops{};
+};
+
+// The run layer's plan, as `plan` reports it: the announced run's execution
+// geometry and the run's timing state, or the named reason there is no usable
+// plan.
+//
+// It is a **read-only copy of facts the run layer already holds** - the plan it
+// is running on and the announced rule geometry that produced it - gathered by the
+// vehicle layer and rendered here. Nothing in this module (or in the view) can
+// change the plan: the plan is immutable by construction and this is a value
+// copied out of it, so a report can never move a target, a threshold or a delay.
+//
+// Two kinds of absence, and they are different facts:
+//
+//   * `ruleGeometryKnown` - whether a run has been announced at all. The rule
+//     geometry (`RunAxisGeometry`) belongs to the announcement, not to the plan,
+//     so it survives a plan that refused: "the announcement is fine, the plan
+//     refuses because the forward-execution margin is not measured" is exactly the
+//     answer an operator needs, and it needs both halves.
+//   * `status` - the plan's own named verdict. Everything that describes the plan
+//     (the execution landmarks, the timing state, the deliberate delay) exists only
+//     when it is `Planned`; otherwise the formatter marks those fields absent.
+struct OperatorPlanView {
+    // The run layer's current execution plan status: `Planned` when a usable plan
+    // exists, and otherwise the reason it does not, in the vocabulary the plan
+    // module owns (`runExecutionPlanStatusName()`).
+    RunExecutionPlanStatus status = RunExecutionPlanStatus::NotPlanned;
+
+    // The announced **rule** geometry, meaningful when `ruleGeometryKnown`. Copied
+    // from the run layer's announced geometry, which is the same value the plan was
+    // built from.
+    bool ruleGeometryKnown = false;
+    RunAxisGeometry geometry{0.0, 0.0, 0.0};
+
+    // The announced Target Time (rule input), and whether the operator supplied it.
+    bool targetTimeKnown = false;
+    double targetTimeS = 0.0;
+
+    // The plan's execution landmarks, metres on the run axis, signed. Meaningful
+    // only when the plan is usable: a refused plan carries none, and the formatter
+    // writes the absent marker rather than a misleading zero.
+    double earliestContactMpPositionM = 0.0;
+    double latestContactMpPositionM = 0.0;
+    double captureGuaranteedMpPositionM = 0.0;
+    double forwardStopMpPositionM = 0.0;
+    double reverseStopMpPositionM = 0.0;
+
+    // The plan's timing state. `timingReady` is reported for every plan (a bool has
+    // no absent form in this schema); `predictedMotionTimeS` is reported only when
+    // it is meaningful, because the plan's own contract says a not-timing-ready
+    // plan's 0.0 means "not available" rather than "no time at all" - so a marker
+    // says that better than a number that reads like a measurement.
+    bool timingReady = false;
+    double predictedMotionTimeS = 0.0;
+
+    // The run's deliberate start delay, seconds. A real value even when zero: a
+    // usable plan states the delay the run will spend, and 0.0 is the honest
+    // production value while the timing model is unvalidated.
+    double initialDelayS = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -332,6 +426,135 @@ inline uint16_t formatChecksLine(const ConfigurationBuildChecks& checks, char* b
 }
 
 // ---------------------------------------------------------------------------
+// The plan report
+// ---------------------------------------------------------------------------
+
+// The reason field's spelling of a plan verdict: `none` when a usable plan
+// exists, and otherwise the plan module's own name for the refusal. `none`
+// rather than `Planned` follows the check report's `first=none` convention - the
+// field answers "what is wrong?", and nothing is wrong.
+inline const char* operatorPlanReasonName(RunExecutionPlanStatus status) {
+    return status == RunExecutionPlanStatus::Planned ? "none"
+                                                     : runExecutionPlanStatusName(status);
+}
+
+// `PLAN,ready=<0|1>,reason=<name>,<rule inputs and landmarks>,<execution
+// targets>,timing_ready=<0|1>,predicted_s=<v>,delay_s=<v>` - the read-only
+// sanity check of the run the vehicle currently holds a plan for.
+//
+// What the columns say, one at a time:
+//
+//   * `ready` / `reason` - whether a usable execution plan exists, and if not,
+//     which named refusal explains it. `ready` is **not** arming readiness: it
+//     says the run has execution geometry to travel, not that the vehicle may move
+//     (`CHECK`/`arm` own that, and the same run can be `ready=1` and unarmable).
+//   * `target_m`, `time_s`, `line_dist_m` - the announced rule inputs the plan was
+//     built from: the Target Point (rule 8.h), the announced Target Time (rule
+//     8.b/8.i) and the Bottle Line Distance (rule 8.j).
+//   * `bottle_start_m`, `bottle_line_m` - the two rule landmarks on the run axis:
+//     the Bottle Start Point the level fixes (rule 7.c.ii.(5)) and the Bottle Line
+//     (the Target Point plus the announced Bottle Line Distance). Both are rule
+//     geometry, not execution targets.
+//   * `window_lo_m`, `window_hi_m` - the credible contact window: the earliest and
+//     latest measurement-point positions at which the bottle's touch can credibly
+//     be reported. Reaching `window_lo_m` is where the run's approach completes; it
+//     is a statement about travel, never a claim that the bottle was touched.
+//   * `capture_m` - the position at which the bottle counts as captured; a valid
+//     plan puts it beyond the whole window.
+//   * `fwd_stop_m` - the run's **single forward execution target**: the Bottle Line
+//     plus the measured forward-stop margin, which is where the travel taper ends
+//     and where the push completes. Not the Bottle Line unless that margin is
+//     exactly zero.
+//   * `rev_stop_m` - the reverse leg's execution target: the announced Target
+//     Point.
+//   * `timing_ready` - whether measured physical timing evidence exists for this
+//     run. False is the honest production value; while it is false the run uses the
+//     configured cruise and spends no deliberate delay.
+//   * `predicted_s` - the plan's predicted motion time, when there is one to
+//     report. Marked absent rather than written as `0.0000`, because a
+//     not-timing-ready plan's zero means "not available", not "no time".
+//   * `delay_s` - the run's deliberate start delay, the one value the run spends in
+//     `OptionalDelay`. Reported whenever a usable plan exists, including the
+//     production `0.0000`.
+//
+// The rule inputs and landmarks are reported even when the plan refused, because
+// the announcement is a different fact from the plan and "the geometry is what you
+// typed, and the plan refuses for this named reason" is the answer an operator is
+// looking for. Everything that describes the plan itself is marked absent instead
+// of printed as a zero: a zero position would read as a landmark at the Start
+// Point, which is the one reading a diagnostic must never invent.
+//
+// The field order is fixed and every field is always present, so a reader can
+// compare two plan reports column by column, and this function reads the view and
+// writes bytes - it holds no state, mutates nothing, and cannot change a plan.
+inline uint16_t formatPlanLine(const OperatorPlanView& view, char* buffer, uint16_t capacity) {
+    const bool ready = view.status == RunExecutionPlanStatus::Planned;
+    BoundedText text(buffer, capacity);
+    text.appendText(kOperatorPlanPrefix);
+    text.field("ready").appendBool(ready);
+    text.field("reason").appendText(operatorPlanReasonName(view.status));
+
+    // The announced rule inputs and landmarks. `-` until a run has been
+    // announced, because before that there is no run axis to report.
+    if (view.ruleGeometryKnown) {
+        text.field("target_m").appendFixed(view.geometry.targetPointPositionM,
+                                           kTelemetryFieldDecimals);
+    } else {
+        text.field("target_m").appendText(kTelemetryMissingField);
+    }
+    if (view.targetTimeKnown) {
+        text.field("time_s").appendFixed(view.targetTimeS, kTelemetryFieldDecimals);
+    } else {
+        text.field("time_s").appendText(kTelemetryMissingField);
+    }
+    if (view.ruleGeometryKnown) {
+        text.field("line_dist_m").appendFixed(view.geometry.bottleLineDistanceM,
+                                               kTelemetryFieldDecimals);
+        text.field("bottle_start_m").appendFixed(view.geometry.bottleStartPositionM,
+                                                 kTelemetryFieldDecimals);
+        text.field("bottle_line_m").appendFixed(view.geometry.bottleLinePositionM(),
+                                                kTelemetryFieldDecimals);
+    } else {
+        text.field("line_dist_m").appendText(kTelemetryMissingField);
+        text.field("bottle_start_m").appendText(kTelemetryMissingField);
+        text.field("bottle_line_m").appendText(kTelemetryMissingField);
+    }
+
+    // The plan's own geometry: only a usable plan has any.
+    if (ready) {
+        text.field("window_lo_m").appendFixed(view.earliestContactMpPositionM,
+                                               kTelemetryFieldDecimals);
+        text.field("window_hi_m").appendFixed(view.latestContactMpPositionM,
+                                               kTelemetryFieldDecimals);
+        text.field("capture_m").appendFixed(view.captureGuaranteedMpPositionM,
+                                             kTelemetryFieldDecimals);
+        text.field("fwd_stop_m").appendFixed(view.forwardStopMpPositionM,
+                                              kTelemetryFieldDecimals);
+        text.field("rev_stop_m").appendFixed(view.reverseStopMpPositionM,
+                                              kTelemetryFieldDecimals);
+    } else {
+        text.field("window_lo_m").appendText(kTelemetryMissingField);
+        text.field("window_hi_m").appendText(kTelemetryMissingField);
+        text.field("capture_m").appendText(kTelemetryMissingField);
+        text.field("fwd_stop_m").appendText(kTelemetryMissingField);
+        text.field("rev_stop_m").appendText(kTelemetryMissingField);
+    }
+
+    text.field("timing_ready").appendBool(view.timingReady);
+    if (ready && view.timingReady) {
+        text.field("predicted_s").appendFixed(view.predictedMotionTimeS, kTelemetryFieldDecimals);
+    } else {
+        text.field("predicted_s").appendText(kTelemetryMissingField);
+    }
+    if (ready) {
+        text.field("delay_s").appendFixed(view.initialDelayS, kTelemetryFieldDecimals);
+    } else {
+        text.field("delay_s").appendText(kTelemetryMissingField);
+    }
+    return finishBoundedLine(text, buffer);
+}
+
+// ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
 
@@ -457,13 +680,14 @@ constexpr const char* const kOperatorHelpLines[] = {
     "config check  - re-run the rule validation now",
     "config set level=<regional|state|national> distance=<m> time=<s> bottle_line=<m>",
     "config clear  - discard the held configuration",
+    "plan          - the announced run's execution plan, or why there is none",
     "announce      - offer the held configuration to a run",
     "arm           - arm for the announced run (every check must pass)",
     "disarm        - disarm; always available, also during a run",
     "reset         - return the chain to the new-run boundary",
     "telemetry on | off | status",
     "telemetry rate <hz>",
-    "records: EVS/EVE lines; responses: OK, ERR, STATUS, CONFIG, CHECK, TELEMETRY, VERSION",
+    "records: EVS/EVE lines; responses: OK, ERR, STATUS, CONFIG, CHECK, PLAN, TELEMETRY, VERSION",
 };
 
 constexpr uint16_t kOperatorHelpLineCount =
