@@ -7065,3 +7065,95 @@ need does not exist. What S10 establishes is that the run-duration bound has a
 runtime path, that a run-duration overrun is a named fault with a deterministic
 stop, and that the arming gate is no longer permanently impossible because of a
 quantity this vehicle cannot sense.
+
+---
+
+## D48 / S11 - 2026-10-06 - The whole legal announced grid is swept on the host, and the real chain is driven to Done at every level
+
+S11 closes the gap between "the arithmetic is unit-tested at its boundaries" and
+"the arithmetic holds over the whole space the rules allow". It is a test-only
+stage: no production file changed, no calibration or limit value moved, no
+evidence was promoted and no hardware was touched.
+
+### What was built
+
+A new host suite `test/test_legal_sweep` (the 35th native suite, 12 cases) with
+three parts.
+
+**1. A full sweep of the announced space.** The grids come from the repository's
+rules source (`ev::rules2027`, `lib/evcore/src/RunConfig.h`, the code's copy of
+the official 2027 Division C Electric Vehicle rules): Target Distance 5.00-9.00 m
+on the level's own interval (0.25 m Regional/Invitational, 0.10 m State, 0.01 m
+National), Bottle Line Distance 1.00-3.00 m on the same interval, Target Time
+10.0-20.0 s on the 0.5 s grid, and the level's fixed bottle placement (rule
+7.c.ii.(5)). Every combination of all three is built through the production
+`ev::buildRunExecutionPlan()` with the scenario harness's own calibrated fixtures:
+
+- Regional 17 x 9 x 21 = 3,213 cases
+- State    41 x 21 x 21 = 18,081 cases
+- National 401 x 201 x 21 = 1,692,621 cases
+- total **1,713,915**, plus 20,000 deterministic random on-grid intermediates
+
+Each case asserts: the configuration validates; the plan is produced; every value
+is finite; no distance is negative and the delay is nonnegative; the landmark
+ordering invariant holds; the credible contact window is the announced tolerance
+either side of the nominal contact position and is not inverted; the forward
+execution target lies beyond the required capture region and at or beyond the push
+objective; the reverse target is exactly the announced Target Point; the derived
+positions are the documented arithmetic on their inputs; the plan's geometry
+carries the announced rule values; **one forward endpoint** (the motion shaper's
+leg target and the state progression's completion threshold are the same stored
+value, and the progression really completes there and not a millimetre earlier);
+no value exceeds a sane bound; and a second construction is bit-for-bit identical.
+
+**2. The real chain, not a second copy of a formula.** Fifteen representative
+configurations (the minimum, maximum and a shared interior point of every level's
+grid, plus two deterministic intermediates per level) are announced and armed,
+then driven through `evscenario::ScenarioHarness` - decoder, odometry, estimator,
+run policy, target shaping, regulator, safety boundary, actuator boundary - to
+`Done`. Each asserts the one phase order the run policy allows, no fault, a
+verified final stop, no dropped sample, the forward travel reaching the plan's own
+forward stop (and not far past it), the reverse leg returning to the announced
+Target Point within one control cycle, the boundary's forward-then-reverse
+direction order, and the whole-trace architecture invariants (one request per
+cycle, every drive authorized for its own cycle, every drive along the run's own
+leg, no powered reversal without a presented stop at a reported zero, `Fault` and
+`Done` safe). Four of those configurations are run twice and every recorded field
+compared.
+
+**3. Invalid and fuzz-style cases.** Named illegal announcements (off-grid,
+out-of-range, non-finite, another level's bottle placement, bottle at the Target
+Point) are refused with `InvalidAnnouncement`; the execution dependencies are
+refused by name (`MissingBottleInteractionCalibration`,
+`MissingForwardExecutionTarget`, `NonFiniteValue`,
+`ContradictoryExecutionGeometry`) and accepted at their exact boundaries (a window
+exactly as wide as the capture advance, a zero-width window, a forward stop
+exactly at the push objective, a zero push margin); 3,000 deterministic fuzzed
+configurations and 2,000 fuzzed dependency sets never produce a usable plan; and a
+refused plan is proven to carry no landmark, no leg target and no progression
+evidence, with the holder's `NotPlanned` lifecycle pinned.
+
+### Measured coverage and runtime
+
+The sweep prints its own totals: grid **1,713,915** cases in **5.3-7.8 s** across
+two runs on this machine, 20,000 random cases in **66-118 ms**, 5,000 fuzz cases
+in **10-14 ms**, and 23 end-to-end scenario runs in **193-293 ms**. The suite
+itself takes about 11 s and the full native run 63-73 s, so the sweep runs with
+every native run rather than behind a flag.
+
+### Not changed
+
+No production file, configuration or calibration value, telemetry wire schema
+(still **v3**), `VERIFIED_STATE.md` row or hardware was touched. S11 produces **no
+physical evidence**: every "measured" number in the sweep is a test fixture, the
+sweep reports only what the production arithmetic and the state machine do with
+stated evidence, and no synthetic result may be promoted. The documentation
+synchronisation (S12) and the open arming-gate question were not touched.
+
+### Validation (on the frozen tree)
+
+Native **628/628** in 35 suites (616 at S10; +12 new cases), `nano_r4`, `bench`
+and `bench-watchdog` all SUCCESS with 0 warnings, RAM unchanged at
+6772/6972/6956 and Flash unchanged at 74540/81380/80808 (a test-only change),
+`tools/telemetry` **119/119 OK**, `git diff --check` clean, every changed file
+100% CRLF.
