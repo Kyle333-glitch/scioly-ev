@@ -74,8 +74,11 @@ each step, operator.
    vehicle is armed - the facts that say which image and which configuration this
    boot is running.
 2. **Inspection, verbatim.** Record the exact bytes of `version`, `status`,
-   `checks`, `boot`, `config show`, `help` - `boot` (D23) re-sends the boot line on
-   demand and its answer *is* that line, so it must match the greeting verbatim.
+   `checks`, `boot`, `config show`, `plan`, `help` - `boot` (D23) re-sends the boot
+   line on demand and its answer *is* that line, so it must match the greeting
+   verbatim, and `plan` (D46/S9) reports the run layer's current execution plan, or
+   the plan module's own named reason there is none (with the shipped configuration
+   it is a named refusal, and on the assembled vehicle it cannot be anything else).
    Then record `announce` and `arm`: with the
    shipped provisional configuration both must be refused, and the refusal must
    name the first failing check. **Do not assume which check** - record the one
@@ -93,7 +96,10 @@ each step, operator.
    many tokens, a huge number and a half-finished command. Each produces a named
    error; no `OK` is produced for a command that was not applied; `status` still
    reports `phase=Idle`.
-5. **Telemetry shape and rate.** Confirm `EVS1` samples and `EVE1` events appear;
+5. **Telemetry shape and rate.** Confirm `EVS3` samples and `EVE3` events appear (the
+   current schema is version 3, `ev::kTelemetrySchemaVersion`; the H0/H0W-era
+   captures record the then-current `EVS1`/`EVE1`, and a sample now also carries the
+   run's own timeline fields);
    `telemetry off` stops the samples; `telemetry rate <hz>` changes the observed
    spacing to a whole number of ticks; the drop counters stay at zero while the
    host keeps up.

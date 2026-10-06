@@ -70,7 +70,7 @@ separately:
   the phase timeline - `pos_m` when `Capture` begins (the credible capture window
   opening, which is **not** a contact observation), when `Push` begins (capture
   guaranteed) and when `Push` ends (the forward execution target); push distance;
-  the phase timeline (`Capture`, `Push`) from the `EVE1` events; any fault or
+  the phase timeline (`Capture`, `Push`) from the `EVE3` events (schema 3); any fault or
   phase timeout; run time.
 - **observed:** the bottle's start position before the run (tape, per the
   placement tolerance) and final position after it (tape from the start point);

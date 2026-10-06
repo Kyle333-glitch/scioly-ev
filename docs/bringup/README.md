@@ -319,7 +319,7 @@ inconclusive.
 | #4 encoder direction sign | H2 |
 | #5 encoder signal quality | H2 hand-driven, H5 powered |
 | #6 rollout (effective distance per tick) | H4 |
-| #7 sensor scaling | H1B battery (and only if the fit criterion is met); current scaling is deferred to H3/H9 with a load |
+| #7 sensor scaling | H1B battery (**not installed on the assembled vehicle** - D32/S10 make an absent battery/current sense an explicit capability, so P-H1B Parts 1-2 can record raw `batt_counts`/`curr_counts` pairs but cannot establish a conversion, and the current scaling was deferred to H3/H9 with a load) |
 | #8 control gains / tuning values | H6 |
 | #9 braking behaviour and stopping distance | H7 |
 | #10 wheel slip | H4 (hand-rolled vs powered), H7, H10 |

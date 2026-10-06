@@ -197,7 +197,8 @@ gains transfer. The loaded numbers are the ones the competition run uses.
 ## Part C - reversal sequence
 
 Run the stop-and-reverse sequence through the real path and verify, from the
-`EVE1`/`EVS1` timeline **and from watching the vehicle**, that:
+`EVE3`/`EVS3` timeline (schema 3; the H0/H0W-era captures recorded `EVE1`/`EVS1`)
+**and from watching the vehicle**, that:
 
 - forward travel ramps down before any reverse torque is applied;
 - there is a verified stop (the phase timeline shows the ramp-down and the

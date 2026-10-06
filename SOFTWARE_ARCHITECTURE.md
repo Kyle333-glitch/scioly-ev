@@ -239,7 +239,8 @@ depend on facts tracked in `VERIFIED_STATE.md`:
   exists yet, and how the bottle actually behaves is still unknown
   (`VERIFIED_STATE.md` #11);
 - any *future* addition to the telemetry schema, the command vocabulary or the
-  response vocabulary. Schema version 1 and the command set are frozen in sections
+  response vocabulary. The current schema version (`ev::kTelemetrySchemaVersion`,
+  **3** since S8; see section 9) and the command set are frozen in sections
   9 and 16; adding a field, a command or an event is a deliberate change that
   records itself in `DEVELOPMENT_LOG.md`, and renaming a field or an event is a
   schema change that bumps `ev::kTelemetrySchemaVersion`, not a refactor;

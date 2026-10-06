@@ -193,6 +193,25 @@ recorded in `DEVELOPMENT_LOG.md`.
   a healthy `0`. See `DEVELOPMENT_LOG.md` D32. The driver's own on-chip protection
   is untouched; what is gone is the MCU's ability to observe it, which
   `docs/limitations.md` records.
+- **Architecture sync (S0-S12, D37-D49)** - no-hardware stages that brought the
+  documented contracts back into agreement with the code after the D36 bring-up
+  record, changing no physical fact's status. The official **rule landmarks**
+  (Target Point, Bottle Line, bottle placement) were separated from the vehicle's
+  **execution geometry**, which is now one immutable per-run `RunExecutionPlan`
+  (`lib/evcore/src/RunExecutionPlan.h`) owning the forward execution stop and the
+  reverse target; the run's forward progression facts were renamed to
+  `approachComplete`, `captureComplete` and `pushComplete` so the firmware states a
+  position-derived belief instead of sounding like it observed the bottle; an explicit per-phase
+  strategy velocity ceiling entered the existing target shaper (it can only slow a
+  phase); the run's deliberate delay moved into the plan (`initialDelayS`) while
+  the kinematic timing estimate became a labelled diagnostic; the internal Run Time
+  now ends at the start of the verified final-stop dwell (telemetry schema **3**,
+  `EVS3`/`EVE3`); `SafetyLimits::maxRunDurationS` gained its runtime consumer; an
+  absent battery sensor became an explicit capability rather than a missing
+  measurement; and a read-only `plan` command reports the held plan. A host sweep
+  of the whole legal announced parameter space backs the plan arithmetic. Every
+  `VERIFIED_STATE.md` row is unchanged: all twelve hardware rows remain UNVERIFIED
+  and no calibration was promoted.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
   electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are done. The powered
@@ -220,10 +239,16 @@ and answered, then the telemetry queue drains.
 The production vehicle image cannot be commanded to move: every calibration value,
 safety limit and gain in
 `src/VehicleConfig.h` is a `Provisional` placeholder, the regulator refuses to
-enable, no run has been announced, and the run policy stays in `Idle`. The serial
-interface can report `status`, `checks`, `version` and the held configuration,
-and can ask to `announce` or `arm` - but with the placeholder configuration every
-arming intent is refused, and the refusal names the check that failed. No command
+enable, no run has been announced, and the run policy stays in `Idle`. Two further
+dependencies are unmeasured: the run's immutable execution plan cannot be built at
+all until P-H8 supplies its five bottle-interaction measurements (three interaction
+distances, the credible contact-window tolerance and the forward-stop margin beyond
+the Bottle Line), and the three per-phase bottle strategy ceilings are `Provisional`
+placeholders, so `validateRunPhaseConfig()` refuses the run policy. The serial
+interface can report `status`, `checks`, `version`, the held configuration and the
+run's current execution plan (`plan`), and can ask to `announce` or `arm` - but with
+the placeholder configuration every arming intent is refused, and the refusal names
+the check that failed. No command
 commands an effort or a direction, and none starts a run. The watchdog is
 deliberately disabled in the vehicle image; its bench qualification passed
 (H0W, D28), and enabling it in production is a separate, deliberate change.

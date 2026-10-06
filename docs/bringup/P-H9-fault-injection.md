@@ -58,6 +58,7 @@ went to the de-energized state.
 | a stop that cannot be verified (keep the shaft moving) | `ReversalNotVerified`, motion stopped |
 | `disarm` during a run | `DisarmedDuringRun`, motion stopped |
 | a sequencing inconsistency, if one can be provoked | `RunSequencingError` |
+| a run held past its validated maximum duration (S10) | `RunDurationExceeded`, motion stopped - **only while `maxRunDurationS` is `Measured`**; the shipped limit is `Provisional`, so a placeholder can never stop a run and this injection is unexercisable on the shipped configuration |
 | an out-of-range effort presented (bench-only injection) | `InvalidMotorEffort`, refused |
 
 For `RunSequencingError`, if there is no honest way to provoke it from outside the
@@ -76,10 +77,15 @@ to light up the code.
    this line** (D13 decision 4): record what actually happens, and record the
    fault identity and stop policy as a **pending software change** - not as
    passing.
-2. **Low battery.** Run with a supply below the planned minimum and record the
-   raw `batt_counts` and whether any enforcement stops the run. The battery
-   enforcement point is not built; record the behaviour and mark enforcement
-   pending.
+2. **Low battery - NOT APPLICABLE to the assembled vehicle (D32/S10):** there is
+   no battery-sense circuit, so there is no voltage to compare and no arming or
+   runtime gate to exercise - `kPlannedBatteryVoltageCapability` is `NotInstalled`,
+   which makes the arming-time `Measured`-`minBatteryV` requirement **not
+   applicable** rather than outstanding. This step is preserved for a vehicle that
+   installs the sensing: run with a supply below the planned minimum and record the
+   raw `batt_counts` and whether any enforcement stops the run. Even then there is
+   **no runtime voltage comparison in the firmware**, so record the behaviour and
+   mark enforcement pending - never passing.
 
 ## Sub-tests - sensing faults during motion
 
@@ -119,7 +125,7 @@ Exactly one injected fault at a time, from the pre-registered list.
 ## Measurements and logs
 
 Per trial, record: the exact command sequence; the named refusal or fault (verbatim); the
-phase timeline from `EVE1`; whether the motor command became de-energized, and
+phase timeline from `EVE3` (schema 3); whether the motor command became de-energized, and
 how long after the fault; whether a power cycle cleared the fault (it must not
 clear a **latched** fault without a deliberate `reset`); whether `reset` cleared
 it; and the vehicle's physical state (stationary, or still moving - the latter is
@@ -151,8 +157,11 @@ gate is guarded.
 
 ## If it passes
 
-- Record the electrical `nFAULT` behaviour and the low-battery observation as new
-  facts (the driver doc's outstanding `nFAULT` question gains its measurements).
+- Record the electrical `nFAULT` behaviour (only on a vehicle that wires the line)
+  and the low-battery observation (only on a vehicle that installs the sensing) as
+  new facts. On the assembled vehicle both have **no subject** (D32/S10): the
+  driver doc's `nFAULT` question is resolved as *not installed*, not as owing a
+  measurement.
 - Record the fault-to-`FaultCode` mapping as verified **only** for the faults
   actually injected.
 - Log in `DEVELOPMENT_LOG.md`. #1-#12 do not change except through the driver

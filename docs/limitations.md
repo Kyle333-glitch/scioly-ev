@@ -398,6 +398,22 @@ or what remains provisional about the numbers it justified.
   `Measured`; on this build it is still a `Provisional` placeholder, so nothing is
   bounded by it - and no run could be armed on it either. The bound firing has
   never been observed on a vehicle.
+- **The run's execution plan does not exist yet, and three strategy ceilings also
+  gate the run policy (S4/S6).** The immutable per-run `RunExecutionPlan`
+  (`lib/evcore/src/RunExecutionPlan.h`) cannot be built until P-H8 measures its
+  five physical dependencies: the three bottle interaction distances (contact lead,
+  capture advance, push margin) plus the plan's own two (the credible
+  contact-window tolerance and the forward-stop margin beyond the Bottle Line).
+  With no plan there is no forward execution target, no leg target and no
+  progression completion - so the run's forward phases have nothing to complete
+  at, and the vehicle cannot shape a forward leg at all (the run layer fails
+  closed rather than substituting the Bottle Line rule landmark). Separately, the
+  three per-phase **strategy velocity ceilings**
+  (`RunPhaseConfig::approachCeilingMps` / `captureCeilingMps` / `pushCeilingMps`)
+  are `Provisional` placeholders, so `ev::validateRunPhaseConfig()` refuses the run
+  policy and no run may be armed until they are measured. Neither the plan nor a
+  ceiling has ever been exercised on a vehicle; they are covered on the host only
+  (S4-S11), and none of that host coverage is physical evidence.
 - **Two other safety ceilings have no independent runtime enforcement.**
   `maxEffortPermille` is enforced through the regulator's own ceiling, and the
   per-direction maximum velocity is the target shaper's own travel ceiling, but

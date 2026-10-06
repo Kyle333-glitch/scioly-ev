@@ -186,7 +186,11 @@ not). The dwell itself is rule 8.p and is not tunable.
 **Reps:** 5 per configuration.
 **Calculation:** each timeout is the measured worst case plus the pre-registered
 margin; the final-approach distance is the distance at which the run can still stop
-inside the reversing leg's measured stopping distance.
+inside the reversing leg's measured stopping distance; `kPlannedMaxRunDurationS` is
+the whole-run bound, set from the measured worst-case full run plus the same margin
+- the vehicle layer evaluates it every control tick **once it is `Measured`** and
+faults the run as `RunDurationExceeded` past it (S10), while a `Provisional` limit
+is inert and can never stop a run.
 **Acceptance:** every phase exits on its evidence, and no phase timeout fires.
 **Establishes:** `kPlannedApproachTimeoutS`, `kPlannedCaptureTimeoutS`,
 `kPlannedPushTimeoutS`, `kPlannedReverseTimeoutS`, `kPlannedFinalApproachTimeoutS`,
@@ -255,9 +259,14 @@ placeholders either. Only then `VERIFIED_STATE.md` #11.
 telemetry on.
 **Commands:** announce the same geometry with several announced Target Times (e.g.
 10.0, 15.0, 20.0 s), `status` between runs.
-**Measure:** the announced target time, the realised Run Time (from the `Done`
-tick or an external stopwatch), the planned cruise and delay from the
-`OK,cmd=announce` line, and the final position error.
+**Measure:** the announced target time; the **official** Run Time (external
+stopwatch or video, actuation to complete stop - the scored measurement, rule
+8.o); the firmware's own believed Run Time for the same run, derived from the
+sample's own timeline as `internal_run_time_s = dwell_start_ms - run_start_ms`
+(actuation to the start of the verified final-stop dwell - it excludes the rule's
+Complete Stop interval and no longer ends at the `Done` tick, so it is not the
+official number); the diagnostic cruise/delay from the `OK,cmd=announce` line; and
+the final position error.
 **Reps:** 5 per announced time.
 **Calculation:** the realised run time minus the announced Target Time (mean and
 spread); the same for the final position.

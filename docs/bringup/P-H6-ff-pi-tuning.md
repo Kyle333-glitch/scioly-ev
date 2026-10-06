@@ -66,7 +66,8 @@ rather than assumed.
 
 ## Measurements and logs
 
-Per run, from the `EVS1` train: `vel_mps`, `vel_cmd_mps`, `vel_ok`, `motor`,
+Per run, from the `EVS3` train (schema 3; the H0/H0W-era captures recorded `EVS1`):
+`vel_mps`, `vel_cmd_mps`, `vel_ok`, `motor`,
 `effort_permille`, `dt_ms`, `batt_counts`, `nfault_low`, `authz`. Record the raw
 capture.
 

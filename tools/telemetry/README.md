@@ -131,7 +131,15 @@ Metrics cover, per run:
 - **braking and reversal timing**: how long the policy spent in `ForwardDecel`,
   `BrakeZeroSpeed` and `Reverse`. These are firmware *state* timings, not
   stopping distances;
-- **run duration**: the log window and the armed window;
+- **run duration**: the armed window (the firmware's own armed flag, not a physical
+  start or finish line) and the firmware's run timeline - `run_start_ms` (the
+  actuation reading), `final_stop_dwell_start_ms`, `stop_verified_ms`, the derived
+  `internal_run_time_s` (actuation to the **start** of the verified final-stop
+  dwell, so the rule's Complete Stop interval is excluded) and
+  `final_stop_verification_completed_s`. Both derived numbers are `None` unless a
+  final stop was verified, so a missing value is never read as "the run never
+  finished". The internal Run Time is the firmware's own believed clock, never the
+  event's official Run Time, which a timekeeper or video measures;
 - **drops**: the drop counters, whether they ever went backwards, and when the
   first record was lost.
 
@@ -156,6 +164,13 @@ from the start line - the same quantity as the firmware's believed end position,
 so the two are directly comparable. It is deliberately not called "travel": in a
 run that reverses, path length, net displacement and final position are three
 different numbers.
+
+`measured_run_time_s` is the **official** Run Time of rule 8.o - actuation to
+complete stop, as the timekeeper or a video measured it. It is compared against
+the firmware's **internal** Run Time (`run_window.internal_run_time_s`), which
+ends at the start of the verified final-stop dwell for exactly that reason; the
+comparison's `run_s` column and `believed_run_time_s` are that internal number,
+not the official one. A missing cell means "not measured", and never zero.
 
 The remaining columns exist because a bare endpoint is not a repeatability
 record:

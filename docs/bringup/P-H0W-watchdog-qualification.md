@@ -212,13 +212,15 @@ hang happened at rather than only the last earlier readout. Record:
 - the wall-clock latency from the hang to the board restarting;
 - that the board *does* restart. The primary evidence is the **device vanishing
   and re-enumerating** (the capture's connect/disconnect rows), together with the
-  `EVE1,...,event=Boot` line, the telemetry `t_ms` restarting near zero, and the
+  `EVE3,...,event=Boot` line (schema 3; the D26-D28 captures recorded this as
+  `EVE1`), the telemetry `t_ms` restarting near zero, and the
   counters restarting from zero. The `BOOT,...` line on its own is **not** evidence
   of a restart: the same line is re-sent as the silence beacon every `kSilenceMs`,
   so a capture can show several `BOOT` lines with no reset at all (measured, D30 -
   three `BOOT` lines against one connect in a 20 s capture, and a 70 s hang capture
-  with 12 `BOOT` lines but only 7 `EVE1` boot events for 5 hangs). The beacon does
-  not re-send the `EVE1` boot event, which is what makes that line the usable one;
+  with 12 `BOOT` lines but only 7 `EVE1` boot events for 5 hangs - the schema was
+  version 1 then). The beacon does
+  not re-send the `EVE3` boot event, which is what makes that line the usable one;
 - the **reset cause from the MCU's own reset-status registers**, which is direct
   evidence rather than inference. Read `bench resetsrc`, clear with
   `bench resetsrc clear`, then read again after the reset: a watchdog reset reports
@@ -322,7 +324,7 @@ Per step, record: the enablement constant and whether `opened()` is true; the
 requested and the realized timeout; the pass/refresh/withheld counters, the worst
 observed interval between refreshes and the **maximum control-loop stall**, per
 load condition; the last-refresh time and the pass count at the hang; the reset
-latency and the evidence of restart (the `BOOT,...` line, the `EVE1` boot event,
+latency and the evidence of restart (the `BOOT,...` line, the `EVE3` boot event,
 and `t_ms` with the counters restarting); the pin levels after restart; and the
 upload result after each reset. Keep the raw capture for every step.
 

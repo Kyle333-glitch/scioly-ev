@@ -43,6 +43,9 @@ is the firmware's de-energized startup state; record whether the pins actually d
 what `MotorDriver.h` drives (`nSLEEP` low, `PH` low, `EN` at zero duty) and
 whether `nFAULT` reads high through the planned pull-up. Record the logic levels
 in volts, and whether any line needs a level shifter or a pull-up/down at all.
+**On the assembled vehicle the `nFAULT` line has no pin at all** (`kMotorFaultBar`
+is `kNoPin`; it is not installed, D32), so only `nSLEEP`/`PH`/`EN` are measured
+here and the `nFAULT` record applies only to a vehicle that wires the line.
 
 ## Setup, step A2 - truth table, motor disconnected
 
@@ -82,7 +85,8 @@ rows.
 - the measured PWM frequency at `EN`, and the smallest duty that produces a
   measurable output change;
 - whether the driver is genuinely asleep in the Disabled row (supply current);
-- the `nFAULT` idle level in each row;
+- the `nFAULT` idle level in each row (not applicable on the assembled vehicle,
+  D32 - the line has no pin);
 - the raw capture of any telemetry so the firmware's view of the levels can be
   compared with the meter.
 

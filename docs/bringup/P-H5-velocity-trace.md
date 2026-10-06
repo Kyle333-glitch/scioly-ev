@@ -47,7 +47,8 @@ firmware image, motor temperature (let it return to ambient between runs).
 
 ## Measurements and logs
 
-Per run, from the `EVS1` sample train, record (or keep the raw capture and note
+Per run, from the `EVS3` sample train (schema 3; the H0/H0W-era captures recorded
+`EVS1`), record (or keep the raw capture and note
 the fields): `t_ms`, `dt_ms`, `phase`, `cmd`, `armed`, `pos_m`, `pos_ok`,
 `vel_mps`, `vel_ok`, `vel_cmd_mps`, `rem_m`, `motor`, `effort_permille`,
 `batt_counts`, `curr_counts`, `nfault_low`, `fault`, `authz`, `check`, and the

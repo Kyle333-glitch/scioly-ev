@@ -137,9 +137,11 @@ motion. Nothing here is done until a wiring continuity check has been recorded.
    against the physical harness and record the table. Required before powering the driver:
    a wrong EN/PH pin is a direction and speed surprise.
 2. **Idle levels, driver asleep.** With the motor supply off, measure `nSLEEP`,
-   `PH`, `EN`, `nFAULT` at rest. Record whether the firmware's de-energized levels
+   `PH`, `EN` at rest (**and `nFAULT` only on a vehicle that wires the line - on the
+   assembled vehicle it has no pin at all, D32, so there is nothing to measure;
+   see test 5**). Record whether the firmware's de-energized levels
    (`nSLEEP` low, `PH` low, `EN` low) are what the pins actually do, and whether
-   `nFAULT` reads high with the internal pull-up.
+   `nFAULT` reads high with the internal pull-up where the line exists.
 3. **Truth table, drivetrain unloaded (#2).** With a low supply current limit,
    apply each row of the table above for a short bounded time and record the
    observed output state (both outputs measured or the shaft observed):

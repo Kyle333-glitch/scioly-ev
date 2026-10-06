@@ -67,6 +67,18 @@ measurement - a run time without them is not comparable across operators or runs
 - if video with a visible clock is available, prefer it and say so; read the time
   to the frame's resolution.
 
+The **scored** number is the official Run Time of rule 8.o - actuation to complete
+stop - and only the stopwatch/video measurement produces it; it is what goes in
+`measured_run_time_s` and what may be judged against the rules. The firmware's
+internal Run Time is a different, believed quantity: a sample carries the run's
+own timeline (`run_start_ms`, `dwell_start_ms`, `stop_verified_ms`), and the
+analyzer derives `internal_run_time_s = dwell_start_ms - run_start_ms`, which ends
+at the **start** of the verified final-stop dwell and therefore excludes the rule's
+Complete Stop interval (rule 8.p) instead of counting it. Record both per run and
+never substitute one for the other: the internal metric has never been compared
+with an official measurement, and only a series like this one that records them
+side by side can validate it.
+
 ## Held constant
 
 Course, bottle, build, mechanism adjustment, tire pressure, placement procedure,

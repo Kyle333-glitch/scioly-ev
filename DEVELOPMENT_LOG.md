@@ -7157,3 +7157,116 @@ and `bench-watchdog` all SUCCESS with 0 warnings, RAM unchanged at
 6772/6972/6956 and Flash unchanged at 74540/81380/80808 (a test-only change),
 `tools/telemetry` **119/119 OK**, `git diff --check` clean, every changed file
 100% CRLF.
+
+## D49 / S12 - 2026-10-06 - The documents are brought back into agreement with the code; no claim moves
+
+S12 is a documentation-synchronisation stage. It exists because the architecture
+stages S3-S11 changed what the run layer is and does, and prose written in the
+D34-D36 era still described the pre-S3 world in places. The stage changed no code,
+no configuration, no calibration, no telemetry schema and no evidence row: it
+corrected stale *claims* and records the corrections here rather than rewriting the
+earlier entries.
+
+### Stale claims found and corrected
+
+- **`SOFTWARE_ARCHITECTURE.md` section 10 said "Schema version 1 ... frozen in
+  sections 9 and 16".** The live schema is version **3** (`EVS3`/`EVE3`, S8) and
+  the command set has included `plan` since S9. The sentence now names
+  `ev::kTelemetrySchemaVersion` and points at section 9.
+- **`README.md`'s "Current state" named the serial reports without `plan`**, and
+  explained the arming refusal with the placeholder configuration alone. It now
+  names `plan` and adds the two further live dependencies: the immutable execution
+  plan cannot be built without P-H8's five measurements, and the three bottle-phase
+  strategy ceilings are `Provisional`, so `validateRunPhaseConfig()` refuses the
+  run policy.
+- **`README.md`'s staged-workflow list stopped at P9E.** A new bullet records the
+  architecture-sync stages S0-S12 (D37-D49) - rule landmarks vs execution targets,
+  the immutable `RunExecutionPlan`, the truthful `approachComplete` /
+  `captureComplete` / `pushComplete` vocabulary, the strategy ceiling, the
+  plan-owned `initialDelayS` with the timing estimate as a labelled diagnostic, the
+  internal Run Time ending at the verified final-stop dwell start, the run-duration
+  consumer, the absent-sensor capability and the `plan` command - and states that
+  no physical fact's status changed.
+- **`VERIFIED_STATE.md`'s software rows still carried D35's numbers** (native
+  552/552 in 32 suites; `nano_r4` RAM 6292 / Flash 71836; `bench` RAM 6492 / Flash
+  78680). Each D35 record is preserved and now also carries the re-measured current
+  numbers (native **628/628** in 35 suites; `nano_r4` 6772/74540; `bench`
+  6972/81380; `bench-watchdog` 6956/80808), plus a new row for the analysis
+  tooling's own suite (**119/119 OK**). No hardware row moved: all twelve remain
+  **UNVERIFIED**, and the battery/current installed-capability truth (D32/S10) is
+  now stated in the hardware section as well.
+- **`docs/bringup/P-H0`, `P-H5`, `P-H6`, `P-H7`, `P-H8`, `P-H9` and `P-H0W`
+  instructed the operator to read `EVS1`/`EVE1`.** The live wire prefix is
+  `EVS3`/`EVE3`; each procedure now names the current prefix and notes that the
+  H0/H0W/D30 captures recorded the then-current one, so the historical captures are
+  not misread as current data products.
+- **`docs/bringup/P-H0`'s inspection list omitted `plan`**, and **`P-H9`'s fault
+  table omitted `RunDurationExceeded`** (S10) while its low-battery sub-test still
+  said the battery enforcement point was merely "not built". P-H9 now names the
+  run-duration fault (and that it is unexercisable while the limit is
+  `Provisional`), marks the low-battery step not applicable on this vehicle (no
+  sense circuit) with the runtime comparison still unbuilt even on one that has it,
+  and its "If it passes" bullet no longer claims the nFAULT question owes a
+  measurement - D32 resolved it as not installed.
+- **`docs/bringup/P-H1A` and `docs/hardware/motor-driver-drv8874.md` still told the
+  operator to measure `nFAULT` levels**, contradicting D32's `NotInstalled`
+  capability and each file's own later "not applicable" note. Both now scope that
+  measurement to a vehicle that wires the line.
+- **`docs/bringup/P-H10` never named the official Run Time.** It now states that
+  the scored number is rule 8.o's Run Time (actuation to complete stop, measured by
+  timekeeper or video) and that the firmware's own `internal_run_time_s` (actuation
+  to the *start* of the verified final-stop dwell, S8) is a different quantity to
+  record beside it, never to substitute for it.
+- **`docs/bringup/P-H14` step 12 measured "the realised Run Time (from the `Done`
+  tick ...)"**, which S8 superseded. The step now records the official measurement
+  and the internal metric separately, and step 10 states that
+  `kPlannedMaxRunDurationS` gained a runtime consumer (S10) that is inert while the
+  value is `Provisional`.
+- **`tools/telemetry/README.md` described "run duration: the log window and the
+  armed window"**, which S8 deleted. It now describes the run timeline the tooling
+  actually derives (`run_start_ms`, `final_stop_dwell_start_ms`, `stop_verified_ms`,
+  `internal_run_time_s` and `final_stop_verification_completed_s`, both `None`
+  without a verified final stop) and states what `measured_run_time_s` is.
+- **`docs/limitations.md` did not name the run's execution-plan dependency or the
+  three strategy ceilings.** A new section-F entry records that no plan exists
+  until P-H8 measures its five dependencies, that with no plan there is no forward
+  leg target and no progression completion, and that the three ceilings keep
+  `validateRunPhaseConfig()` refusing the run policy.
+
+### Deliberately not changed
+
+- **`AGENTS.md` is untouched**: its invariants (safety, one-writer driver, fault
+  latching, nonblocking behaviour, host tests never being physical evidence,
+  physical testing as the source of truth) all still hold exactly as written, and
+  the stage contract authorizes a change there only if an invariant actually
+  changed.
+- **The twelve hardware rows in `VERIFIED_STATE.md` remain UNVERIFIED**, and the
+  informal 2026-10-02 observations remain recorded as OBSERVED-not-evidence. This
+  stage promotes nothing and measures nothing.
+- **The emergency tournament image's history is preserved as written.** It remains
+  absent from the active tree (D35), the vehicle image still refuses to compile its
+  define, and the statements that it is not the production image and supplied no
+  run data are unchanged.
+
+### Files changed
+
+`SOFTWARE_ARCHITECTURE.md`, `README.md`, `VERIFIED_STATE.md`,
+`docs/limitations.md`, `docs/bringup/P-H0-nano-upload-serial.md`,
+`docs/bringup/P-H0W-watchdog-qualification.md`,
+`docs/bringup/P-H1A-driver-electrical.md`, `docs/bringup/P-H5-velocity-trace.md`,
+`docs/bringup/P-H6-ff-pi-tuning.md`,
+`docs/bringup/P-H7-distance-braking-reversal.md`,
+`docs/bringup/P-H8-bottle-integration.md`, `docs/bringup/P-H9-fault-injection.md`,
+`docs/bringup/P-H10-full-run-repeatability.md`,
+`docs/bringup/P-H14-calibration-checklist.md`, `docs/bringup/README.md`,
+`docs/hardware/motor-driver-drv8874.md`, `tools/telemetry/README.md` and this
+entry. No `src/`, `lib/`, `test/`, `platformio.ini`, calibration or schema file was
+touched, and no `.agent-work` file is committed.
+
+### Validation (on the frozen tree)
+
+Native **628/628** in 35 suites; `nano_r4`, `bench` and `bench-watchdog` all
+SUCCESS with 0 warnings (RAM 6772/6972/6956; Flash 74540/81380/80808);
+`tools/telemetry` **119/119 OK**; `git diff --check` clean; every changed file
+100% CRLF. These are the same numbers the stage recorded in `VERIFIED_STATE.md`,
+measured on this tree rather than inherited from an earlier entry.
