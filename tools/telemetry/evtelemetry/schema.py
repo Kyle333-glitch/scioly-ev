@@ -40,7 +40,14 @@ from typing import Final
 # carries the missing marker when the vehicle has no external nFAULT line. A
 # version-1 `nfault_low=0` meant "sampled and read high", which is a claim the
 # assembled vehicle cannot make.
-SCHEMA_VERSION: Final[int] = 2
+#
+# Version 3 (S8): a sample gained the run's own timeline - `run_start_ms`,
+# `dwell_start_ms` and `stop_verified_ms`, each with its availability flag. The
+# internal Run Time is `dwell_start_ms - run_start_ms`: actuation to the start of
+# the verified final-stop dwell, which is where the rules' Run Time ends and the
+# Complete Stop interval begins. A version-2 log has no such columns, so a reader
+# must not silently treat their absence as "the run never verified a final stop".
+SCHEMA_VERSION: Final[int] = 3
 
 # `EVS<version>` is one control tick; `EVE<version>` is a transition or an
 # operator action. The digit is the version, so a record is self-describing.
@@ -76,10 +83,12 @@ MAX_VOCABULARY_NAME_CHARS: Final[int] = 30
 # Field sets, in the order the formatter writes them
 # ---------------------------------------------------------------------------
 
-# `EVS<v>,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,pos_m=..,pos_ok=..,
-#    vel_mps=..,vel_ok=..,vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,
-#    batt_counts=..,curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,
-#    check=..,drop_s=..,drop_e=..`
+# `EVS<v>,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,run_start_ms=..,
+#    run_start_ok=..,dwell_start_ms=..,dwell_start_ok=..,stop_verified_ms=..,
+#    stop_verified_ok=..,pos_m=..,pos_ok=..,vel_mps=..,vel_ok=..,
+#    vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,batt_counts=..,
+#    curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,check=..,
+#    drop_s=..,drop_e=..`
 SAMPLE_FIELDS: Final[tuple[str, ...]] = (
     "ver",
     "t_ms",
@@ -87,6 +96,12 @@ SAMPLE_FIELDS: Final[tuple[str, ...]] = (
     "phase",
     "cmd",
     "armed",
+    "run_start_ms",
+    "run_start_ok",
+    "dwell_start_ms",
+    "dwell_start_ok",
+    "stop_verified_ms",
+    "stop_verified_ok",
     "pos_m",
     "pos_ok",
     "vel_mps",
@@ -292,6 +307,10 @@ UNSIGNED_FIELDS: Final[dict[str, int]] = {
     "ver": 0xFF,
     "t_ms": 0xFFFFFFFF,
     "dt_ms": 0xFFFF,
+    # The run's timeline readings are `millis()` readings, like `t_ms`.
+    "run_start_ms": 0xFFFFFFFF,
+    "dwell_start_ms": 0xFFFFFFFF,
+    "stop_verified_ms": 0xFFFFFFFF,
     "effort_permille": 0xFFFF,
     "batt_counts": 0xFFFF,
     "curr_counts": 0xFFFF,
@@ -300,7 +319,18 @@ UNSIGNED_FIELDS: Final[dict[str, int]] = {
 }
 
 # Written as a single character, `0` or `1` (`BoundedText::appendBool`).
-BOOL_FIELDS: Final[frozenset[str]] = frozenset({"armed", "pos_ok", "vel_ok"})
+BOOL_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "armed",
+        "pos_ok",
+        "vel_ok",
+        # The timeline's availability flags: a reading exists, not a verdict about
+        # the vehicle's current state.
+        "run_start_ok",
+        "dwell_start_ok",
+        "stop_verified_ok",
+    }
+)
 
 # `appendFixed()` fields. `ovf` is a sentinel rather than a number, so these
 # parse to either a float (possibly NaN or infinite) or `None` for `ovf`.

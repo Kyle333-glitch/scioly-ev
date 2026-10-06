@@ -42,6 +42,8 @@ __all__ = [
     "SYNTHETIC_MARKER",
     "SyntheticSpec",
     "SPECS",
+    "FinalStopTimeline",
+    "final_stop_timeline",
     "generate_lines",
     "generate_text",
     "write_samples",
@@ -55,6 +57,15 @@ SYNTHETIC_MARKER = "SYNTHETIC"
 # deliberately not a boolean `False`: a fixture that emitted `nfault_low=0` would
 # train the tooling and its readers to read an unavailable signal as healthy.
 NFault_NOT_INSTALLED = "NotInstalled"
+
+# The fixture's own fiction for the final stop, mirroring the shape of the
+# firmware's verifier: the modelled speed decays to zero in `FinalBrake`, a
+# continuous interval at or below this threshold opens there, and the rules'
+# Complete Stop interval (3 s) completes 3000 ms later. The fixture's speed snaps
+# to exactly zero in `FinalBrake`, so the interval cannot break on its own; a
+# fault still discards an unverified candidate, exactly as the firmware does.
+SYNTHETIC_NEAR_ZERO_MPS = 0.02
+SYNTHETIC_COMPLETE_STOP_MS = 3000
 
 # One header line per entry. Each is a single line on purpose: `generate_lines()`
 # returns lines, and an entry containing an embedded newline would make the
@@ -80,6 +91,15 @@ class PhaseLeg:
     duration_ms: int
     velocity_start_mps: float
     velocity_end_mps: float
+
+
+@dataclass(frozen=True)
+class FinalStopTimeline:
+    """The run timeline the fixture's final-stop model recorded, as tick readings."""
+
+    run_start_ms: int
+    dwell_start_ms: int
+    stop_verified_ms: int
 
 
 @dataclass(frozen=True)
@@ -116,7 +136,13 @@ class SyntheticSpec:
             PhaseLeg("BrakeZeroSpeed", 400, 0.08, 0.0),
             PhaseLeg("Reverse", 5000, 0.0, -0.55),
             PhaseLeg("FinalApproach", 3000, -0.55, -0.10),
-            PhaseLeg("FinalBrake", 600, -0.10, 0.0),
+            # The final brake is the deliberate stop: the demand is zero and the
+            # modelled speed (still about -0.1 m/s from the approach) decays to it.
+            # The leg is long enough to hold the fixture's modelled Complete Stop
+            # interval (see `SYNTHETIC_COMPLETE_STOP_MS`) after the speed has
+            # settled, so the generated run reaches `Done` the way the firmware's
+            # final stop does.
+            PhaseLeg("FinalBrake", 3400, 0.0, 0.0),
             PhaseLeg("Done", 400, 0.0, 0.0),
         )
 
@@ -213,6 +239,16 @@ class _Tick:
     fault: str
     authz: str
     check: str
+    # The run's own timeline, filled by `_apply_final_stop_timeline()`: the
+    # actuation reading, the final stop's dwell start (candidate or verified) and
+    # the verification completion, each with its availability, exactly the six
+    # fields the sample carries.
+    run_start_ok: bool = False
+    run_start_ms: int = 0
+    dwell_start_ok: bool = False
+    dwell_start_ms: int = 0
+    stop_verified_ok: bool = False
+    stop_verified_ms: int = 0
     dropped: bool = False
 
 
@@ -344,7 +380,66 @@ def _build_ticks(spec: SyntheticSpec) -> list[_Tick]:
             )
         )
 
+    _apply_final_stop_timeline(ticks)
     return ticks
+
+
+def _apply_final_stop_timeline(ticks: list[_Tick]) -> None:
+    """Fills the fixture's run timeline, the way the firmware's run records it.
+
+    One pass, in tick order: the run is actuated when it leaves the pre-run phases
+    (the trigger, which is also where a deliberate delay starts), the final stop's
+    dwell opens at the first `FinalBrake` tick whose modelled speed is at or below
+    the fixture threshold, and it completes 3000 ms later - after which the phase
+    is `Done`, so the sample and event lanes agree about when the run finished.
+    A break in the interval discards the candidate, and a fault discards one that
+    was never verified; a verified interval and the actuation reading stay.
+    """
+    actuation_ms: Optional[int] = None
+    dwell_start_ms: Optional[int] = None
+    verified_ms: Optional[int] = None
+
+    for tick in ticks:
+        if actuation_ms is None and tick.phase not in (
+            "Idle",
+            "ParameterValid",
+            "Armed",
+            "Fault",
+        ):
+            actuation_ms = tick.t_ms
+        if actuation_ms is not None:
+            tick.run_start_ok = True
+            tick.run_start_ms = actuation_ms
+
+        if verified_ms is not None:
+            tick.dwell_start_ok = True
+            tick.dwell_start_ms = dwell_start_ms if dwell_start_ms is not None else 0
+            tick.stop_verified_ok = True
+            tick.stop_verified_ms = verified_ms
+            if tick.phase == "FinalBrake":
+                tick.phase = "Done"
+            continue
+
+        if tick.phase == "Fault":
+            # A fault discards an in-progress dwell: it was never verified.
+            dwell_start_ms = None
+            continue
+        if tick.phase != "FinalBrake":
+            continue
+
+        within = tick.velocity_ok and abs(tick.velocity_mps) <= SYNTHETIC_NEAR_ZERO_MPS
+        if not within:
+            dwell_start_ms = None
+            continue
+        if dwell_start_ms is None:
+            dwell_start_ms = tick.t_ms
+        tick.dwell_start_ok = True
+        tick.dwell_start_ms = dwell_start_ms
+        if tick.t_ms - dwell_start_ms >= SYNTHETIC_COMPLETE_STOP_MS:
+            verified_ms = tick.t_ms
+            tick.stop_verified_ok = True
+            tick.stop_verified_ms = verified_ms
+            tick.phase = "Done"
 
 
 def _arm_time_ms(spec: SyntheticSpec) -> int:
@@ -409,6 +504,26 @@ def _operator_events(spec: SyntheticSpec) -> list[tuple[int, str, str, str, bool
     return events
 
 
+def final_stop_timeline(spec: SyntheticSpec) -> Optional[FinalStopTimeline]:
+    """The fixture's own run timeline, read back from the ticks it generates.
+
+    Built from the same ticks ``generate_lines()`` writes, so a test can compare a
+    tool's numbers against the fixture's own recorded readings instead of against
+    arithmetic on the leg table - the two differ wherever the fixture models a
+    final stop, because the phase becomes ``Done`` at the verification instant.
+    ``None`` when the modelled run never verified a final stop, which is the fault
+    fixture's outcome.
+    """
+    for tick in reversed(_build_ticks(spec)):
+        if tick.stop_verified_ok:
+            return FinalStopTimeline(
+                run_start_ms=tick.run_start_ms,
+                dwell_start_ms=tick.dwell_start_ms,
+                stop_verified_ms=tick.stop_verified_ms,
+            )
+    return None
+
+
 def generate_lines(spec: SyntheticSpec) -> list[str]:
     """The complete synthetic capture, as the lines a serial port would deliver."""
     ticks = _build_ticks(spec)
@@ -461,6 +576,12 @@ def generate_lines(spec: SyntheticSpec) -> list[str]:
                     "phase": tick.phase,
                     "cmd": _command_for(tick),
                     "armed": "1" if tick.armed else "0",
+                    "run_start_ms": str(tick.run_start_ms),
+                    "run_start_ok": "1" if tick.run_start_ok else "0",
+                    "dwell_start_ms": str(tick.dwell_start_ms),
+                    "dwell_start_ok": "1" if tick.dwell_start_ok else "0",
+                    "stop_verified_ms": str(tick.stop_verified_ms),
+                    "stop_verified_ok": "1" if tick.stop_verified_ok else "0",
                     "pos_m": _fixed(tick.position_m),
                     "pos_ok": "1" if tick.position_ok else "0",
                     "vel_mps": _fixed(tick.velocity_mps),

@@ -59,14 +59,23 @@ namespace ev {
 // vehicle. All three change what a column means, so a version-1 log must not be
 // read as if it carried them: `nfault_low=0` in a version-1 log meant "the line
 // was sampled and read high", which is a claim this vehicle cannot make.
-constexpr uint8_t kTelemetrySchemaVersion = 2U;
+//
+// Version 3 (S8): a sample gained the run's own timeline - the actuation
+// reading, the start of the final stop's dwell interval and the verified
+// final-stop completion, each with its availability flag (`run_start_ms`/
+// `run_start_ok`, `dwell_start_ms`/`dwell_start_ok`, `stop_verified_ms`/
+// `stop_verified_ok`). A version-2 log has no such columns, and their absence is
+// not readable as "the run never reached a verified stop": a reader that saw the
+// columns missing could not tell a run that was not actuated from one whose log
+// predates the schema. That is the incompatibility the bump states.
+constexpr uint8_t kTelemetrySchemaVersion = 3U;
 
 // Record prefixes. The digit is the schema version, so a record is
 // self-describing: a log that was written by a firmware whose schema changed
 // cannot be mistaken for this one, even if the version is the only difference.
 // The `EV` root keeps the convention `AGENTS.md` section 16 illustrates.
-constexpr const char* kTelemetrySamplePrefix = "EVS2";
-constexpr const char* kTelemetryEventPrefix = "EVE2";
+constexpr const char* kTelemetrySamplePrefix = "EVS3";
+constexpr const char* kTelemetryEventPrefix = "EVE3";
 
 // A record that is missing fields carries this marker instead of a number or a
 // name, so a truncation is visible in the bytes rather than inferred from a
@@ -334,6 +343,40 @@ struct TelemetrySample {
     RunPhase phase = RunPhase::Idle;
     RunMotionCommand command = RunMotionCommand::None;  // what the run asked for
     bool armed = false;             // the authority's armed state
+
+    // The run's own timeline, as `ev::RunTimeline` records it: clock readings
+    // from the same `millis()` the tick was given, each next to the flag that says
+    // whether it exists. A sample writes every field, so "no run has been
+    // actuated" is `run_start_ok=0` with a zero reading rather than a missing
+    // column, and a reader never has to tell a real reading of zero from an
+    // absent one.
+    //
+    // What the readings mean (rule 8.o counts Run Time from actuation to the
+    // complete stop; rule 8.p excludes the Complete Stop's own stationary
+    // interval):
+    // * `runActuatedAtMs` - the reading at which the start trigger actuated the
+    //   run. The run's deliberate pre-travel delay is inside the run, so it is
+    //   counted here rather than subtracted.
+    // * `finalStopDwellStartMs` - the start of the final stop's verification
+    //   interval: the candidate accumulating now, or - once `finalStopVerified` is
+    //   set - the interval that satisfied the rule. A break in the near-zero
+    //   evidence discards or restarts it, so until the verification completes this
+    //   is a candidate, not a Run Time endpoint.
+    // * `finalStopVerifiedAtMs` - the reading at which the final stop's
+    //   verification completed: the cycle that entered `Done`.
+    //
+    // The internal Run Time is the unsigned difference
+    // `finalStopDwellStartMs - runActuatedAtMs`, valid only when both flags are
+    // set: it ends where the rule's Complete Stop begins, so it does not include
+    // the rule's own confirmation interval. It is not the official time - the
+    // event's timekeeper, stopwatch or video remains the external measurement -
+    // and no report may present it as one.
+    bool runActuated = false;
+    uint32_t runActuatedAtMs = 0U;
+    bool finalStopDwellStartKnown = false;
+    uint32_t finalStopDwellStartMs = 0U;
+    bool finalStopVerified = false;
+    uint32_t finalStopVerifiedAtMs = 0U;
 
     double positionM = 0.0;         // run-axis position, metres from the Start Point
     bool positionUsable = false;    // the combined position verdict

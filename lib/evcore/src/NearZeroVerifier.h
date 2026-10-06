@@ -345,6 +345,22 @@ public:
     // Diagnostic only; the verdict is the output.
     uint32_t dwellElapsedMs() const { return dwellElapsedMs_; }
 
+    // True while one continuous near-zero interval is open: the evidence held on
+    // the last update, whether the interval is still accumulating, being held by
+    // a frozen stamp, or has already earned the verdict. False after a reset, and
+    // false on any update whose evidence did not hold - so a consumer that wants
+    // the interval's start never has to reconstruct "is there one" from a
+    // status it might classify wrongly.
+    bool intervalOpen() const { return hasNearZeroSince_; }
+
+    // The clock reading the open interval started at; 0 when none is open.
+    // Diagnostic, like `dwellElapsedMs()`: a restart is a new reading here, and
+    // the interval that satisfies the rule is the one whose start this is. It is
+    // reported rather than left to the caller to recover from the elapsed span,
+    // because the start is the fact a run's own timeline needs and the elapsed
+    // span exists only for the verdict.
+    uint32_t intervalStartedAtMs() const { return nearZeroSinceMs_; }
+
     // One verification step.
     //
     // The interval is credited only across the updates the caller actually

@@ -50,11 +50,43 @@ class NominalRunTest(unittest.TestCase):
     def test_phase_durations_track_the_generator_legs(self) -> None:
         durations = self.metrics["phases"]["durations_s"]
         for leg in self.spec.legs:
+            # `FinalBrake` and `Done` are the two legs the fixture's final-stop
+            # model rewrites: the phase becomes `Done` at the verification
+            # instant, so those durations are the modelled timeline rather than
+            # the demand table and are pinned by
+            # `test_the_internal_run_time_is_the_fixtures_own_timeline` below.
+            if leg.phase in ("FinalBrake", "Done"):
+                continue
             with self.subTest(phase=leg.phase):
                 expected = leg.duration_ms / 1000.0
                 # The last tick of a leg is the first of the next, so a segment is
                 # one cadence shorter than the leg.
                 self.assertAlmostEqual(durations[leg.phase], expected - 0.02, places=6)
+
+    def test_the_internal_run_time_is_the_fixtures_own_timeline(self) -> None:
+        """The run's own clock, and the rule's confirmation interval outside it."""
+        timeline = synthetic.final_stop_timeline(self.spec)
+        self.assertIsNotNone(timeline)
+        run_window = self.metrics["run_window"]
+
+        self.assertTrue(run_window["final_stop_dwell_verified"])
+        self.assertEqual(run_window["run_start_ms"], timeline.run_start_ms)
+        self.assertEqual(run_window["final_stop_dwell_start_ms"], timeline.dwell_start_ms)
+        self.assertEqual(run_window["stop_verified_ms"], timeline.stop_verified_ms)
+
+        internal_run_time_s = (timeline.dwell_start_ms - timeline.run_start_ms) / 1000.0
+        completed_s = (timeline.stop_verified_ms - timeline.run_start_ms) / 1000.0
+        self.assertAlmostEqual(run_window["internal_run_time_s"], internal_run_time_s, places=6)
+        self.assertAlmostEqual(
+            run_window["final_stop_verification_completed_s"], completed_s, places=6
+        )
+
+        # The metric must not overcount the rule's own Complete Stop interval:
+        # the distance between the two readings is exactly that interval, and it
+        # is outside the Run Time. A value taken at `Done` would be the longer one.
+        self.assertAlmostEqual(completed_s - internal_run_time_s, 3.0, places=6)
+        # `Done` begins at the verification instant, so the two readings agree.
+        self.assertEqual(run_window["done_t_abs_ms"], run_window["stop_verified_ms"])
 
     def test_braking_and_reversal_timing_are_state_boundaries(self) -> None:
         timing = self.metrics["phase_timing"]
@@ -124,12 +156,15 @@ class DroppedBurstTest(unittest.TestCase):
     """Variant B simulates a queue that could not store six records."""
 
     def setUp(self) -> None:
-        self.metrics = metrics_for(spec("SYNTHETIC-B"))
+        self.spec = spec("SYNTHETIC-B")
+        self.metrics = metrics_for(self.spec)
 
     def test_the_drop_counter_is_carried_and_reported(self) -> None:
+        # The fixture's own tick count, less the burst the queue could not store.
+        ticks = sum(leg.duration_ms for leg in self.spec.legs) // self.spec.cadence_ms
         self.assertEqual(self.metrics["drops"]["samples"]["final"], 6)
         self.assertTrue(self.metrics["drops"]["samples"]["monotonic_non_decreasing"])
-        self.assertEqual(self.metrics["counts"]["samples"], 1157)
+        self.assertEqual(self.metrics["counts"]["samples"], ticks - 6)
 
     def test_the_dropped_boundary_is_visible_as_a_lane_disagreement(self) -> None:
         transitions = self.metrics["transitions"]
@@ -161,6 +196,15 @@ class FaultRunTest(unittest.TestCase):
     def test_the_fault_stop_is_reported_per_sample(self) -> None:
         self.assertGreater(self.metrics["authorization"]["outcome_counts"]["ForcedFaultStop"], 0)
 
+    def test_a_run_that_never_verified_a_final_stop_has_no_run_time(self) -> None:
+        run_window = self.metrics["run_window"]
+        self.assertFalse(run_window["final_stop_dwell_verified"])
+        self.assertIsNone(run_window["internal_run_time_s"])
+        self.assertIsNone(run_window["final_stop_verification_completed_s"])
+        # The actuation reading survives: the run did begin, and the fault is the
+        # reason there is no verified stop to time to.
+        self.assertIsNotNone(run_window["run_start_ms"])
+
 
 class ReproducibilityTest(unittest.TestCase):
     def test_the_same_bytes_give_the_same_metrics(self) -> None:
@@ -180,12 +224,13 @@ class ReproducibilityTest(unittest.TestCase):
         metrics = metrics_for(spec("SYNTHETIC-A"))
         # A duration is seconds, a clock reading is milliseconds, a distance is
         # metres. The unit is always somewhere in the key path, either on the leaf
-        # or on the section that holds it.
+        # or on the section that holds it. A boolean is a flag, not a measurement,
+        # and carries no unit of its own.
         for key in metrics["window"]:
             if "duration" in key:
                 self.assertTrue(key.endswith("_s"), key)
-        for key in metrics["run_window"]:
-            if key == "note" or key.endswith("_t_abs_ms"):
+        for key, value in metrics["run_window"].items():
+            if key == "note" or key.endswith("_t_abs_ms") or isinstance(value, bool):
                 continue
             self.assertTrue(key.endswith("_ms") or key.endswith("_s"), key)
         for key in metrics["control_dt"]:

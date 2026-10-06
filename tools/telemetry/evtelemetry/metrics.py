@@ -44,6 +44,12 @@ PHASE_TIMING_PROBE_PHASES = (
 
 _ROUND_DIGITS = 6
 
+# The span of the firmware's `millis()` clock. Elapsed time is an unsigned
+# difference of two readings, so it is taken modulo this - the same arithmetic the
+# firmware uses - and a wrap between two readings cannot produce a negative
+# duration here either.
+_UINT32_SPAN = 1 << 32
+
 
 def _round(value: Optional[float], digits: int = _ROUND_DIGITS) -> Optional[float]:
     """Rounds for output so a report is byte-reproducible.
@@ -446,11 +452,63 @@ def _configuration_check_section(samples: Sequence[Sample]) -> dict[str, Any]:
 
 
 def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str, Any]:
+    """The armed window, the run's own timeline, and the internal Run Time.
+
+    The internal Run Time is the firmware's own metric: the unsigned difference
+    ``dwell_start_ms - run_start_ms``, actuation to the start of the *verified*
+    final-stop dwell. The rules end Run Time at the complete stop and exclude the
+    Complete Stop interval itself, so a value taken to the ``Done`` tick would
+    overcount the confirmation interval by construction. It is still the
+    firmware's believed time on its own clock - never the event's official Run
+    Time, which a timekeeper or video measures - and it is ``None`` when the run
+    never verified a final stop, rather than approximated from some other window.
+
+    A snapshot of the timeline is reported separately: the raw readings, the
+    candidate dwell start while one is open (`final_stop_dwell_verified` says
+    whether it is the verified one), and the completion reading.
+    """
     armed_samples = [sample for sample in samples if sample.armed]
     armed_first = armed_samples[0].t_abs_ms if armed_samples else None
     armed_last = armed_samples[-1].t_abs_ms if armed_samples else None
     done = next((sample.t_abs_ms for sample in samples if sample.phase == "Done"), None)
     fault = next((sample.t_abs_ms for sample in samples if sample.phase == "Fault"), None)
+
+    # The run's timeline. Every sample after the actuation repeats the readings, so
+    # the first sample carrying each fact reports the run; the latest dwell start is
+    # used while no verification exists, because a candidate that was discarded and
+    # restarted has a new reading and the old one is not a fact about the run.
+    actuated = next((sample for sample in samples if sample.run_start_ok), None)
+    latest_dwell = None
+    for sample in samples:
+        if sample.run_start_ok and sample.dwell_start_ok:
+            latest_dwell = sample
+    verified = next(
+        (
+            sample
+            for sample in samples
+            if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok
+        ),
+        None,
+    )
+
+    run_start_ms = actuated.run_start_ms if actuated is not None else None
+    dwell_start_ms = None
+    if verified is not None:
+        dwell_start_ms = verified.dwell_start_ms
+    elif latest_dwell is not None:
+        dwell_start_ms = latest_dwell.dwell_start_ms
+    stop_verified_ms = verified.stop_verified_ms if verified is not None else None
+
+    internal_run_time_s = None
+    final_stop_verification_completed_s = None
+    if verified is not None:
+        internal_run_time_s = _round(
+            ((verified.dwell_start_ms - verified.run_start_ms) % _UINT32_SPAN) / 1000.0
+        )
+        final_stop_verification_completed_s = _round(
+            ((verified.stop_verified_ms - verified.run_start_ms) % _UINT32_SPAN) / 1000.0
+        )
+
     return {
         "armed_first_t_abs_ms": armed_first,
         "armed_last_t_abs_ms": armed_last,
@@ -459,7 +517,19 @@ def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str,
         else None,
         "done_t_abs_ms": done,
         "fault_t_abs_ms": fault,
-        "note": "the armed window is the firmware's own armed flag, not a physical start or finish line",
+        "run_start_ms": run_start_ms,
+        "final_stop_dwell_start_ms": dwell_start_ms,
+        "stop_verified_ms": stop_verified_ms,
+        "final_stop_dwell_verified": verified is not None,
+        "internal_run_time_s": internal_run_time_s,
+        "final_stop_verification_completed_s": final_stop_verification_completed_s,
+        "note": (
+            "the armed window is the firmware's own armed flag, not a physical start or "
+            "finish line; the internal Run Time is the firmware's own clock from "
+            "actuation to the start of the verified final-stop dwell, so it excludes "
+            "the Complete Stop interval - it is not the event's official Run Time, "
+            "which a timekeeper or video measures"
+        ),
     }
 
 

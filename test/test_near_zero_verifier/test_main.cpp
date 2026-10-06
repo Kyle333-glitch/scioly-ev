@@ -638,6 +638,49 @@ void test_verdict_invariants_hold_over_a_varied_sequence(void) {
     }
 }
 
+// The interval's own start is what a run's final-stop timeline is stamped with,
+// so the interval's owner reports it rather than leaving a caller to recover it
+// from the elapsed span: open exactly while the evidence holds, a new reading
+// after every discard or restart, and unchanged while the stamp is frozen.
+void test_the_open_interval_reports_its_own_start(void) {
+    ev::NearZeroVerifier verifier(fixtureConfig());
+
+    TEST_ASSERT_FALSE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(0U, verifier.intervalStartedAtMs());
+
+    // The first observation opens the interval at this reading.
+    verifier.update(1000U, evidenceAt(0.0, true));
+    TEST_ASSERT_TRUE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(1000U, verifier.intervalStartedAtMs());
+
+    // A non-advancing stamp holds the dwell: it is the same interval, so its
+    // start does not move.
+    verifier.update(1000U, evidenceAt(0.0, true));
+    TEST_ASSERT_TRUE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(1000U, verifier.intervalStartedAtMs());
+
+    // Broken evidence closes the interval: there is no start left to report.
+    verifier.update(1050U, evidenceAt(0.5, true));
+    TEST_ASSERT_FALSE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(0U, verifier.intervalStartedAtMs());
+
+    // The restart is a new interval with its own start, not the old one.
+    verifier.update(1100U, evidenceAt(0.0, true));
+    TEST_ASSERT_TRUE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(1100U, verifier.intervalStartedAtMs());
+
+    // Verified: the interval stays open, reporting the start it was earned from.
+    const ev::NearZeroVerdict verdict = verifier.update(1300U, evidenceAt(0.0, true));
+    expectStatus(ev::NearZeroStatus::Verified, verdict);
+    TEST_ASSERT_TRUE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(1100U, verifier.intervalStartedAtMs());
+
+    // A reset ends the interval with the rest of the observation.
+    verifier.reset();
+    TEST_ASSERT_FALSE(verifier.intervalOpen());
+    TEST_ASSERT_EQUAL_UINT32(0U, verifier.intervalStartedAtMs());
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_config_refuses_unmeasured_and_degenerate_values);
@@ -664,5 +707,6 @@ int main(int, char**) {
     RUN_TEST(test_a_window_derived_zero_is_only_a_speed_fact_not_a_stop);
     RUN_TEST(test_the_packet_limit_must_span_the_stop_dwell);
     RUN_TEST(test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop);
+    RUN_TEST(test_the_open_interval_reports_its_own_start);
     return UNITY_END();
 }

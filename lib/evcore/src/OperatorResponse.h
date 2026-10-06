@@ -463,7 +463,7 @@ constexpr const char* const kOperatorHelpLines[] = {
     "reset         - return the chain to the new-run boundary",
     "telemetry on | off | status",
     "telemetry rate <hz>",
-    "records: EVS1 samples, EVE1 events; responses: OK, ERR, STATUS, CONFIG, CHECK, TELEMETRY, VERSION",
+    "records: EVS/EVE lines; responses: OK, ERR, STATUS, CONFIG, CHECK, TELEMETRY, VERSION",
 };
 
 constexpr uint16_t kOperatorHelpLineCount =

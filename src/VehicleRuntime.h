@@ -183,6 +183,20 @@ struct TelemetrySnapshot {
 
     // The run policy and the request this cycle presented.
     ev::RunPhase phase = ev::RunPhase::Idle;
+    // The run's own recorded timeline (`ev::RunTimeline`), copied from the run
+    // policy: the actuation reading, the final stop's dwell start (candidate or
+    // verified) and the verified final-stop completion, each with the flag that
+    // says whether it exists. The telemetry sample carries these six facts, and
+    // the internal Run Time is the unsigned difference of the first and the
+    // second - actuation to the start of the verified dwell, which excludes the
+    // rule's Complete Stop interval. They are what the firmware believed on its
+    // own clock, never the official time.
+    bool runActuated = false;
+    uint32_t runActuatedAtMs = 0U;
+    bool finalStopDwellStartKnown = false;
+    uint32_t finalStopDwellStartMs = 0U;
+    bool finalStopVerified = false;
+    uint32_t finalStopVerifiedAtMs = 0U;
     // The three forward-progression completion facts the run was given this cycle
     // (`deriveBottleEvidence()`, thresholded at the run's execution plan landmarks),
     // reported so a phase that is waiting can be attributed to the completion that

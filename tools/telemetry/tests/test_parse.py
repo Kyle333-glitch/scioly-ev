@@ -28,14 +28,16 @@ from evtelemetry.parse import (
 # means the tool is checked against the record a board actually emits, not
 # against a paraphrase of it.
 REAL_SAMPLE_LINE = (
-    "EVS2,ver=2,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+    "EVS3,ver=3,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+    "run_start_ms=1200,run_start_ok=1,dwell_start_ms=4200,dwell_start_ok=1,"
+    "stop_verified_ms=7400,stop_verified_ok=1,"
     "pos_m=6.2140,pos_ok=1,vel_mps=0.7140,vel_ok=1,vel_cmd_mps=0.7000,rem_m=0.2860,"
     "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,"
     "nfault=Installed,nfault_low=0,"
     "fault=None,authz=AuthorizedDrive,check=none,drop_s=0,drop_e=0"
 )
 REAL_EVENT_LINE = (
-    "EVE2,ver=2,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
+    "EVE3,ver=3,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
     "detail=ProvisionalCalibration,fault=ProvisionalCalibration,drop_s=3,drop_e=1"
 )
 
@@ -46,6 +48,12 @@ _SAMPLE_DEFAULTS = {
     "phase": "Idle",
     "cmd": "none",
     "armed": "0",
+    "run_start_ms": "0",
+    "run_start_ok": "0",
+    "dwell_start_ms": "0",
+    "dwell_start_ok": "0",
+    "stop_verified_ms": "0",
+    "stop_verified_ok": "0",
     "pos_m": "0.0000",
     "pos_ok": "0",
     "vel_mps": "0.0000",
@@ -104,6 +112,15 @@ class RealRecordTest(unittest.TestCase):
         self.assertEqual(record.phase, "Approach")
         self.assertEqual(record.command, "DriveForward")
         self.assertTrue(record.armed)
+        # The run's own timeline travels beside the control state: raw readings and
+        # their availability flags, never a derived duration (that is the metrics
+        # module's arithmetic).
+        self.assertEqual(record.run_start_ms, 1200)
+        self.assertTrue(record.run_start_ok)
+        self.assertEqual(record.dwell_start_ms, 4200)
+        self.assertTrue(record.dwell_start_ok)
+        self.assertEqual(record.stop_verified_ms, 7400)
+        self.assertTrue(record.stop_verified_ok)
         self.assertAlmostEqual(record.position_m, 6.214)
         self.assertTrue(record.position_ok)
         self.assertAlmostEqual(record.velocity_mps, 0.714)
@@ -176,21 +193,21 @@ class CorruptionTest(unittest.TestCase):
 
     def test_a_different_schema_version_is_refused(self) -> None:
         self.assertRefused(
-            sample_line().replace("EVS2", "EVS1", 1), SchemaVersionError, "schema version 1"
+            sample_line().replace("EVS3", "EVS1", 1), SchemaVersionError, "schema version 1"
         )
         self.assertRefused(
-            event_line().replace("EVE2", "EVE3", 1), SchemaVersionError, "schema version 3"
+            event_line().replace("EVE3", "EVE4", 1), SchemaVersionError, "schema version 4"
         )
 
     def test_an_unknown_prefix_is_refused(self) -> None:
         self.assertRefused(
-            sample_line().replace("EVS2", "EVX2", 1), SchemaVersionError, "not a record prefix"
+            sample_line().replace("EVS3", "EVX3", 1), SchemaVersionError, "not a record prefix"
         )
 
     def test_the_prefix_digit_and_the_version_field_must_agree(self) -> None:
-        # Both say 2, so this parses; changing only `ver` must not.
+        # Both say 3, so this parses; changing only `ver` must not.
         self.assertRefused(
-            sample_line(ver="1"), SchemaVersionError, "prefix says schema version 2"
+            sample_line(ver="2"), SchemaVersionError, "prefix says schema version 3"
         )
 
     def test_a_renamed_field_is_refused_not_absorbed(self) -> None:
@@ -288,9 +305,23 @@ class CorruptionTest(unittest.TestCase):
         assert isinstance(record, Event)
         self.assertEqual(record.detail, "-")
 
+    def test_the_run_timeline_readings_and_flags_are_checked_like_every_field(self) -> None:
+        # The timeline is not exempt from the schema: a reading is a 32-bit
+        # unsigned, a flag is the single-character boolean, and a misspelling of
+        # either is refused like any other field.
+        self.assertRefused(
+            sample_line(run_start_ms="4294967296"),
+            FieldValueError,
+            "wider than its firmware type",
+        )
+        self.assertRefused(sample_line(dwell_start_ok="yes"), FieldValueError, "single-character boolean")
+        self.assertRefused(
+            sample_line(stop_verified_ms="soon"), FieldValueError, "not a plain unsigned"
+        )
+
     def test_an_unknown_schema_error_is_still_a_format_error(self) -> None:
         with self.assertRaises(TelemetryFormatError):
-            parse_line(sample_line().replace("EVS2", "EVS9", 1))
+            parse_line(sample_line().replace("EVS3", "EVS9", 1))
 
 
 class SentinelTest(unittest.TestCase):

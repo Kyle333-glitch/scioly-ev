@@ -133,23 +133,21 @@ constexpr uint32_t kH1aHoldMaxMs = 30000U;
 // characters** - every `uint32` field at its full ten digits, which the
 // free-running counters really can reach (`passes` needs roughly 26 h at the
 // measured ~46,000 passes/s; `last_refresh_ms` reaches ten digits at the
-// `millis()` wrap). That is **86 characters over** the 448 in
-// `ev::kSerialLineCapacity`. The widest line any capture has actually contained
-// is 389, so the overflow is not reachable in a bench session - but it is
-// reachable in the limit, and the failure it produces is the one failure this
-// console must not have: a readout that does not fit is dropped whole and
-// counted (`respond()`), and the counter that would say so, `responses_lost`, is
-// a field of the health line itself.
+// `millis()` wrap). That was **86 characters over** the 448 a previous shared
+// capacity held. S8 raised the capacity to 576 for the telemetry sample's own
+// derived worst case (567), so the readout now fits with 42 characters to spare -
+// but the room is still finite and still shared, so the two reasons this number
+// is recorded stand:
 //
-// Two things answer that here:
-//
-//   * `stageLostReadoutNotice()` - a dropped readout leaves a short, constant
-//     notice in its place, so the loss is visible on the wire rather than only
-//     in a counter that travelled on the line that was lost;
+//   * `stageLostReadoutNotice()` - a readout that does not fit is dropped whole
+//     and counted (`respond()`), and the counter that would say so,
+//     `responses_lost`, is a field of the health line itself; the notice keeps
+//     that loss visible on the wire rather than only in a counter that travelled
+//     on the line that was lost;
 //   * this number, recorded so the next field added has to look at it. The owed
 //     fix is to split `health` (the watchdog/loop half and the console/interface
-//     half), not to trim the schema. Until that happens this comment is the
-//     record of how much room is left, and there is none.
+//     half), not to trim the schema. That is a clarity/schema matter now rather
+//     than a loss-prevention one.
 //
 // Note also the shape of the headroom: the non-obvious part is that it is
 // *unbounded* growth, not a fixed gap. Every other consumer of the shared buffer

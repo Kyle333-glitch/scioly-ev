@@ -22,12 +22,14 @@ namespace ev {
 //
 // The lines, in the order the fields are written:
 //
-//   EVS1,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,pos_m=..,pos_ok=..,
-//     vel_mps=..,vel_ok=..,vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,
-//     batt_counts=..,curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,
-//     check=..,drop_s=..,drop_e=..
+//   EVS3,ver=..,t_ms=..,dt_ms=..,phase=..,cmd=..,armed=..,run_start_ms=..,
+//     run_start_ok=..,dwell_start_ms=..,dwell_start_ok=..,stop_verified_ms=..,
+//     stop_verified_ok=..,pos_m=..,pos_ok=..,vel_mps=..,vel_ok=..,
+//     vel_cmd_mps=..,rem_m=..,motor=..,effort_permille=..,batt_counts=..,
+//     curr_counts=..,nfault=..,nfault_low=..,fault=..,authz=..,check=..,
+//     drop_s=..,drop_e=..
 //
-//   EVE1,ver=..,t_ms=..,phase=..,armed=..,event=..,detail=..,fault=..,
+//   EVE3,ver=..,t_ms=..,phase=..,armed=..,event=..,detail=..,fault=..,
 //     drop_s=..,drop_e=..
 //
 // The field names are part of the schema and are frozen with it: a name may be
@@ -61,19 +63,21 @@ namespace ev {
 //
 // A sample is bounded by
 //
-//   EVS1(4) + ver(6) + t_ms(6+10) + dt_ms(7+5) + phase(7+14 "ParameterValid") +
-//   cmd(5+15 "RampDownForward") + armed(7+1) + pos_m(7+13) + pos_ok(8+1) +
-//   vel_mps(9+13) + vel_ok(8+1) + vel_cmd_mps(13+13) + rem_m(7+13) +
-//   motor(7+12 "DriveForward") + effort_permille(17+5) + batt_counts(13+5) +
-//   curr_counts(13+5) + nfault(8+12 "NotInstalled") +
+//   EVS3(4) + ver(6) + t_ms(6+10) + dt_ms(7+5) + phase(7+14 "ParameterValid") +
+//   cmd(5+15 "RampDownForward") + armed(7+1) + run_start_ms(12+2+10) +
+//   run_start_ok(12+2+1) + dwell_start_ms(14+2+10) + dwell_start_ok(14+2+1) +
+//   stop_verified_ms(16+2+10) + stop_verified_ok(16+2+1) + pos_m(7+13) +
+//   pos_ok(8+1) + vel_mps(9+13) + vel_ok(8+1) + vel_cmd_mps(13+13) +
+//   rem_m(7+13) + motor(7+12 "DriveForward") + effort_permille(17+5) +
+//   batt_counts(13+5) + curr_counts(13+5) + nfault(8+12 "NotInstalled") +
 //   nfault_low(12+1 "-") + fault(7+22 "ProvisionalCalibration") +
 //   authz(7+27 "DeniedUnsafeDirectionChange") +
 //   check(7+29 "StopEvidenceSpansReversalStop") + drop_s(8+10) + drop_e(8+10)
-//   = 438
+//   = 567
 //
 // and an event by
 //
-//   EVE1(4) + ver(6) + t_ms(16) + phase(21) + armed(8) +
+//   EVE3(4) + ver(6) + t_ms(16) + phase(21) + armed(8) +
 //   event(7+16 "TelemetryEnabled") + detail(8+29 "BottleLineDistanceOffInterval") +
 //   fault(7+22) + drop_s(18) + drop_e(18) = 180
 //
@@ -90,7 +94,12 @@ namespace ev {
 // absent-value marker when the vehicle has no external nFAULT line (D32), which
 // is why the sample gained the `nfault` availability field next to it. The
 // level's width is unchanged - `-` is one character, like `0` and `1`.
-constexpr uint16_t kTelemetrySampleWorstCaseChars = 438U;
+//
+// The three run-timeline readings (S8) are `uint32` clock readings, each at the
+// same ten-digit worst case as `t_ms`, and each availability flag is one
+// character - so the derivation above is where the sample's growth lives, not a
+// formatting detail that could be trimmed.
+constexpr uint16_t kTelemetrySampleWorstCaseChars = 567U;
 constexpr uint16_t kTelemetryEventWorstCaseChars = 180U;
 constexpr uint16_t kTelemetryWorstCaseChars =
     kTelemetrySampleWorstCaseChars > kTelemetryEventWorstCaseChars
@@ -146,6 +155,15 @@ inline uint16_t formatTelemetrySample(const TelemetrySample& sample, char* buffe
     text.field("phase").appendText(telemetryPhaseName(sample.phase));
     text.field("cmd").appendText(telemetryRunCommandName(sample.command));
     text.field("armed").appendBool(sample.armed);
+    // The run's own timeline: the reading first, then the flag that says whether
+    // it exists, in the same shape as `pos_m`/`pos_ok`. A sample writes every
+    // field, so an absent reading is still written - as a zero next to a `0` flag.
+    text.field("run_start_ms").appendUnsigned(sample.runActuatedAtMs);
+    text.field("run_start_ok").appendBool(sample.runActuated);
+    text.field("dwell_start_ms").appendUnsigned(sample.finalStopDwellStartMs);
+    text.field("dwell_start_ok").appendBool(sample.finalStopDwellStartKnown);
+    text.field("stop_verified_ms").appendUnsigned(sample.finalStopVerifiedAtMs);
+    text.field("stop_verified_ok").appendBool(sample.finalStopVerified);
     text.field("pos_m").appendFixed(sample.positionM, kTelemetryFieldDecimals);
     text.field("pos_ok").appendBool(sample.positionUsable);
     text.field("vel_mps").appendFixed(sample.measuredVelocityMps, kTelemetryFieldDecimals);

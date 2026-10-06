@@ -6669,3 +6669,133 @@ and cruise limits the estimate uses must be promoted from `Provisional` to
 `Measured` through the normal evidence procedure. Only then may
 `kRunTimingModelValidated` be set true, and the estimate's cruise/delay may
 influence a run.
+## D45 / S8 - 2026-10-05 - The run's own Run Time ends at the verified final-stop dwell start, not at Done
+
+**Scope.** S8 records the run's own timeline so the event's Run Time (rule 8.o,
+actuation to the complete stop) and Complete Stop (rule 8.p, the stationary
+interval that is not part of Run Time) can be read from a log without
+reconstructing either from the armed flag. The internal Run Time is defined as
+`dwell_start_ms - run_start_ms`: actuation to the start of the **verified**
+final-stop dwell, so the rule's three-second confirmation interval is
+deliberately outside it. The firmware records readings; it derives no duration
+in any control path. No calibration value was tuned, no physical behaviour is
+claimed, and the external timekeeper or video remains the official Run Time.
+
+**Timestamp ownership: one record, in the run policy.**
+
+- `ev::RunTimeline` (`lib/evcore/src/CompetitionStateMachine.h`) is the single
+  owner of the three readings. `CompetitionStateMachine::timeline()` returns a
+  copy; `VehicleRuntime` copies it into `TelemetrySnapshot` and then into the
+  telemetry sample, so the sample cannot disagree with the run that produced it.
+- **Actuation** is stamped once, in the tick the start trigger is seen, before
+  the phase moves to `OptionalDelay` or `Approach`. The run's deliberate
+  pre-travel delay is therefore inside the run's own time, as the event counts
+  it. A fault keeps it: the run did begin.
+- **The dwell start** is read from the verifier that owns the interval, not
+  reconstructed from an elapsed span. `NearZeroVerifier` gained two read-only
+  accessors - `intervalOpen()` (`hasNearZeroSince_`) and `intervalStartedAtMs()`
+  (`nearZeroSinceMs_`) - so a broken observation clears the reading and the gap
+  rule's restart reports its new start, both without the state machine
+  re-deriving "is an interval open" from a status it might classify wrongly.
+- **The verified start** is latched only by the cycle that earned the verdict,
+  together with the verification completion reading for that same cycle (which is
+  also the tick that entered `Done`). `RunTimeline::finalStopVerified` is a
+  separate latch from the presentation's `RunStatus::stopVerified`: a later fault
+  discards an in-progress **candidate** (nothing was verified, so there is no fact
+  to keep) but cannot erase a final stop the run completed. Only `reset()` clears
+  the record, so a new run cannot inherit a previous run's readings.
+
+**Schema impact: version 3, and the run timeline on the sample.**
+
+- `ev::kTelemetrySchemaVersion` is 3 and the prefixes are `EVS3`/`EVE3`. Each
+  sample gained six fields in the `pos_m`/`pos_ok` shape: `run_start_ms` /
+  `run_start_ok`, `dwell_start_ms` / `dwell_start_ok`, `stop_verified_ms` /
+  `stop_verified_ok`. The fields are always written, so "no run has been
+  actuated" is a zero next to a `0` flag rather than a missing column, and a
+  version-2 log's missing columns are not readable as "the run never verified a
+  final stop" - which is what the bump states.
+- The sample's derived worst case grew from 438 to 567 characters, so
+  `ev::kSerialLineCapacity` is 576 (was 448). The bench console's own derived
+  worst case (534, D31) now fits with 42 characters to spare; its comment in
+  `src/bench/BenchConsole.h` and the entry in `docs/limitations.md` say so, and
+  the owed `health` split is still owed because that line still has no
+  compile-time bound behind it.
+- The operator wire shape is otherwise untouched: `STATUS` carries no time
+  fields, and the help table's records line no longer names a schema digit it
+  would have to be edited to keep true.
+
+**Telemetry tooling follows the firmware, and stops substituting the armed window.**
+
+- `tools/telemetry` mirrors version 3: the six fields parse (`parse.Sample`), the
+  schema pins them (`schema.py`, `test_schema_mirror.py`), and the synthetic
+  generator writes them from its own modelled final-stop interval
+  (`SYNTHETIC_COMPLETE_STOP_MS`), exposing `final_stop_timeline()` so a test can
+  compare tool numbers against the fixture's own readings.
+- `run_window.internal_run_time_s` is the unsigned difference actuation to
+  verified dwell start (taken modulo 2**32, the same arithmetic the firmware
+  uses, so a wrap cannot produce a negative duration), and
+  `final_stop_verification_completed_s` is the same difference to the completion
+  reading. A run with no verified final stop reports **both as `None`**: the
+  endpoint comparison no longer substitutes `armed_duration_s` (or the log
+  duration) for the Run Time, which was the gap still live on `main`. The
+  comparison table's `dur_s` column is now `run_s` and carries the internal Run
+  Time, and the JSON report carries both new numbers.
+
+**Tests (software verification only; every number is a synthetic fixture).**
+
+- `test_competition_state` +5 cases: the timeline records actuation, the dwell
+  start and the verification completion; a broken final-stop dwell is discarded
+  and restarted with a new start reading; the readings stay correct across the
+  `uint32` wrap; `reset()` clears the record (and a new run starts empty); a
+  fault discards a candidate but keeps a verified record.
+- `test_near_zero_verifier` + cases for `intervalOpen()`/`intervalStartedAtMs()`
+  on a fresh interval, a held (frozen-stamp) interval, a discarded interval and a
+  restarted one.
+- `test_telemetry_format` pins the six new fields and their spelling, and the
+  sample's declared worst case against the line capacity.
+- `test_operator_response` re-pins the version line to `telemetry_schema=3`
+  (the expected strings had stayed at 2 while the constant moved).
+- Telemetry tooling: a parse case for the new readings and flags (including a
+  reading wider than its firmware type and a misspelled flag), and metrics cases
+  pinning the internal Run Time against the fixture's own timeline - including
+  that `final_stop_verification_completed_s - internal_run_time_s` is exactly
+  3.0 s, which is the acceptance property that the rule's confirmation interval
+  is not counted - plus that a faulted run reports no Run Time at all.
+
+**Software verification.**
+
+- `pio test -e native`: **599/599 test cases succeeded** (592 at S7), 33 suites,
+  no new warnings.
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog` from clean: 3 SUCCESS,
+  0 warnings. RAM 6772 / 6972 / 6956 (+296 each: the shared line buffer grew by
+  129 bytes and each image holds two of them) and Flash 73244 / 80088 / 79516
+  (+392 / +388 / +388: the six field names, the timeline record and the new
+  accessors).
+- Telemetry tooling: **119 tests OK** (116 at S7), including the schema mirror
+  that reads `TelemetryRecord.h` itself. Synthetic fixtures regenerated and
+  pinned byte-for-byte by the drift test. `git diff --check` clean; every
+  changed file is 100% CRLF.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; no hardware was touched
+  and no physical behaviour is claimed.
+
+**Documents.** `SOFTWARE_ARCHITECTURE.md` section 9 states the version, the run
+timeline on the sample and where the internal Run Time ends;
+`docs/limitations.md` records the metric as recorded but never compared against
+the official one; and P-H14's Step 11 no longer names a record prefix the
+firmware stopped emitting (the remaining pinned `EVS1`/`EVE1` mentions in the
+older bring-up documents are documentation synchronisation, owned by S12).
+
+**Not changed (owned elsewhere).** The operator `plan` output (S9), the
+`maxRunDuration` runtime consumer (S10), the legal-parameter host sweep (S11) and
+the remaining documentation synchronisation (S12) are untouched. No stop,
+reversal, fault, arming, safety-authority or control behaviour changed: `Done`
+is entered exactly as before, and the rule's 3-second confirmation interval was
+not shortened, lengthened or made configurable.
+
+**Why external timing is still required in H10.** The internal Run Time is what
+the firmware believed on its own `millis()` clock: it is a `millis()` interval,
+not a measurement of the vehicle, and it cannot see a start trigger pressed late,
+a delay in the drivetrain, or how the officials time the run. H10 must record the
+official time (timekeeper or video) **and** the internal metric for the same
+runs, side by side, and only a series of those pairs can say whether the internal
+number is usable - the same evidentiary rule the timing model itself is held to.

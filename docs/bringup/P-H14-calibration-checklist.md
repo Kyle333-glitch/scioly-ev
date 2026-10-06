@@ -202,8 +202,8 @@ bottle, independent observer or camera, kill switch, runout clear.
 `config check`, `announce`, `arm`, then the physical trigger. After the run:
 `status` (and the captured log).
 **Measure, per run, believed AND observed:**
-- believed: `pos_m` at the tick the phase changed (`EVE2` `PhaseChange=Capture` /
-  `Push`), and the position at which the run entered `ForwardDecel`. Those three
+- believed: `pos_m` at the tick the phase changed (the `PhaseChange=Capture` /
+  `Push` event), and the position at which the run entered `ForwardDecel`. Those three
   are the run's *progression* completions: `Capture` begins at the earliest
   credible contact position (the window opening - **not** a contact observation),
   `Push` begins at the capture guarantee, and `ForwardDecel` at the forward

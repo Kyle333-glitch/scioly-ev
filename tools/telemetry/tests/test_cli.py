@@ -191,7 +191,7 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_a_future_schema_version_is_refused_with_a_clear_message(self) -> None:
         lines = [
-            line.replace("EVS2", "EVS1", 1) if line.startswith("EVS2") else line
+            line.replace("EVS3", "EVS1", 1) if line.startswith("EVS3") else line
             for line in self._good_lines()
         ]
         path = self._write(lines)
@@ -203,7 +203,7 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_a_truncated_record_is_refused(self) -> None:
         lines = self._good_lines()
-        index = next(i for i, line in enumerate(lines) if line.startswith("EVS2"))
+        index = next(i for i, line in enumerate(lines) if line.startswith("EVS3"))
         lines[index] = ",".join(lines[index].split(",")[:10])
         path = self._write(lines)
         code, _, err = run_cli(["analyze", path, "--out", self.out])
@@ -213,7 +213,7 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_a_renamed_column_is_refused_rather_than_misread(self) -> None:
         lines = [
-            line.replace("vel_cmd_mps", "vel_cmd") if line.startswith("EVS2") else line
+            line.replace("vel_cmd_mps", "vel_cmd") if line.startswith("EVS3") else line
             for line in self._good_lines()
         ]
         path = self._write(lines)
@@ -230,8 +230,8 @@ class CorruptInputTest(unittest.TestCase):
 
     def test_continue_on_error_surveys_a_damaged_capture_and_says_so(self) -> None:
         lines = self._good_lines()
-        index = next(i for i, line in enumerate(lines) if line.startswith("EVS2"))
-        lines.insert(index, "EVS2,ver=2,t_ms=garbage")
+        index = next(i for i, line in enumerate(lines) if line.startswith("EVS3"))
+        lines.insert(index, "EVS3,ver=3,t_ms=garbage")
         path = self._write(lines)
         code, _, _ = run_cli(["analyze", path, "--out", self.out, "--continue-on-error"])
         self.assertEqual(code, 0)

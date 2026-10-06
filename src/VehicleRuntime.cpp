@@ -432,6 +432,17 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     snapshot.driverFaultLowCycles = cyclesWithDriverFaultLow_;
     snapshot.driverFaultConfigurationValid = configurationChecks_.driverFaultConfigurationValid;
     snapshot.phase = status.phase;
+    // The run's own timeline, read from the run policy's record: the tick that
+    // actuated the run, the final stop's dwell start and the verified final-stop
+    // completion. Copied rather than recomputed, so the sample cannot disagree
+    // with the run that produced it about when its final stop began.
+    const ev::RunTimeline runTimeline = run_.timeline();
+    snapshot.runActuated = runTimeline.actuated;
+    snapshot.runActuatedAtMs = runTimeline.actuatedAtMs;
+    snapshot.finalStopDwellStartKnown = runTimeline.dwellStartKnown;
+    snapshot.finalStopDwellStartMs = runTimeline.finalStopDwellStartMs;
+    snapshot.finalStopVerified = runTimeline.finalStopVerified;
+    snapshot.finalStopVerifiedAtMs = runTimeline.finalStopVerifiedAtMs;
     snapshot.approachComplete = bottleEvidence.approachComplete;
     snapshot.captureComplete = bottleEvidence.captureComplete;
     snapshot.pushComplete = bottleEvidence.pushComplete;
@@ -480,6 +491,12 @@ ev::TelemetrySample VehicleRuntime::buildSample() const {
     sample.phase = snapshot.phase;
     sample.command = snapshot.runCommand;
     sample.armed = snapshot.armed;
+    sample.runActuated = snapshot.runActuated;
+    sample.runActuatedAtMs = snapshot.runActuatedAtMs;
+    sample.finalStopDwellStartKnown = snapshot.finalStopDwellStartKnown;
+    sample.finalStopDwellStartMs = snapshot.finalStopDwellStartMs;
+    sample.finalStopVerified = snapshot.finalStopVerified;
+    sample.finalStopVerifiedAtMs = snapshot.finalStopVerifiedAtMs;
     sample.positionM = snapshot.runAxisPositionM;
     sample.positionUsable = snapshot.positionUsable;
     sample.measuredVelocityMps = snapshot.measuredVelocityMps;

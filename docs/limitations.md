@@ -132,6 +132,18 @@ Consequences that are easy to forget:
   realised Run Time recorded together; the accel/decel/cruise limits then promoted
   to `Measured` and `kRunTimingModelValidated` set true, with the raw data
   preserved.
+- **The internal Run Time is recorded but never measured against the official
+  one** (S8). The log now carries the run's own timeline (`run_start_ms`,
+  `dwell_start_ms`, `stop_verified_ms` in the sample), and the analysis tooling
+  derives `internal_run_time_s` as `dwell_start_ms - run_start_ms`: actuation to
+  the start of the verified final-stop dwell, which excludes the rule's Complete
+  Stop interval instead of counting it. That is what the firmware believed, on its
+  own `millis()` clock, and it is not the event's time: the official Run Time is
+  taken by a person (timekeeper or video) from actuation to the complete stop, and
+  only that measurement can be compared with the rules or entered in
+  `VERIFIED_STATE.md`. Nothing has been compared yet - no run has been captured -
+  so the internal metric stays unvalidated until H10's series records both numbers
+  side by side (P-H10's measurements section says how).
 - **The regulated ramp-down has never been observed on a vehicle** (D34). The run
   now keeps regulating toward the shaped target while the profile ramps it to zero
   (`isRunRampDownCommand()`), instead of coasting. What that does to a real
@@ -408,14 +420,15 @@ or what remains provisional about the numbers it justified.
   not recorded here). Neither is a production run, and neither established a
   stopping distance.
 
-- **The bench console's readouts had no compile-time bound, and its widest one does
-  not fit.** Derived field by field from `healthLine()` in D31, the worst case is
-  **534 characters** against `ev::kSerialLineCapacity = 448` - 86 over - because
-  the free-running counters reach ten digits (`passes` after roughly 26 h at the
-  measured ~46,000 passes/s). The widest line any capture has contained is 389, so
-  the overflow is unreachable in a bench session but reachable in the limit. Every
+- **The bench console's readouts had no compile-time bound, and its widest one
+  once did not fit.** Derived field by field from `healthLine()` in D31, the worst
+  case is **534 characters**, because the free-running counters reach ten digits
+  (`passes` after roughly 26 h at the measured ~46,000 passes/s). That was 86 over
+  the 448 `ev::kSerialLineCapacity` then held; S8 raised the capacity to 576 for
+  the telemetry sample's own derived 567, so the readout now fits with 42
+  characters to spare. The widest line any capture has contained is 389. Every
   other consumer of the shared buffer states a derived worst case against it
-  (`ev::kOperatorResponseWorstCaseChars`, and `BoundedText.h`'s own 418/443); this
+  (`ev::kOperatorResponseWorstCaseChars`, and `BoundedText.h`'s own 567/443); this
   one stated none until D31, when the number was derived and recorded in
   `src/bench/BenchConsole.h`. What D31 fixed is the **silence**: a readout that
   does not fit is dropped whole and was counted only in `responses_lost`, a field
@@ -423,13 +436,16 @@ or what remains provisional about the numbers it justified.
   now leaves a constant `BENCH,lost=1,reason=ReadoutDidNotFit` in its place. What
   stays open is the schema: **the owed fix is to split `health`** into its
   watchdog/loop half and its console/interface half, after which the bound can be
-  asserted at compile time the way the operator path's is. Owner: unowned. With the
+  asserted at compile time the way the operator path's is. Fitting today does not
+  remove that work: the console's line still grows with its counters and is still
+  the only line with no compile-time bound behind it. Owner: unowned. With the
   board gone this is maintenance, not bring-up, and nothing can be measured
   against it.
 - **`stageLostReadoutNotice()` is reviewed, not verified.** It lives in the
-  ARM-only bench tree, so no host test reaches it (`test_build_src = no`), and the
-  86 characters of headroom mean no bench session could have produced a line long
-  enough to trigger it. Its claim - that a dropped readout is visible on the wire -
+  ARM-only bench tree, so no host test reaches it (`test_build_src = no`), and no
+  bench session could have produced a line long enough to trigger it: the derived
+  worst case is 534 against a capacity of 576, and the widest line a capture has
+  contained is 389. Its claim - that a dropped readout is visible on the wire -
   has never been exercised on hardware.
 
 ## G. Evidence and process limits

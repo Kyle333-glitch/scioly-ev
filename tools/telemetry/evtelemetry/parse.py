@@ -154,6 +154,19 @@ class Sample:
     phase: str
     command: str
     armed: bool
+    # The run's own timeline, as the firmware records it: raw `millis()` readings
+    # with an availability flag each. `run_start_ms` is the actuation reading;
+    # `dwell_start_ms` is the start of the final stop's verification interval (the
+    # candidate, or the interval that satisfied the rule); `stop_verified_ms` is
+    # the reading the verification completed at. The internal Run Time is the
+    # unsigned difference of the first two - see `metrics._run_window()` - and is
+    # not the event's official time.
+    run_start_ms: int
+    run_start_ok: bool
+    dwell_start_ms: int
+    dwell_start_ok: bool
+    stop_verified_ms: int
+    stop_verified_ok: bool
     position_m: Optional[float]
     position_ok: bool
     velocity_mps: Optional[float]
@@ -471,6 +484,16 @@ def parse_line(
             phase=phase,
             command=_parse_enum("cmd", values["cmd"], **where),
             armed=armed,
+            run_start_ms=_parse_unsigned("run_start_ms", values["run_start_ms"], **where),
+            run_start_ok=_parse_bool("run_start_ok", values["run_start_ok"], **where),
+            dwell_start_ms=_parse_unsigned("dwell_start_ms", values["dwell_start_ms"], **where),
+            dwell_start_ok=_parse_bool("dwell_start_ok", values["dwell_start_ok"], **where),
+            stop_verified_ms=_parse_unsigned(
+                "stop_verified_ms", values["stop_verified_ms"], **where
+            ),
+            stop_verified_ok=_parse_bool(
+                "stop_verified_ok", values["stop_verified_ok"], **where
+            ),
             position_m=_parse_fixed("pos_m", values["pos_m"], **where),
             position_ok=_parse_bool("pos_ok", values["pos_ok"], **where),
             velocity_mps=_parse_fixed("vel_mps", values["vel_mps"], **where),

@@ -66,6 +66,13 @@ ev::TelemetrySample recognizableSample() {
     sample.phase = ev::RunPhase::Approach;
     sample.command = ev::RunMotionCommand::DriveForward;
     sample.armed = true;
+    // The run's timeline: distinct, recognizable readings, each with its flag.
+    sample.runActuated = true;
+    sample.runActuatedAtMs = 1200U;
+    sample.finalStopDwellStartKnown = true;
+    sample.finalStopDwellStartMs = 4200U;
+    sample.finalStopVerified = true;
+    sample.finalStopVerifiedAtMs = 7400U;
     sample.positionM = 6.214;
     sample.positionUsable = true;
     sample.measuredVelocityMps = 0.714;
@@ -93,6 +100,15 @@ ev::TelemetrySample widestSample() {
     sample.phase = ev::RunPhase::ParameterValid;
     sample.command = ev::RunMotionCommand::RampDownForward;
     sample.armed = true;
+    // Every timeline reading at its ten-digit worst case, with its flag set: a
+    // cleared flag prints the same width (a zero is one character), so the bound
+    // cannot depend on the flags' state.
+    sample.runActuated = true;
+    sample.runActuatedAtMs = 0xFFFFFFFFu;
+    sample.finalStopDwellStartKnown = true;
+    sample.finalStopDwellStartMs = 0xFFFFFFFFu;
+    sample.finalStopVerified = true;
+    sample.finalStopVerifiedAtMs = 0xFFFFFFFFu;
     sample.positionM = -9999999.9999;
     sample.positionUsable = false;
     sample.measuredVelocityMps = -9999999.9999;
@@ -141,7 +157,9 @@ void test_sample_line_pins_field_order_and_spelling(void) {
     const uint16_t length = ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity);
 
     TEST_ASSERT_EQUAL_STRING(
-        "EVS2,ver=2,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+        "EVS3,ver=3,t_ms=5832,dt_ms=20,phase=Approach,cmd=DriveForward,armed=1,"
+        "run_start_ms=1200,run_start_ok=1,dwell_start_ms=4200,dwell_start_ok=1,"
+        "stop_verified_ms=7400,stop_verified_ok=1,"
         "pos_m=6.2140,pos_ok=1,vel_mps=0.7140,vel_ok=1,vel_cmd_mps=0.7000,rem_m=0.2860,"
         "motor=DriveForward,effort_permille=740,batt_counts=812,curr_counts=513,"
         "nfault=Installed,nfault_low=0,"
@@ -167,7 +185,7 @@ void test_event_line_pins_field_order_and_spelling(void) {
     const uint16_t length = ev::formatTelemetryEvent(event, buffer, ev::kTelemetryLineCapacity);
 
     TEST_ASSERT_EQUAL_STRING(
-        "EVE2,ver=2,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
+        "EVE3,ver=3,t_ms=1200,phase=Approach,armed=1,event=FaultLatched,"
         "detail=ProvisionalCalibration,fault=ProvisionalCalibration,drop_s=3,drop_e=1",
         buffer);
     TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), length);
@@ -210,6 +228,23 @@ void test_sample_always_carries_every_field(void) {
     // The missing-field marker is a one-character string, written into a field
     // exactly like a name would be.
     TEST_ASSERT_EQUAL_STRING("-", ev::kTelemetryMissingField);
+}
+
+// A run timeline that does not exist yet is still written: each reading is a
+// zero next to its own availability flag, never the missing marker and never a
+// fabricated reading. A reader therefore cannot mistake "no run has been actuated"
+// for a run actuated at millisecond zero.
+void test_an_absent_run_timeline_is_written_as_zero_and_a_clear_flag(void) {
+    char buffer[ev::kTelemetryLineBufferBytes];
+    ev::TelemetrySample sample;
+
+    TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",run_start_ms=0,run_start_ok=0,"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",dwell_start_ms=0,dwell_start_ok=0,"));
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",stop_verified_ms=0,stop_verified_ok=0,"));
+    TEST_ASSERT_NULL(strstr(buffer, "run_start_ms=-"));
+    TEST_ASSERT_NULL(strstr(buffer, "dwell_start_ms=-"));
+    TEST_ASSERT_NULL(strstr(buffer, "stop_verified_ms=-"));
 }
 
 // A bad measurement must not widen a record, and it must not silently become a
@@ -443,11 +478,11 @@ void test_prefix_and_version_field_agree(void) {
     ev::TelemetrySample sample;
 
     TEST_ASSERT_TRUE(ev::formatTelemetrySample(sample, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS2,ver=2,", 11U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS3,ver=3,", 11U));
 
     ev::TelemetryEvent event;
     TEST_ASSERT_TRUE(ev::formatTelemetryEvent(event, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE2,ver=2,", 11U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE3,ver=3,", 11U));
 }
 
 // The drain loop hands the formatter whatever the queue popped, so the dispatch
@@ -460,11 +495,11 @@ void test_record_formatting_dispatches_on_kind(void) {
     record.event.tMs = 99U;
 
     TEST_ASSERT_TRUE(ev::formatTelemetryRecord(record, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS2,", 5U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVS3,", 5U));
 
     record.kind = ev::TelemetryRecordKind::Event;
     TEST_ASSERT_TRUE(ev::formatTelemetryRecord(record, buffer, ev::kTelemetryLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE2,", 5U));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(buffer, "EVE3,", 5U));
     TEST_ASSERT_NOT_NULL(strstr(buffer, ",t_ms=99,"));
 }
 
@@ -474,6 +509,7 @@ int main(int, char**) {
     RUN_TEST(test_event_line_pins_field_order_and_spelling);
     RUN_TEST(test_absent_detail_is_the_missing_marker);
     RUN_TEST(test_sample_always_carries_every_field);
+    RUN_TEST(test_an_absent_run_timeline_is_written_as_zero_and_a_clear_flag);
     RUN_TEST(test_non_finite_and_out_of_range_values_use_fixed_sentinels);
     RUN_TEST(test_negative_value_rounding_to_zero_has_no_sign);
     RUN_TEST(test_vocabulary_names_are_wire_safe_and_measured);

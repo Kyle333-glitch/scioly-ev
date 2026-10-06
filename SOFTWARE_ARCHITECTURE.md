@@ -138,9 +138,13 @@ Telemetry is a **consumer** of the control loop, never a participant in it.
   The schema that freezes the prefixes, the field set and the spelling of every
   enumerated value is `ev::TelemetryRecord`
   (`lib/evcore/src/TelemetryRecord.h`), versioned by
-  `ev::kTelemetrySchemaVersion` (currently 2, after the D32 driver-fault
-  capability change): `EVS<version>` is one control tick, `EVE<version>`
-  a transition or an operator action.
+  `ev::kTelemetrySchemaVersion` (currently 3, after the S8 run-timeline change;
+  it was 2 after the D32 driver-fault capability change): `EVS<version>` is one
+  control tick, `EVE<version>` a transition or an operator action. A sample
+  carries the run's own timeline - the actuation reading, the final stop's dwell
+  start and the verified final-stop completion, each with its availability flag -
+  and the internal Run Time is the unsigned difference of the first two, ending
+  where the rules' Complete Stop interval begins (`docs/limitations.md`).
 - **All or nothing.** A record that does not fit the line buffer is not emitted as
   a shortened line - truncation would eat exactly the tail fields a post-mortem
   needs (the fault, the authorization outcome, the failing check, the drop

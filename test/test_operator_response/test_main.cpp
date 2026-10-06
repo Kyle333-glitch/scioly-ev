@@ -450,14 +450,14 @@ void test_version_line_reports_identity_and_schema(void) {
     char buffer[ev::kSerialLineBufferBytes];
 
     TEST_ASSERT_TRUE(ev::formatVersionLine("ev-nano-r4-p7b", buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=ev-nano-r4-p7b,telemetry_schema=2", buffer);
+    TEST_ASSERT_EQUAL_STRING("VERSION,fw=ev-nano-r4-p7b,telemetry_schema=3", buffer);
 
     TEST_ASSERT_TRUE(ev::formatVersionLine(nullptr, buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=-,telemetry_schema=2", buffer);
+    TEST_ASSERT_EQUAL_STRING("VERSION,fw=-,telemetry_schema=3", buffer);
 
     // The schema number is the telemetry schema's, not a second copy of it.
-    TEST_ASSERT_TRUE(strstr(buffer, "telemetry_schema=2") != nullptr);
-    TEST_ASSERT_EQUAL_UINT8(2U, ev::kTelemetrySchemaVersion);
+    TEST_ASSERT_TRUE(strstr(buffer, "telemetry_schema=3") != nullptr);
+    TEST_ASSERT_EQUAL_UINT8(3U, ev::kTelemetrySchemaVersion);
 }
 
 // The declared worst case is the real one, per response family. A table entry

@@ -650,6 +650,64 @@ struct RunStatus {
     uint32_t phaseElapsedMs;
 };
 
+// The run's own recorded timeline: the clock readings that turn the event's Run
+// Time (rule 8.o, actuation to the complete stop) and Complete Stop (rule 8.p,
+// the stationary interval that is *not* part of Run Time) into numbers a log can
+// carry.
+//
+// Every reading is a raw `millis()` reading taken from the clock reading the tick
+// was given; a duration is an unsigned difference of two of them, which is the
+// arithmetic the rest of the firmware uses and which stays correct across the
+// `uint32` wrap. What each one is, exactly:
+//
+// * `actuatedAtMs` - the reading at which the start trigger actuated the run (the
+//   cycle the run left `Armed`). The run's deliberate pre-travel delay is inside
+//   the run, so the delay is counted, exactly as the event counts it. It is
+//   stamped once per announced run and kept for the life of the run: a fault does
+//   not erase the fact that the run was actuated.
+// * `finalStopDwellStartMs` - the start of the final stop's verification
+//   interval. While `FinalBrake` holds an open interval this is that candidate's
+//   start, and a break in the near-zero evidence discards or restarts it (the
+//   owned `NearZeroVerifier` owns the interval; this is its start, mirrored).
+//   Once the interval has satisfied the rule it is the start of the interval that
+//   did: only then does it mean "verified final stop start", and until
+//   `finalStopVerified` is true it is a candidate that may still be discarded.
+// * `finalStopVerifiedAtMs` - the reading at which the final stop's verification
+//   completed: the cycle that entered `Done`, when the rule's Complete Stop
+//   interval was satisfied. `finalStopVerified` is this record's own latch: it is
+//   set by that verification and cleared only by `reset()`.
+//
+// The record is history, and is deliberately not the same fact as
+// `RunStatus::stopVerified`: that verdict says which stop the run is presenting
+// *right now* (and is false in `Fault`), while this record says what the run
+// actually did. A fault therefore discards an in-progress dwell - a candidate
+// that was never verified is not a fact - but it does not erase a final stop that
+// was already verified: the run did complete its Complete Stop, and a log may not
+// be made to forget that because a later fault ended the run. Only `reset()`
+// clears the record, and the record keeps the actuation reading even through a
+// fault.
+//
+// Nothing here changes what the run does: the readings are taken from facts the
+// phases already consume, and they command nothing.
+struct RunTimeline {
+    // The run has been actuated (the start trigger was seen) and `actuatedAtMs`
+    // is valid. False before the trigger and after a `reset()`.
+    bool actuated = false;
+    uint32_t actuatedAtMs = 0U;
+
+    // A final-stop dwell start is known and `finalStopDwellStartMs` is valid:
+    // either a candidate interval is open, or the interval that satisfied the
+    // rule is latched. False with no run, in every phase before `FinalBrake`,
+    // after a discarded candidate, and after a fault.
+    bool dwellStartKnown = false;
+    uint32_t finalStopDwellStartMs = 0U;
+
+    // The rule's Complete Stop verification completed and `finalStopVerifiedAtMs`
+    // is valid.
+    bool finalStopVerified = false;
+    uint32_t finalStopVerifiedAtMs = 0U;
+};
+
 // Maps a reversal refusal onto the fault it raises. This is the one place the
 // two vocabularies meet; the sequencer itself never names a fault.
 inline FaultCode faultForReversalRefusal(ReversalRefusal refusal) {
@@ -744,11 +802,29 @@ public:
         return false;
     }
 
+    // The run's recorded timeline (see `RunTimeline`): when the run was
+    // actuated, the start of the final stop's dwell interval (candidate, or the
+    // one that satisfied the rule) and when its verification completed. Read-only,
+    // and cleared by `reset()` - a new-run boundary therefore cannot inherit a
+    // previous run's readings. The telemetry sample and any operator view report
+    // the run's timing from here, so there is one owner of "when did this run
+    // start and when did its final stop verify".
+    RunTimeline timeline() const {
+        RunTimeline recorded;
+        recorded.actuated = runActuated_;
+        recorded.actuatedAtMs = runActuatedAtMs_;
+        recorded.dwellStartKnown = finalStopDwellStartKnown_;
+        recorded.finalStopDwellStartMs = finalStopDwellStartMs_;
+        recorded.finalStopVerified = finalStopVerifiedAt_;
+        recorded.finalStopVerifiedAtMs = finalStopVerifiedAtMs_;
+        return recorded;
+    }
+
     // Returns the machine to its post-construction state: Idle (no run accepted,
     // so a new one must be announced), no fault of record, no reversal sequence,
-    // no verified stop, no pending handoff. It never arms and never commands
-    // motion; re-arming and re-announcing stay separate, deliberate decisions.
-    // This is the only way out of Fault and Done.
+    // no verified stop, no pending handoff, no run timeline. It never arms and
+    // never commands motion; re-arming and re-announcing stay separate,
+    // deliberate decisions. This is the only way out of Fault and Done.
     //
     // `nowMs` is the caller's clock reading, not a duration: it stamps the Idle
     // phase, so `phaseElapsedMs` measures from the reset that entered Idle rather
@@ -762,6 +838,14 @@ public:
         handoffPending_ = false;
         finalStopVerified_ = false;
         initialDelayS_ = 0.0;
+        // No run exists after a reset, so no reading of a previous run survives
+        // it: a new announcement starts from an empty timeline.
+        runActuated_ = false;
+        runActuatedAtMs_ = 0U;
+        finalStopDwellStartKnown_ = false;
+        finalStopDwellStartMs_ = 0U;
+        finalStopVerifiedAt_ = false;
+        finalStopVerifiedAtMs_ = 0U;
         sequencer_.reset();
         stopVerifier_.reset();
     }
@@ -869,6 +953,15 @@ private:
                     break;
                 }
                 if (inputs.startTriggered) {
+                    // The run's actuation, stamped once: this is the cycle the
+                    // trigger asked the run to begin, whether or not the run has a
+                    // deliberate pre-travel delay to spend first. The delay is
+                    // inside the run's own time (rule 8.o counts from actuation),
+                    // so it is not subtracted anywhere.
+                    if (!runActuated_) {
+                        runActuated_ = true;
+                        runActuatedAtMs_ = nowMs;
+                    }
                     enterPhase(initialDelayS_ > 0.0 ? RunPhase::OptionalDelay : RunPhase::Approach,
                                nowMs);
                 }
@@ -923,8 +1016,26 @@ private:
                     latchFault(FaultCode::ProvisionalCalibration, nowMs);
                     break;
                 }
+                // The dwell's start is the verifier's own interval start, read
+                // from the verifier rather than reconstructed from the elapsed
+                // span: an interval a broken observation discarded is simply gone
+                // here, and one the gap rule restarted reports its new start. The
+                // reading is only latched as the run's verified final-stop start
+                // by the verification below.
+                finalStopDwellStartKnown_ = stopVerifier_.intervalOpen();
+                finalStopDwellStartMs_ = finalStopDwellStartKnown_
+                                             ? stopVerifier_.intervalStartedAtMs()
+                                             : 0U;
                 if (verdict.verified) {
+                    // The interval that just satisfied the rule is the verified
+                    // final-stop start, and this cycle is the verification
+                    // completion: the rule's Complete Stop is over, so Run Time
+                    // ends here and not at `Done`'s later ticks. The timeline's
+                    // latch is separate from the presentation latch above, so a
+                    // later fault cannot erase what this run completed.
                     finalStopVerified_ = true;
+                    finalStopVerifiedAt_ = true;
+                    finalStopVerifiedAtMs_ = nowMs;
                     enterPhase(RunPhase::Done, nowMs);
                 }
                 break;
@@ -1052,7 +1163,14 @@ private:
     // The fault of record is the first one raised: a later fault does not
     // replace it, so the run log keeps the cause that actually stopped the run.
     // Nothing from before the fault is resumeable - the reversal permission, the
-    // dwell and the verified stop are all discarded.
+    // dwell and the presentation of a verified stop are all discarded.
+    //
+    // The run's recorded timeline is handled differently on purpose (see
+    // `RunTimeline`): an in-progress dwell candidate is discarded - it was never
+    // verified, so there is no fact to keep - while an already-verified final stop
+    // and the actuation reading stay. The run did those things; a fault after them
+    // does not make the record untrue, and the log must still be able to say where
+    // the run's own Run Time ended.
     void latchFault(FaultCode code, uint32_t nowMs) {
         if (code == FaultCode::None || phase_ == RunPhase::Fault) {
             return;
@@ -1063,6 +1181,10 @@ private:
         phaseEnteredMs_ = nowMs;
         handoffPending_ = false;
         finalStopVerified_ = false;
+        if (!finalStopVerifiedAt_) {
+            finalStopDwellStartKnown_ = false;
+            finalStopDwellStartMs_ = 0U;
+        }
         sequencer_.reset();
         stopVerifier_.reset();
     }
@@ -1186,6 +1308,19 @@ private:
     // (latched through Done). It is not the reversal gate's verdict: that latch
     // belongs to the sequencer and is never copied here.
     bool finalStopVerified_ = false;
+
+    // The run's recorded timeline (see `RunTimeline`), each reading stamped from
+    // the tick's own clock reading. Only `reset()` clears the record: a fault
+    // discards an in-progress dwell candidate (nothing was verified) but keeps the
+    // actuation reading and, once it exists, the verified final stop.
+    bool runActuated_ = false;
+    uint32_t runActuatedAtMs_ = 0U;
+    bool finalStopDwellStartKnown_ = false;
+    uint32_t finalStopDwellStartMs_ = 0U;
+    // The timeline's own verification latch, separate from `finalStopVerified_`
+    // above (which is the presentation's): this one is the run's record.
+    bool finalStopVerifiedAt_ = false;
+    uint32_t finalStopVerifiedAtMs_ = 0U;
 };
 
 // Pin the safe zero values and the "no silent answer" contract.

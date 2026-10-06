@@ -1538,6 +1538,268 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
                           static_cast<int>(ev::validateRunPhaseConfig(nanCeiling).error));
 }
 
+// ---------------------------------------------------------------------------
+// The run's recorded timeline (S8)
+// ---------------------------------------------------------------------------
+//
+// The run policy records when the run was actuated, the start of the final
+// stop's dwell interval and when that interval's verification completed. These
+// tests pin the ownership, the discard/restart rule, the clock-wrap behaviour and
+// the two boundaries that can erase the record (a fault and a reset). Every time
+// here is a fixture; none is a measured vehicle fact.
+
+void test_the_run_timeline_records_actuation_the_dwell_and_the_verification(void) {
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+
+    const ev::RunTimeline fresh = harness.machine.timeline();
+    TEST_ASSERT_FALSE(fresh.actuated);
+    TEST_ASSERT_FALSE(fresh.dwellStartKnown);
+    TEST_ASSERT_FALSE(fresh.finalStopVerified);
+    TEST_ASSERT_EQUAL_UINT32(0U, fresh.actuatedAtMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, fresh.finalStopDwellStartMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, fresh.finalStopVerifiedAtMs);
+
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Armed));
+    // Nothing is actuated until the trigger: an announced, armed run is not a run
+    // that has begun.
+    TEST_ASSERT_FALSE(harness.machine.timeline().actuated);
+
+    const ev::RunStatus started = tick(harness, evidenceFor(ev::RunPhase::Armed));
+    expectPhase(ev::RunPhase::Approach, started);
+    const uint32_t actuatedAtMs = harness.nowMs;
+    const ev::RunTimeline actuated = harness.machine.timeline();
+    TEST_ASSERT_TRUE(actuated.actuated);
+    TEST_ASSERT_EQUAL_UINT32(actuatedAtMs, actuated.actuatedAtMs);
+    // A run that has not reached its final stop has no dwell start and no
+    // verification to report, and a zero reading is not a claim of either.
+    TEST_ASSERT_FALSE(actuated.dwellStartKnown);
+    TEST_ASSERT_FALSE(actuated.finalStopVerified);
+
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::FinalBrake));
+
+    // The first final-brake cycle opens the dwell candidate, and the candidate's
+    // start is that cycle's own clock reading.
+    ev::RunStatus status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    const uint32_t dwellOpenedAtMs = harness.nowMs;
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    const ev::RunTimeline dwelling = harness.machine.timeline();
+    TEST_ASSERT_TRUE(dwelling.dwellStartKnown);
+    TEST_ASSERT_EQUAL_UINT32(dwellOpenedAtMs, dwelling.finalStopDwellStartMs);
+    // An open interval is a candidate, not a verified stop: the rule's interval
+    // has not completed yet.
+    TEST_ASSERT_FALSE(dwelling.finalStopVerified);
+
+    uint32_t verifiedAtMs = 0U;
+    for (uint32_t step = 0U; step < 20U; ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+        if (status.phase == ev::RunPhase::Done) {
+            verifiedAtMs = harness.nowMs;
+            break;
+        }
+        expectPhase(ev::RunPhase::FinalBrake, status);
+    }
+    expectPhase(ev::RunPhase::Done, status);
+    TEST_ASSERT_TRUE(status.stopVerified);
+    // `Done` is still a deliberate non-powered hold, unchanged.
+    TEST_ASSERT_FALSE(ev::isRunTravelCommand(status.intention.command));
+
+    const ev::RunTimeline done = harness.machine.timeline();
+    TEST_ASSERT_TRUE(done.actuated);
+    TEST_ASSERT_EQUAL_UINT32(actuatedAtMs, done.actuatedAtMs);
+    TEST_ASSERT_TRUE(done.dwellStartKnown);
+    TEST_ASSERT_TRUE(done.finalStopVerified);
+    TEST_ASSERT_EQUAL_UINT32(verifiedAtMs, done.finalStopVerifiedAtMs);
+    // The verified start is the candidate's start (mirrored from the verifier,
+    // not recomputed), and the fixture's 0.2 s dwell is what ran between it and
+    // the completion.
+    TEST_ASSERT_EQUAL_UINT32(dwellOpenedAtMs, done.finalStopDwellStartMs);
+    TEST_ASSERT_EQUAL_UINT32(200U, done.finalStopVerifiedAtMs - done.finalStopDwellStartMs);
+    // The internal Run Time is the unsigned difference of the actuation and the
+    // verified dwell start: the Complete Stop's own interval is outside it, so a
+    // reader that took the `Done` tick instead would overcount by exactly it.
+    TEST_ASSERT_EQUAL_UINT32(dwellOpenedAtMs - actuatedAtMs,
+                             done.finalStopDwellStartMs - done.actuatedAtMs);
+    TEST_ASSERT_EQUAL_UINT32(done.finalStopDwellStartMs + 200U, done.finalStopVerifiedAtMs);
+}
+
+void test_a_broken_final_stop_dwell_is_discarded_and_restarted(void) {
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::FinalBrake));
+
+    // The first candidate opens and accumulates toward the rule's interval.
+    ev::RunStatus status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    const uint32_t firstCandidateAtMs = harness.nowMs;
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    TEST_ASSERT_EQUAL_UINT32(firstCandidateAtMs,
+                             harness.machine.timeline().finalStopDwellStartMs);
+    status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    TEST_ASSERT_TRUE(harness.machine.timeline().dwellStartKnown);
+
+    // The near-zero evidence breaks before the interval completes: the candidate
+    // is discarded. There is nothing to keep - it was never verified - and the
+    // run must not report a start it can no longer vouch for.
+    Evidence moving;
+    moving.stopSpeedMps = 0.5;
+    moving.stopClaimed = false;
+    status = tick(harness, moving);
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    const ev::RunTimeline discarded = harness.machine.timeline();
+    TEST_ASSERT_FALSE(discarded.dwellStartKnown);
+    TEST_ASSERT_EQUAL_UINT32(0U, discarded.finalStopDwellStartMs);
+    TEST_ASSERT_FALSE(discarded.finalStopVerified);
+
+    // The interval restarts where the evidence returns, not where it first began.
+    status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    const uint32_t secondCandidateAtMs = harness.nowMs;
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    const ev::RunTimeline restarted = harness.machine.timeline();
+    TEST_ASSERT_TRUE(restarted.dwellStartKnown);
+    TEST_ASSERT_EQUAL_UINT32(secondCandidateAtMs, restarted.finalStopDwellStartMs);
+    TEST_ASSERT_TRUE(secondCandidateAtMs > firstCandidateAtMs);
+
+    uint32_t verifiedAtMs = 0U;
+    for (uint32_t step = 0U; step < 20U; ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+        if (status.phase == ev::RunPhase::Done) {
+            verifiedAtMs = harness.nowMs;
+            break;
+        }
+        expectPhase(ev::RunPhase::FinalBrake, status);
+    }
+    expectPhase(ev::RunPhase::Done, status);
+
+    const ev::RunTimeline done = harness.machine.timeline();
+    TEST_ASSERT_TRUE(done.finalStopVerified);
+    // The verified start is the interval that actually satisfied the rule - the
+    // second one - and not the discarded first candidate.
+    TEST_ASSERT_EQUAL_UINT32(secondCandidateAtMs, done.finalStopDwellStartMs);
+    TEST_ASSERT_EQUAL_UINT32(200U, done.finalStopVerifiedAtMs - done.finalStopDwellStartMs);
+    TEST_ASSERT_EQUAL_UINT32(verifiedAtMs, done.finalStopVerifiedAtMs);
+}
+
+void test_the_run_timeline_stays_correct_across_the_uint32_wrap(void) {
+    // Start a few cycles before the `millis()` wrap so the whole run crosses it:
+    // the actuation reading is then numerically *above* the verified dwell start.
+    Harness harness(phaseConfig(0.0), reversalConfig(), 0xFFFFFF00U, 0.0);
+    announceValidRun(harness);
+
+    bool actuated = false;
+    bool reachedDone = false;
+    // Counted here, in the test, from the ticks themselves - not recovered from
+    // the same readings under test.
+    uint32_t elapsedFromActuationMs = 0U;
+    for (uint32_t step = 0U; step < 200U && !reachedDone; ++step) {
+        const ev::RunStatus status = tick(harness, evidenceFor(harness.machine.phase()));
+        if (!actuated && harness.machine.timeline().actuated) {
+            actuated = true;
+            elapsedFromActuationMs = 0U;
+        } else if (actuated) {
+            elapsedFromActuationMs += 50U;
+        }
+        if (status.phase == ev::RunPhase::Done) {
+            reachedDone = true;
+        } else if (status.phase == ev::RunPhase::Fault) {
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(actuated);
+    TEST_ASSERT_TRUE(reachedDone);
+
+    const ev::RunTimeline done = harness.machine.timeline();
+    TEST_ASSERT_TRUE(done.finalStopVerified);
+    // The readings really wrapped: the raw actuation reading is above the raw
+    // dwell start, which no wall-clock reading could satisfy.
+    TEST_ASSERT_TRUE(done.actuatedAtMs > done.finalStopDwellStartMs);
+    // An unsigned difference is all the elapsed time needs - no reconciliation,
+    // no epoch - and it is exactly the span this test counted tick by tick.
+    TEST_ASSERT_EQUAL_UINT32(elapsedFromActuationMs,
+                             done.finalStopVerifiedAtMs - done.actuatedAtMs);
+    TEST_ASSERT_EQUAL_UINT32(elapsedFromActuationMs - 200U,
+                             done.finalStopDwellStartMs - done.actuatedAtMs);
+}
+
+void test_reset_clears_the_run_timeline_and_a_new_run_starts_empty(void) {
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::FinalBrake));
+    ev::RunStatus status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    for (uint32_t step = 0U; step < 20U && status.phase != ev::RunPhase::Done; ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    }
+    expectPhase(ev::RunPhase::Done, status);
+    TEST_ASSERT_TRUE(harness.machine.timeline().finalStopVerified);
+
+    harness.machine.reset(harness.nowMs + 50U);
+    const ev::RunTimeline cleared = harness.machine.timeline();
+    TEST_ASSERT_FALSE(cleared.actuated);
+    TEST_ASSERT_FALSE(cleared.dwellStartKnown);
+    TEST_ASSERT_FALSE(cleared.finalStopVerified);
+    TEST_ASSERT_EQUAL_UINT32(0U, cleared.actuatedAtMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, cleared.finalStopDwellStartMs);
+    TEST_ASSERT_EQUAL_UINT32(0U, cleared.finalStopVerifiedAtMs);
+
+    // A run announced after the reset starts with an empty timeline: the new-run
+    // boundary cannot inherit a reading from the run before it.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(announceValidRunWithDelay(harness, 0.0)));
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Armed));
+    TEST_ASSERT_FALSE(harness.machine.timeline().actuated);
+    status = tick(harness, evidenceFor(ev::RunPhase::Armed));
+    expectPhase(ev::RunPhase::Approach, status);
+    const ev::RunTimeline restarted = harness.machine.timeline();
+    TEST_ASSERT_TRUE(restarted.actuated);
+    TEST_ASSERT_EQUAL_UINT32(harness.nowMs, restarted.actuatedAtMs);
+    TEST_ASSERT_FALSE(restarted.dwellStartKnown);
+    TEST_ASSERT_FALSE(restarted.finalStopVerified);
+}
+
+void test_a_fault_discards_a_candidate_but_keeps_a_verified_record(void) {
+    // (a) An in-progress dwell is not a fact: a fault discards it, and the run
+    // that faulted has no verified final stop to report.
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::FinalBrake));
+    ev::RunStatus status = tick(harness, evidenceFor(ev::RunPhase::FinalBrake));
+    expectPhase(ev::RunPhase::FinalBrake, status);
+    TEST_ASSERT_TRUE(harness.machine.timeline().dwellStartKnown);
+
+    Evidence faulted;
+    faulted.fault = ev::FaultCode::PhaseTimeout;
+    status = tick(harness, faulted);
+    expectFault(ev::FaultCode::PhaseTimeout, status);
+    const ev::RunTimeline afterFault = harness.machine.timeline();
+    // The run *was* actuated; a fault cannot unmake that.
+    TEST_ASSERT_TRUE(afterFault.actuated);
+    TEST_ASSERT_FALSE(afterFault.dwellStartKnown);
+    TEST_ASSERT_FALSE(afterFault.finalStopVerified);
+
+    // (b) A completed verification is a fact: a later fault does not erase what
+    // the run completed, while the presentation verdict stays false in `Fault`.
+    Harness second = defaultHarness(0.0);
+    announceValidRun(second);
+    TEST_ASSERT_TRUE(driveTo(second, ev::RunPhase::FinalBrake));
+    status = tick(second, evidenceFor(ev::RunPhase::FinalBrake));
+    for (uint32_t step = 0U; step < 20U && status.phase != ev::RunPhase::Done; ++step) {
+        status = tick(second, evidenceFor(ev::RunPhase::FinalBrake));
+    }
+    expectPhase(ev::RunPhase::Done, status);
+    const uint32_t verifiedAtMs = second.machine.timeline().finalStopVerifiedAtMs;
+
+    Evidence lateFault;
+    lateFault.fault = ev::FaultCode::PhaseTimeout;
+    status = tick(second, lateFault);
+    expectFault(ev::FaultCode::PhaseTimeout, status);
+    TEST_ASSERT_FALSE(status.stopVerified);
+    const ev::RunTimeline kept = second.machine.timeline();
+    TEST_ASSERT_TRUE(kept.finalStopVerified);
+    TEST_ASSERT_EQUAL_UINT32(verifiedAtMs, kept.finalStopVerifiedAtMs);
+    TEST_ASSERT_TRUE(kept.dwellStartKnown);
+    TEST_ASSERT_TRUE(kept.actuated);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_a_fresh_state_machine_is_idle_and_asks_for_nothing);
@@ -1583,5 +1845,10 @@ int main(int, char**) {
     RUN_TEST(test_uncited_and_provisional_optional_delay_fail);
     RUN_TEST(test_the_bottle_phase_ceilings_are_selected_by_phase);
     RUN_TEST(test_a_placeholder_bottle_phase_ceiling_is_unusable);
+    RUN_TEST(test_the_run_timeline_records_actuation_the_dwell_and_the_verification);
+    RUN_TEST(test_a_broken_final_stop_dwell_is_discarded_and_restarted);
+    RUN_TEST(test_the_run_timeline_stays_correct_across_the_uint32_wrap);
+    RUN_TEST(test_reset_clears_the_run_timeline_and_a_new_run_starts_empty);
+    RUN_TEST(test_a_fault_discards_a_candidate_but_keeps_a_verified_record);
     return UNITY_END();
 }

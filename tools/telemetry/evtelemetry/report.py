@@ -159,6 +159,16 @@ def summarize_run(metrics: dict[str, Any]) -> str:
         f"({_fmt(run_window['armed_duration_s'])} s)"
     )
     lines.append(
+        f"run timeline:      actuated {_fmt_int(run_window['run_start_ms'])} ms  "
+        f"final-stop dwell start {_fmt_int(run_window['final_stop_dwell_start_ms'])} ms  "
+        f"verified {_fmt_int(run_window['stop_verified_ms'])} ms"
+    )
+    lines.append(
+        f"internal run time: {_fmt(run_window['internal_run_time_s'])} s  "
+        f"(actuation to the verified final-stop dwell start; the Complete Stop interval is "
+        f"excluded, and the official Run Time comes from a timekeeper or video)"
+    )
+    lines.append(
         f"control dt:        n={dt_stats['count']} "
         f"min={_fmt_int(int(dt_stats['min']) if dt_stats['min'] is not None else None)} ms "
         f"median={_fmt_int(int(dt_stats['median']) if dt_stats['median'] is not None else None)} ms "
@@ -259,7 +269,7 @@ def summarize_run(metrics: dict[str, Any]) -> str:
 def summarize_comparison(metrics_by_run: Sequence[dict[str, Any]]) -> str:
     """A side-by-side table over several runs, so repeats are comparable."""
     header = (
-        f"{'run_id':<16} {'samples':>8} {'dur_s':>8} {'net_m':>8} {'end_m':>8} {'target_m':>9} "
+        f"{'run_id':<16} {'samples':>8} {'run_s':>8} {'net_m':>8} {'end_m':>8} {'target_m':>9} "
         f"{'final_phase':>14} {'fault':>22} {'drop_s':>7} {'ph_mm':>6}"
     )
     lines = [
@@ -272,7 +282,7 @@ def summarize_comparison(metrics_by_run: Sequence[dict[str, Any]]) -> str:
         lines.append(
             f"{metrics['run_id']:<16} "
             f"{metrics['counts']['samples']:>8} "
-            f"{_fmt(metrics['run_window']['armed_duration_s']):>8} "
+            f"{_fmt(metrics['run_window']['internal_run_time_s']):>8} "
             f"{_fmt(metrics['position']['net_travel_m']):>8} "
             f"{_fmt(metrics['position']['end_position_m']):>8} "
             f"{_fmt(metrics['position']['believed_target_m']):>9} "
@@ -283,9 +293,12 @@ def summarize_comparison(metrics_by_run: Sequence[dict[str, Any]]) -> str:
         )
     lines.append("")
     lines.append(
-        "dur_s is the armed window. net_m is the net run-axis displacement across the "
-        "log, end_m is the believed displacement from the Start Point at the last usable "
-        "tick, and target_m is the believed target; all in metres."
+        "run_s is the firmware's internal Run Time: actuation to the start of the verified "
+        "final-stop dwell, so the Complete Stop interval is not counted - and a run that "
+        "never verified a final stop has none. It is the firmware's own clock, not the "
+        "official Run Time. net_m is the net run-axis displacement across the log, end_m is "
+        "the believed displacement from the Start Point at the last usable tick, and "
+        "target_m is the believed target; all in metres."
     )
     return "\n".join(lines) + "\n"
 
@@ -499,6 +512,10 @@ def write_comparison_report(out_dir: str, metrics_by_run: Sequence[dict[str, Any
                     "samples": metrics["counts"]["samples"],
                     "log_duration_s": metrics["window"]["log_duration_s"],
                     "armed_duration_s": metrics["run_window"]["armed_duration_s"],
+                    "internal_run_time_s": metrics["run_window"]["internal_run_time_s"],
+                    "final_stop_verification_completed_s": metrics["run_window"][
+                        "final_stop_verification_completed_s"
+                    ],
                     "net_travel_m": metrics["position"]["net_travel_m"],
                     "end_position_m": metrics["position"]["end_position_m"],
                     "believed_target_m": metrics["position"]["believed_target_m"],

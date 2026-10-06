@@ -15,6 +15,12 @@ It computes differences and stops there. Deliberately:
   synthetic data is not even meaningful, and the tool says so by leaving the
   measured columns empty rather than filling in the believed numbers twice.
 
+``believed_run_time_s`` is the firmware's internal Run Time (the run's own clock,
+actuation to the start of the verified final-stop dwell); it is blank when the log
+shows no verified final stop, and it is never approximated from the armed window
+or the log duration, because neither is the rules' Run Time. The external
+measurement remains the official one.
+
 The measurement file is a plain CSV with this header (``run_id`` plus at least
 one numeric measurement column):
 
@@ -299,9 +305,13 @@ def compare_endpoints(
             notes = ""
 
         believed_end_position = metrics["position"]["end_position_m"]
-        believed_time = metrics["run_window"]["armed_duration_s"]
-        if believed_time is None:
-            believed_time = metrics["window"]["log_duration_s"]
+        # The firmware's internal Run Time: actuation to the start of the verified
+        # final-stop dwell, so the rule's Complete Stop interval is not counted. It
+        # is deliberately not substituted from another window: when the run did not
+        # verify a final stop, the believed time is unavailable and stays `None`,
+        # because an armed-flag span or a whole-log duration is not a Run Time and a
+        # number that looks comparable would be worse than a blank.
+        believed_time = metrics["run_window"]["internal_run_time_s"]
 
         rows.append(
             {
