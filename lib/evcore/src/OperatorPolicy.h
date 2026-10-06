@@ -343,13 +343,15 @@ inline CommandAdmissibility admissibilityOf(OperatorCommandId id, const Operator
 // The announcement gate
 // ---------------------------------------------------------------------------
 
-// Why a configuration may not be offered to a run. `None` means it may.
+// Why a configuration may not be offered to a run. `None` means it may. There is
+// deliberately no "the Target Time looks unreachable" refusal: the estimate that
+// would raise it is unvalidated kinematics (S7), and an unvalidated estimate may
+// not invalidate an otherwise legal run.
 enum class AnnounceRefusal : uint8_t {
     None = 0,
     ConfigIncomplete,      // a field has not been set: announce would be a partial configuration
     ConfigInvalid,         // the rules rejected it: `ConfigError` below names which
     PolicyNotUsable,       // the run policy may not sequence a run with this configuration
-    TargetTimeUnreachable, // the announced Target Time cannot be met inside the configured limits
 };
 
 inline const char* announceRefusalName(AnnounceRefusal refusal) {
@@ -362,8 +364,6 @@ inline const char* announceRefusalName(AnnounceRefusal refusal) {
             return "ConfigInvalid";
         case AnnounceRefusal::PolicyNotUsable:
             return "PolicyNotUsable";
-        case AnnounceRefusal::TargetTimeUnreachable:
-            return "TargetTimeUnreachable";
     }
     return "None";
 }
@@ -375,11 +375,13 @@ struct AnnounceVerdict {
     // The check that refuses a `PolicyNotUsable` announcement, so the operator is
     // told which fact is missing rather than that the run is "not ready".
     ConfigurationCheckId firstFailedCheck = ConfigurationCheckId::Count;
-    // The run's timing plan, as the vehicle layer built it from the announced
-    // configuration. Reported on both the acceptance and a
-    // `TargetTimeUnreachable` refusal, because the number behind the refusal is
-    // the plan's own estimate: "the fastest admissible travel takes 18.4 s" is
-    // the fact an operator needs to choose a different Target Time.
+    // The **diagnostic** timing estimate, as the vehicle layer built it from the
+    // announced configuration (`planRunTiming()`). It travels in the verdict so
+    // the announcement acknowledgement can report it - "the fastest admissible
+    // travel takes 18.4 s" is useful to an operator choosing a Target Time - but
+    // it decides nothing here: this gate never refuses a legal announcement
+    // because the estimate says the time is unreachable. The run's actual delay
+    // is its execution plan's `initialDelayS`.
     RunTimingPlan plan = refusedTimingPlan(RunTimingPlanStatus::NotPlanned);
 };
 
@@ -394,14 +396,20 @@ struct AnnounceVerdict {
 // announced yet is a refusal to report rather than a fault to clear. The
 // policy's refusal stays as defence in depth for any future caller.
 //
-// The timing plan is an argument rather than something this gate computes: the
-// plan depends on the measured limits and the announced geometry (which live in
+// The timing estimate is an argument rather than something this gate computes:
+// it depends on the measured limits and the announced geometry (which live in
 // the vehicle layer's own configuration), and a second copy of that arithmetic
-// here could disagree with the plan the run is actually announced with. The order
-// of the checks is the order the operator should fix things in: a typed
-// configuration must be complete and legal before its time budget is worth
-// judging, and the run policy must be usable before a plan can be sequenced at
-// all.
+// here could disagree with the estimate the run layer built. The order of the
+// checks is the order the operator should fix things in: a typed configuration
+// must be complete before it is judged, the rules must accept it before the run
+// policy's readiness matters, and the policy must be usable before the run can
+// be sequenced at all.
+//
+// The gate deliberately does **not** refuse a run because the diagnostic timing
+// estimate cannot meet the announced Target Time. The estimate is unvalidated
+// kinematics (`planRunTiming()` is diagnostic until a physical timing model is
+// measured), and an unvalidated estimate must not invalidate an otherwise legal
+// run. The estimate still travels in `verdict.plan` for the acknowledgement.
 inline AnnounceVerdict announceVerdictFor(const RunConfigFields& fields,
                                           const ConfigurationBuildChecks& checks,
                                           const RunTimingPlan& plan) {
@@ -419,13 +427,6 @@ inline AnnounceVerdict announceVerdictFor(const RunConfigFields& fields,
     if (!checks.runPolicyUsable) {
         verdict.refusal = AnnounceRefusal::PolicyNotUsable;
         verdict.firstFailedCheck = ConfigurationCheckId::RunPolicyUsable;
-        return verdict;
-    }
-    if (!plan.valid) {
-        // An announcement that cannot be met inside the configured limits is
-        // refused, never silently violated: the run has no way to honor a Target
-        // Time shorter than its fastest admissible travel, so it does not start.
-        verdict.refusal = AnnounceRefusal::TargetTimeUnreachable;
         return verdict;
     }
     verdict.ok = true;

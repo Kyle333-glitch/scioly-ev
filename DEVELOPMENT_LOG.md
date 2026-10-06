@@ -6560,3 +6560,112 @@ five facts it already owes). They remain unusable - the policy refuses and no ru
 may be armed - until each is measured and promoted through the normal evidence
 procedure. S7 owns the timing decision; S8/S9 the Run Time telemetry and the
 `plan` command.
+
+## D44 / S7 - 2026-10-05 - The deliberate delay belongs to the run's execution plan, and the kinematic estimate is diagnostic
+
+**Scope.** S7 moves the run's deliberate start delay into the immutable per-run
+`RunExecutionPlan` and stops the unvalidated idealized kinematic model
+(`planRunTiming()`) from automatically controlling competition timing. No
+calibration value was tuned, no timing constant was invented, and no physical
+behaviour is claimed: the physical timing model remains unvalidated
+(`kRunTimingModelValidated = false`), so production's cruise stays the configured
+strategy cruise and its delay is 0.
+
+**The delay has one owner: the run's execution plan.**
+
+- `RunExecutionPlan::initialDelayS` is now the one per-run delay value. The
+  announcement boundary builds the run's plan **before** announcing it and hands
+  the plan's own `initialDelayS` to `CompetitionStateMachine::announceRun()`; the
+  `OptionalDelay` phase spends exactly that value.
+- The phase policy's `RunPhaseConfig::maximumOptionalDelayS` is documented - and
+  now used - as only the legal/safety maximum that bounds the plan's value. It no
+  longer names a plan, and nothing reads it as a delay.
+- The delay's vocabulary moved with it: `CompetitionStateMachine::plannedDelayS()`
+  is `initialDelayS()`, the announce parameter and member are `initialDelayS`, and
+  `RunStartStatus::PlannedDelayNotUsable` is `InitialDelayNotUsable` (the operator
+  reason string is `InitialDelayNotUsable`). `VehicleRuntime` no longer keeps a
+  second copy of a decided delay.
+
+**The idealized estimate is diagnostic until measured.**
+
+- `MotionProfile.h` labels `planRunTiming()` and its `RunTimingPlan` output as the
+  **diagnostic** kinematic estimate: it says what the announced Target Time,
+  geometry and limits imply, and it commands nothing.
+- The announcement gate no longer refuses a legal run for an unreachable Target
+  Time. `AnnounceRefusal::TargetTimeUnreachable`, its name, and its refusal branch
+  in `formatAnnounceRefusal()` are **deleted**: an unvalidated estimate must not
+  invalidate an otherwise legal run. The estimate still travels in
+  `AnnounceVerdict::plan` and is echoed by `OK,cmd=announce` (the wire shape of the
+  acknowledgement is unchanged; its comment now says it is a diagnostic, not what
+  the run will do - the run's delay is the plan's and its cruise is the configured
+  one).
+- One production readiness flag, `vehicleConfig::kRunTimingModelValidated = false`,
+  gates everything: `applyAnnounce()` sets `timingReady` only when the flag is set
+  **and** the estimate is valid, so it uses the estimate's cruise and delay only
+  then; otherwise it uses `profileLimits()` and records
+  `timingReady = false` / `initialDelayS = 0` in the run's plan. The estimate is
+  still computed and stored in `timingPlan_` for the announcement acknowledgement.
+- The one new production value is a `constexpr bool`; no `Sourced` calibration
+  value was added or moved.
+
+**Tests (software verification only; every number is a synthetic fixture).**
+
+- `test_execution_plan` +1 case: two synthetic **validated** timing-model fixtures
+  (measured limits, 25.0 s and 12.0 s Target Times on the 9.50 m fixture course)
+  produce different model delays, and each lands in the plan as its own
+  `initialDelayS`; the same estimates with timing unvalidated produce
+  `timingReady = false` and `initialDelayS = 0.0`; a negative or NaN delay with
+  timing ready is refused (`NonFiniteValue`); valid delays are nonnegative.
+- `test_run_timing`: the delay test now builds two plans (1.0 s and 1.5 s), shows
+  the over-maximum and a negative value are refused with `InitialDelayNotUsable`
+  and latch nothing, and shows the `OptionalDelay` phase runs for exactly the
+  plan's 1.0 s and no longer - the policy maximum is only a bound. Its header
+  comment now describes the estimate as diagnostic and the delay as plan-owned.
+- `test_operator_policy`: the unreachable-Target-Time test is rewritten to assert
+  the run is **not** refused (`ok`, `None`) while the estimate's status still
+  travels with the verdict. That case existed but was never registered in
+  `main()`; it is registered now, so the acceptance property is actually executed.
+- `test_operator_response`: the same property in the response layer - the gate
+  accepts the announcement, whose estimate may still say `TargetTimeTooShort`.
+- `test_scenario` harness: the fixture announcement now builds its plan first
+  (timing-ready, fixture values) and announces the plan's `initialDelayS`, so the
+  nominal scenarios keep their `OptionalDelay` phase exactly as before while
+  modelling the validated-timing case rather than a raw policy number.
+- `test_competition_state`: comments only (the fixture's announced delay is the
+  plan's value; the policy maximum is a bound).
+
+**Software verification.**
+
+- `pio test -e native`: **592/592 test cases succeeded** (590 at S6; +1 new
+  `test_execution_plan` case and +1 previously-unregistered operator-policy case
+  now running), 33 suites, no new warnings.
+- `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog`: 3 SUCCESS, 0 warnings.
+  RAM 6476 / 6676 / 6660 (unchanged from S6) and Flash 72852 / 79700 / 79128
+  (S6 values minus 216 / 204 / 204 bytes: the removed unreachable refusal branch
+  and its status name cost more than the added plan gating).
+- Telemetry tooling re-run green (**116 tests OK**); the telemetry wire schema is
+  unchanged (`kTelemetrySchemaVersion` stays 2; no check name, field or event
+  changed). `git diff --check` clean.
+- All twelve `VERIFIED_STATE.md` rows remain UNVERIFIED; no hardware was touched
+  and no physical behaviour is claimed.
+
+**Documents.** `SOFTWARE_ARCHITECTURE.md` section 7 now states the diagnostic
+estimate and the plan-owned delay; `docs/limitations.md` entry A records that the
+timing model is disabled until a realised-Run-Time comparison exists; and
+`docs/bringup/P-H14-calibration-checklist.md` Step 12 gained the enablement
+condition - the step's records plus promoted limits come first, and
+`kRunTimingModelValidated` is set true afterwards as its own reviewed change.
+
+**Not changed (owned elsewhere).** Official Run Time telemetry (S8), the `plan`
+observability command (S9), the `maxRunDuration` runtime consumer (S10), the
+legal-parameter host sweep (S11) and the remaining documentation synchronisation
+(S12) are untouched. No stop, reversal, fault, arming, safety-authority or
+telemetry behaviour changed.
+
+**What would set `timingReady = true`.** Not a constant edit. P-H14 step 12 must
+record several announced Target Times on a marked course together with the
+realised Run Time and the raw data preserved, and the acceleration, deceleration
+and cruise limits the estimate uses must be promoted from `Provisional` to
+`Measured` through the normal evidence procedure. Only then may
+`kRunTimingModelValidated` be set true, and the estimate's cruise/delay may
+influence a run.

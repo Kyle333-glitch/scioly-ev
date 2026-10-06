@@ -6,6 +6,7 @@
 #include <unity.h>
 
 #include <BottleEvidence.h>
+#include <MotionProfile.h>
 #include <RunAxis.h>
 #include <RunConfig.h>
 #include <RunExecutionPlan.h>
@@ -475,6 +476,81 @@ void test_timing_readiness_is_recorded_honestly(void) {
                                             measuredExecutionDependencies(), true, 12.5, -1.0));
 }
 
+// --- 9b. The plan owns the run's ONE per-run delay (S7) -----------------------
+
+// A synthetic **validated** timing-model fixture: measured limits (this vehicle's
+// are placeholders), 9.50 m of travel, a 1.20 m/s ceiling, 0.50 / 1.00 m/s^2 of
+// acceleration / deceleration, a 0.50 m/s cruise floor, a 0.20 s reversal reserve
+// and a 40 s maximum run duration. Chosen so one announced Target Time makes the
+// floor bind (the slack becomes a delay) and a tighter one does not. Arithmetic
+// only: never vehicle evidence and never a tuning suggestion.
+ev::RunTimingPlanInputs timingModelFixture(double targetTimeS) {
+    return ev::RunTimingPlanInputs(
+        9.50,
+        ev::Sourced<double>(targetTimeS, ev::ValueSource::RuleDerived,
+                            "announced fixture Target Time, rules2027 8.i"),
+        measured(1.20), measured(1.20), measured(0.50), measured(1.00), measured(0.50),
+        measured(0.20), measured(40.0));
+}
+
+// A validated timing model is the only thing that may give a run a delay, and the
+// delay it produces lands in the execution plan, which owns it. Two synthetic
+// fixtures with different Target Times produce different per-run delays (the
+// generous one spends the slack its cruise floor cannot, the tight one has none),
+// and each plan's `initialDelayS` is exactly the model's delay - so the run layer
+// has one value to hand to `announceRun()`, not a model output and a policy value
+// that could disagree. With timing unvalidated (the production case) the same two
+// estimates plan to zero delay.
+void test_validated_timing_fixtures_produce_different_per_run_delays(void) {
+    const ev::RunTimingPlan relaxed = ev::planRunTiming(timingModelFixture(25.0));
+    const ev::RunTimingPlan tight = ev::planRunTiming(timingModelFixture(12.0));
+    TEST_ASSERT_TRUE(relaxed.valid);
+    TEST_ASSERT_TRUE(tight.valid);
+    TEST_ASSERT_TRUE(relaxed.plannedDelayS > 0.0);
+    TEST_ASSERT_TRUE(relaxed.plannedDelayS > tight.plannedDelayS);
+
+    const ev::RunExecutionPlanResult relaxedPlan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), true, relaxed.travelDurationS,
+                                  relaxed.plannedDelayS);
+    const ev::RunExecutionPlanResult tightPlan =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), true, tight.travelDurationS,
+                                  tight.plannedDelayS);
+    expectValid(relaxedPlan);
+    expectValid(tightPlan);
+
+    // The plan carries the model's numbers verbatim, and the two run delays differ.
+    TEST_ASSERT_EQUAL_INT(1, relaxedPlan.plan.timingReady ? 1 : 0);
+    TEST_ASSERT_EQUAL_INT(1, tightPlan.plan.timingReady ? 1 : 0);
+    expectPosition(relaxed.plannedDelayS, relaxedPlan.plan.initialDelayS);
+    expectPosition(tight.plannedDelayS, tightPlan.plan.initialDelayS);
+    TEST_ASSERT_TRUE(relaxedPlan.plan.initialDelayS > tightPlan.plan.initialDelayS);
+
+    // A delay is nonnegative by construction. A negative or non-finite one is
+    // never a plan, which is the bound the run policy then re-checks.
+    TEST_ASSERT_TRUE(relaxedPlan.plan.initialDelayS >= 0.0);
+    TEST_ASSERT_TRUE(tightPlan.plan.initialDelayS >= 0.0);
+    expectRefused(ev::RunExecutionPlanStatus::NonFiniteValue,
+                  ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                            measuredExecutionDependencies(), true, 12.0, -0.5));
+    expectRefused(ev::RunExecutionPlanStatus::NonFiniteValue,
+                  ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                            measuredExecutionDependencies(), true, 12.0, kNaN));
+
+    // Unvalidated timing (the production case): the same two estimates produce a
+    // plan whose delay is 0, whatever the model said. No guessed timing reaches a
+    // run through this plan.
+    const ev::RunExecutionPlanResult productionRelaxed =
+        ev::buildRunExecutionPlan(regionalAnnouncement(), measuredBottleConfig(),
+                                  measuredExecutionDependencies(), false, relaxed.travelDurationS,
+                                  relaxed.plannedDelayS);
+    expectValid(productionRelaxed);
+    TEST_ASSERT_EQUAL_INT(0, productionRelaxed.plan.timingReady ? 1 : 0);
+    expectPosition(0.0, productionRelaxed.plan.predictedMotionTimeS);
+    expectPosition(0.0, productionRelaxed.plan.initialDelayS);
+}
+
 // --- 10. No hidden valid defaults ---------------------------------------------
 
 void test_a_refused_plan_is_never_a_hidden_valid_default(void) {
@@ -874,6 +950,7 @@ int main(int, char**) {
     RUN_TEST(test_two_plans_from_two_announcements_are_independent);
 
     RUN_TEST(test_timing_readiness_is_recorded_honestly);
+    RUN_TEST(test_validated_timing_fixtures_produce_different_per_run_delays);
     RUN_TEST(test_a_refused_plan_is_never_a_hidden_valid_default);
     RUN_TEST(test_the_production_shaped_dependencies_cannot_yet_produce_a_plan);
 

@@ -14,10 +14,10 @@ using ev::ControlTickStage;
 
 // Names the incident where a run state machine accepted an announcement and then
 // refused the delay it was offered. It is unreachable with this configuration -
-// the announcement gate refuses an unusable plan first, and the plan's delay can
-// never exceed the policy's bound because it is bounded by the announced Target
-// Time - so it exists to make a caller bug visible instead of silent.
-constexpr const char* kReasonDelayNotPermitted = "PlannedDelayNotUsable";
+// the run's execution plan's `initialDelayS` is bounded by the policy's own legal
+// maximum (`RunPhaseConfig::maximumOptionalDelayS`) - so it exists to make a
+// caller bug visible instead of silent.
+constexpr const char* kReasonDelayNotPermitted = "InitialDelayNotUsable";
 
 namespace {
 
@@ -301,11 +301,12 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     const ev::MotionDirection direction =
         legForward_ ? ev::MotionDirection::Forward : ev::MotionDirection::Reverse;
 
-    // The limits this run is shaped with: the *announced run's* planned cruise,
-    // not the strategy value (`runProfileLimits_`, set at the announcement from
-    // `planRunTiming()`). The run's Target Time therefore reaches the commanded
-    // speeds, and the brake offset and velocity ceiling still come from the leg
-    // being travelled.
+    // The limits this run is shaped with (`runProfileLimits_`, set at the
+    // announcement): the configured strategy cruise, or - only when a validated
+    // physical timing model chose one - the slower cruise that fits the announced
+    // Target Time. While timing is unvalidated the idealized estimate therefore
+    // changes nothing here. The brake offset and velocity ceiling still come from
+    // the leg being travelled.
     //
     // The optional strategy ceiling that belongs to this cycle's run phase: only
     // the bottle phases (Approach/Capture/Push) carry one, every other phase is
@@ -881,16 +882,37 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     const ev::RunConfig config = ev::completedRunConfig(heldConfig_);
     const ev::RunAxisGeometry geometry = ev::RunAxisGeometry::fromRunConfig(config);
 
-    // The announced run's timing plan, before anything is accepted: which cruise
-    // the run will travel at, how long it will deliberately wait, and whether the
-    // announced Target Time is reachable inside the configured limits at all. A
-    // Target Time that is not reachable is refused here, with the plan's own
-    // reason, rather than accepted and then violated or timed out.
-    const ev::RunTimingPlan plan =
+    // The run's **diagnostic** timing estimate: what the announced Target Time,
+    // the announced geometry and the configured limits imply kinematically. It is
+    // built and reported, but it decides nothing on its own. While the timing
+    // model is unvalidated (`vehicleConfig::kRunTimingModelValidated`) the run's
+    // cruise is the configured strategy cruise and its deliberate delay is 0, and
+    // the estimate may not refuse an otherwise legal announcement (S7).
+    const ev::RunTimingPlan timingEstimate =
         ev::planRunTiming(vehicleConfig::runTimingPlanInputs(geometry, config.targetTimeS));
 
+    // The one timing decision this boundary makes: whether that estimate may
+    // control the run. Both the production readiness flag and the estimate's own
+    // validity must agree, so a validated model whose estimate refused on this
+    // announcement falls back to the configured cruise and no delay rather than to
+    // a half-planned run.
+    const bool timingReady = vehicleConfig::kRunTimingModelValidated && timingEstimate.valid;
+    const double predictedMotionTimeS = timingReady ? timingEstimate.travelDurationS : 0.0;
+    const double initialDelayS = timingReady ? timingEstimate.plannedDelayS : 0.0;
+
+    // This run's immutable execution plan, built before the run is announced so
+    // that the plan's own `initialDelayS` is the delay the run is announced with.
+    // The plan owns the run's deliberate start delay (and its execution targets);
+    // with `timingReady` false it records `initialDelayS = 0.0` regardless of the
+    // numbers above - the honest production value while the model is unvalidated.
+    const ev::RunExecutionPlan executionPlan =
+        ev::buildRunExecutionPlan(config, vehicleConfig::bottleEvidenceConfig(),
+                                  vehicleConfig::runExecutionDependencies(), timingReady,
+                                  predictedMotionTimeS, initialDelayS)
+            .plan;
+
     const ev::AnnounceVerdict verdict =
-        ev::announceVerdictFor(heldConfig_, configurationChecks_, plan);
+        ev::announceVerdictFor(heldConfig_, configurationChecks_, timingEstimate);
     if (!verdict.ok) {
         // The gate refuses without latching anything: a half-typed configuration
         // is a refusal to report, not a fault to clear.
@@ -901,15 +923,18 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
         return;
     }
 
-    const ev::RunStartStatus status =
-        run_.announceRun(config, ev::validateRunConfig(config), plan.plannedDelayS, nowMs);
+    // The run is announced with the delay its own execution plan states; the phase
+    // policy contributes only the legal/safety maximum `announceRun()` bounds it
+    // with. This is the one place a per-run delay reaches the run.
+    const ev::RunStartStatus status = run_.announceRun(
+        config, ev::validateRunConfig(config), executionPlan.initialDelayS, nowMs);
     if (status != ev::RunStartStatus::Started) {
         // The gate accepted what the policy then refused: a caller bug, reported
-        // rather than left as a half-announced run. `PlannedDelayNotUsable` is the
+        // rather than left as a half-announced run. `InitialDelayNotUsable` is the
         // one status the gate cannot have covered (the plan's delay is bounded by
-        // the announced Target Time, which the policy's own bound must cover), so
-        // it is named rather than collapsed into a generic refusal.
-        const char* reason = status == ev::RunStartStatus::PlannedDelayNotUsable
+        // the policy's own maximum), so it is named rather than collapsed into a
+        // generic refusal.
+        const char* reason = status == ev::RunStartStatus::InitialDelayNotUsable
                                  ? kReasonDelayNotPermitted
                                  : ev::kOperatorReasonChecksFailed;
         respondRefusal(ev::OperatorCommandId::Announce, reason);
@@ -922,29 +947,24 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     // is: the Start Point is established at the arming decision, which is the
     // moment the vehicle is staged on the line.
     axisGeometry_ = geometry;
-    // The run's own decided values, held here so the profile and the run use the
-    // same ones: the planned cruise at the shaping layer, the planned delay inside
-    // the run policy (which `announceRun()` has just stored), and the plan itself
-    // as the record of what was decided.
-    timingPlan_ = plan;
-    runProfileLimits_ = vehicleConfig::profileLimitsWithCruise(plan.plannedCruiseMps);
+    // The diagnostic timing estimate is held as the record of what the announced
+    // configuration implied. It decides nothing: the run's delay is the execution
+    // plan's (stored by `announceRun()` just above), and the shaped cruise below is
+    // the configured one unless a validated timing model chose otherwise.
+    timingPlan_ = timingEstimate;
+    runProfileLimits_ = timingReady
+                            ? vehicleConfig::profileLimitsWithCruise(timingEstimate.plannedCruiseMps)
+                            : vehicleConfig::profileLimits();
     // This run's execution plan, from the same announcement the rule geometry above
     // came from and the same `Sourced` dependencies the configuration carries. It
-    // owns the run's ONE forward execution target, and it is adopted even when it
-    // refuses: a refusal is a fact about this run (`MissingForwardExecutionTarget`
-    // while the margin is a placeholder) and the named reason is what a diagnostic
-    // reports. With a refused plan the run has no forward target to shape and no
-    // forward completion to claim, so it cannot travel forward - the fail-closed
+    // owns the run's ONE forward execution target and the run's ONE deliberate
+    // start delay, and it is adopted even when it refuses: a refusal is a fact
+    // about this run (`MissingForwardExecutionTarget` while the margin is a
+    // placeholder) and the named reason is what a diagnostic reports. With a
+    // refused plan the run has no forward target to shape and no forward
+    // completion to claim, so it cannot travel forward - the fail-closed
     // behaviour, and the state of this vehicle today.
-    //
-    // The timing arguments are the honest production ones: this run is not
-    // announced with an idealized predicted motion time or delay, so the plan
-    // records `timingReady = false` and both numbers as 0.0 rather than letting an
-    // unvalidated prediction travel beside the execution targets.
-    executionPlan_.adopt(
-        ev::buildRunExecutionPlan(config, vehicleConfig::bottleEvidenceConfig(),
-                                  vehicleConfig::runExecutionDependencies(), false, 0.0, 0.0)
-            .plan);
+    executionPlan_.adopt(executionPlan);
     legForward_ = true;
     pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted, ev::kTelemetryMissingField);
     respondLine(ev::formatAnnounceAck(verdict, serialTransport::port().workingBuffer(),

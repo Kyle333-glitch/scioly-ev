@@ -324,15 +324,16 @@ struct RunPhaseConfig {
           pushCeilingMps(pushCeilingMps_),
           bottleEvidence(bottleEvidence_) {}
 
-    // The *most* deliberate pre-travel delay a run may spend, seconds. The delay
-    // a run actually spends is decided per announcement by the run's timing plan
-    // (the announced Target Time, the announced geometry and these limits) and
-    // arrives at `announceRun()`; this is the bound that plan may not exceed, so
-    // no announcement can turn into an unbounded wait. 0 means no delay is
+    // The *most* deliberate pre-travel delay a run may spend, seconds. This is a
+    // legal/safety maximum, never the run's delay: the delay a run actually
+    // spends is its own immutable execution plan's `initialDelayS`
+    // (`RunExecutionPlan.h`), handed to `announceRun()` at the announcement
+    // boundary, and this value only bounds what that plan may state, so no
+    // announcement can turn into an unbounded wait. 0 means no delay is
     // permitted at all and the OptionalDelay phase is always skipped.
     //
     // The profile's `MotionTimingIntent::intentionalDelayS` must be fed from the
-    // same per-run value (`plannedDelayS()`), because a margin computed against a
+    // same per-run value (`initialDelayS()`), because a margin computed against a
     // delay the run did not spend is a number about a different run.
     Sourced<double> maximumOptionalDelayS;
 
@@ -363,11 +364,11 @@ struct RunPhaseConfig {
     NearZeroConfig stopVerification;
 
     // The slowest cruise at which travel is known to be reliable, metres per
-    // second. The run's timing plan does not go below it: a speed the drivetrain
-    // cannot follow is not a way to spend time, and the plan spends the remaining
-    // slack as a deliberate delay instead (`planRunTiming()`). A run may not be
-    // announced on a placeholder here, because the plan would either crawl or
-    // wait on a number nobody measured.
+    // second. The diagnostic timing model (`planRunTiming()`) does not go below
+    // it: a speed the drivetrain cannot follow is not a way to spend time, and
+    // the model spends the remaining slack as a deliberate delay instead. A run
+    // may not be announced on a placeholder here, because a validated timing
+    // model would either crawl or wait on a number nobody measured.
     Sourced<double> minimumPlannedCruiseMps;
 
     // The strategy velocity ceilings the run may travel the three bottle phases
@@ -529,13 +530,13 @@ inline StrategyVelocityCeiling strategyVelocityCeilingForPhase(const RunPhaseCon
     return inactiveStrategyVelocityCeiling();
 }
 
-// The deliberate pre-travel delay a *specific* announcement may spend, in
-// milliseconds, or 0 when the announcement spends none. Owned by the run layer's
-// timing plan (the announced Target Time and geometry decide it); this is the one
-// conversion from its seconds to the clock reading the OptionalDelay phase
-// compares against.
-inline uint32_t plannedDelayMs(double plannedDelayS) {
-    return msFromSeconds(plannedDelayS);
+// The deliberate pre-travel delay a *specific* run spends, in milliseconds, or 0
+// when it spends none. Owned by that run's immutable execution plan
+// (`RunExecutionPlan::initialDelayS`, consumed by `announceRun()` below); this
+// is the one conversion from its seconds to the clock reading the OptionalDelay
+// phase compares against.
+inline uint32_t initialDelayMs(double initialDelayS) {
+    return msFromSeconds(initialDelayS);
 }
 
 // Everything the vehicle layer observed this cycle. Every field defaults to the
@@ -595,10 +596,11 @@ enum class RunStartStatus : uint8_t {
     RunAlreadyActive,
     // A fault is of record. reset() is required before a new announcement.
     FaultLatched,
-    // The announcement's deliberate delay is negative, not a number, or larger
-    // than the configured maximum. A plan that would wait longer than the policy
-    // permits may not be sequenced, so nothing is announced.
-    PlannedDelayNotUsable,
+    // The run's delay - its execution plan's `initialDelayS` - is negative, not
+    // a number, or larger than the configured maximum. A run whose plan would
+    // wait longer than the policy permits may not be sequenced, so nothing is
+    // announced.
+    InitialDelayNotUsable,
 };
 
 // The phase's answer for one cycle. Deliberately no default constructor: a phase
@@ -693,12 +695,15 @@ public:
     ReversalPhase reversalPhase() const { return sequencer_.phase(); }
 
     // The deliberate pre-travel delay this specific run was announced with,
-    // seconds. Set by `announceRun()` from the run layer's timing plan and
-    // bounded by `config().maximumOptionalDelayS`; 0 when the run spends none.
+    // seconds. Set by `announceRun()` from the run's immutable execution plan
+    // (`RunExecutionPlan::initialDelayS`, the one owner of the per-run delay) and
+    // bounded by `config().maximumOptionalDelayS`, which is only the
+    // legal/safety maximum; 0 when the run spends none, which is what an
+    // unvalidated timing model produces by construction.
     // This is the value the profile's `MotionTimingIntent::intentionalDelayS`
     // must be fed with, so a reported margin is about the run that is actually
     // being sequenced.
-    double plannedDelayS() const { return plannedDelayS_; }
+    double initialDelayS() const { return initialDelayS_; }
 
     // The near-zero fact the vehicle layer maps onto `atZeroSpeed`, derived from
     // the phase the run is in rather than OR-ed across the run's history: a stop
@@ -756,7 +761,7 @@ public:
         legDirection_ = MotionDirection::Forward;
         handoffPending_ = false;
         finalStopVerified_ = false;
-        plannedDelayS_ = 0.0;
+        initialDelayS_ = 0.0;
         sequencer_.reset();
         stopVerifier_.reset();
     }
@@ -773,8 +778,13 @@ public:
     // machine whose own policy is not usable, faults here and requires an
     // explicit reset(): a half-corrected announcement must not leave a run
     // waiting that a later call can start.
+    //
+    // `initialDelayS` is the run's own deliberate pre-travel delay, taken from
+    // that run's immutable execution plan (`RunExecutionPlan::initialDelayS`) -
+    // the one owner of the per-run delay. The phase policy contributes only the
+    // `maximumOptionalDelayS` bound checked below; it never decides the value.
     RunStartStatus announceRun(const RunConfig& config, const RunConfigValidation& validation,
-                               double plannedDelayS, uint32_t nowMs) {
+                               double initialDelayS, uint32_t nowMs) {
         if (phase_ == RunPhase::Fault) {
             return RunStartStatus::FaultLatched;
         }
@@ -791,15 +801,15 @@ public:
             latchFault(FaultCode::ProvisionalCalibration, nowMs);
             return RunStartStatus::PolicyConfigNotUsable;
         }
-        // The run's own deliberate delay, bounded by the policy. Refused without
-        // latching anything: this is a caller's plan that does not fit the
-        // policy, not a run whose sequencing failed.
-        if (!std::isfinite(plannedDelayS) || plannedDelayS < 0.0 ||
-            plannedDelayS > config_.maximumOptionalDelayS.value) {
-            return RunStartStatus::PlannedDelayNotUsable;
+        // The run's own deliberate delay, bounded by the policy maximum. Refused
+        // without latching anything: this is a caller's plan that does not fit
+        // the policy, not a run whose sequencing failed.
+        if (!std::isfinite(initialDelayS) || initialDelayS < 0.0 ||
+            initialDelayS > config_.maximumOptionalDelayS.value) {
+            return RunStartStatus::InitialDelayNotUsable;
         }
 
-        plannedDelayS_ = plannedDelayS;
+        initialDelayS_ = initialDelayS;
         enterPhase(RunPhase::ParameterValid, nowMs);
         return RunStartStatus::Started;
     }
@@ -859,13 +869,13 @@ private:
                     break;
                 }
                 if (inputs.startTriggered) {
-                    enterPhase(plannedDelayS_ > 0.0 ? RunPhase::OptionalDelay : RunPhase::Approach,
+                    enterPhase(initialDelayS_ > 0.0 ? RunPhase::OptionalDelay : RunPhase::Approach,
                                nowMs);
                 }
                 break;
 
             case RunPhase::OptionalDelay:
-                if (phaseElapsedMs(nowMs) >= plannedDelayMs(plannedDelayS_)) {
+                if (phaseElapsedMs(nowMs) >= initialDelayMs(initialDelayS_)) {
                     enterPhase(RunPhase::Approach, nowMs);
                 }
                 break;
@@ -1164,11 +1174,13 @@ private:
     // being presented for one cycle before the reverse travel is asked for.
     bool handoffPending_ = false;
 
-    // The deliberate pre-travel delay this run was announced with, seconds,
-    // bounded by `config_.maximumOptionalDelayS`. It is a run parameter, not
-    // geometry: no phase transition derives geometry from it, and nothing else
-    // may carry a second copy of it (`plannedDelayS()` is the one reader).
-    double plannedDelayS_ = 0.0;
+    // The deliberate pre-travel delay this run was announced with, seconds: the
+    // value consumed from the run's execution plan's `initialDelayS` (the plan is
+    // the owner; this is the run's spent copy) and bounded by
+    // `config_.maximumOptionalDelayS`. It is a run parameter, not geometry: no
+    // phase transition derives geometry from it, and inside this machine only
+    // `initialDelayS()` reads it.
+    double initialDelayS_ = 0.0;
 
     // The final stop has been verified by this machine's own `stopVerifier_`
     // (latched through Done). It is not the reversal gate's verdict: that latch

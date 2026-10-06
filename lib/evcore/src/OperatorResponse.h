@@ -162,10 +162,12 @@ inline uint16_t formatArmRefusal(const ArmVerdict& verdict, char* buffer, uint16
 
 // `ERR,cmd=announce,reason=<refusal>,error=<detail>,first_fail=<check>`. Both
 // detail fields are always present: `error` names the rule error when the rules
-// rejected the configuration and the timing plan's own status when the announced
-// Target Time cannot be met, `first_fail` names the configuration check when the
+// rejected the configuration, `first_fail` names the configuration check when the
 // run policy cannot sequence the run, and the missing marker when a field does
-// not apply to this refusal.
+// not apply to this refusal. An announced Target Time the diagnostic timing
+// estimate cannot meet is deliberately no longer a refusal (S7): the estimate is
+// unvalidated kinematics and may not invalidate an otherwise legal run. The
+// estimate travels on the acknowledgement instead.
 inline uint16_t formatAnnounceRefusal(const AnnounceVerdict& verdict, char* buffer,
                                       uint16_t capacity) {
     BoundedText text(buffer, capacity);
@@ -175,8 +177,6 @@ inline uint16_t formatAnnounceRefusal(const AnnounceVerdict& verdict, char* buff
     const char* detail = kTelemetryMissingField;
     if (verdict.refusal == AnnounceRefusal::ConfigInvalid) {
         detail = telemetryConfigErrorName(verdict.config.error);
-    } else if (verdict.refusal == AnnounceRefusal::TargetTimeUnreachable) {
-        detail = runTimingPlanStatusName(verdict.plan.status);
     }
     text.field("error").appendText(detail);
     text.field("first_fail").appendText(verdict.refusal == AnnounceRefusal::PolicyNotUsable
@@ -186,13 +186,17 @@ inline uint16_t formatAnnounceRefusal(const AnnounceVerdict& verdict, char* buff
 }
 
 // `OK,cmd=announce,plan=<status>,cruise_mps=<v>,delay_s=<v>,total_s=<v>,margin_s=<v>`
-// - the confirmation that the run was announced, with the plan it was announced
-// with. The plan is echoed rather than only stored because it is what the run
-// will actually do: the announced Target Time, the announced geometry and the
-// configured limits already decided the cruise speed and the deliberate delay,
-// and an operator who cannot see them cannot explain a run's timing afterwards.
-// `total_s` is the plan's whole estimate (travel + the reversal stop's reserve +
-// the delay) and `margin_s` is what the announced time has left over.
+// - the confirmation that the run was announced, with the **diagnostic** timing
+// estimate the vehicle layer built for it (`planRunTiming()`). The estimate is
+// echoed rather than only stored because it is the kinematic picture behind the
+// announcement - what the announced Target Time, the announced geometry and the
+// configured limits imply - and an operator who cannot see it cannot judge an
+// announcement. It is deliberately **not** a claim about what the run will do:
+// while the timing model is unvalidated (S7) the run's cruise is the configured
+// one, its deliberate delay is its execution plan's `initialDelayS` (0), and
+// `plan=<status>` may therefore refuse while the run is accepted. `total_s` is
+// the estimate's whole time (travel + the reversal stop's reserve + the delay)
+// and `margin_s` is what the announced time has left over.
 inline uint16_t formatAnnounceAck(const AnnounceVerdict& verdict, char* buffer,
                                   uint16_t capacity) {
     BoundedText text(buffer, capacity);

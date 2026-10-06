@@ -431,19 +431,21 @@ private:
     ev::VelocityEstimatorConfig estimatorConfig_;
     ev::DirectionalMotionProfileLimits profileLimits_;
 
-    // The limits the *current* run is shaped with: the configured limits with the
-    // announced run's planned cruise in place of the strategy cruise
-    // (`planRunTiming()`), so an announced Target Time changes the commanded
-    // speeds rather than only being reported. Back to `profileLimits_` at a
-    // new-run boundary.
+    // The limits the *current* run is shaped with. While the timing model is
+    // unvalidated - the production state, `kRunTimingModelValidated` in
+    // `VehicleConfig.h` - this stays the configured strategy cruise; once a
+    // validated physical timing model exists an announced Target Time may choose
+    // a slower cruise through `planRunTiming()`/`profileLimitsWithCruise()`. Back
+    // to `profileLimits_` at a new-run boundary.
     ev::DirectionalMotionProfileLimits runProfileLimits_ = vehicleConfig::profileLimits();
 
-    // The announced run's timing plan: the cruise the run was announced with, the
-    // deliberate delay it spends and the estimates behind both. Replaced at each
-    // successful announcement, and reset to "not planned" at the new-run
-    // boundary. Nothing in the control path reads it back - the plan reaches the
-    // run through `run_.plannedDelayS()` and the profile limits above, so there is
-    // one copy of each decided value and this is the record of what was decided.
+    // The announced run's **diagnostic** timing estimate: the kinematic cruise,
+    // delay and margins the announced Target Time and geometry imply. Replaced at
+    // each successful announcement and reset to "not planned" at the new-run
+    // boundary. It is reported in the announcement acknowledgement but decides
+    // nothing: the run's deliberate delay is its execution plan's `initialDelayS`
+    // (consumed by `run_.announceRun()` through `run_.initialDelayS()`), and its
+    // shaped cruise is `runProfileLimits_` above.
     ev::RunTimingPlan timingPlan_ = ev::refusedTimingPlan(ev::RunTimingPlanStatus::NotPlanned);
 
     // The chain.

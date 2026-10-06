@@ -482,12 +482,12 @@ void test_announcement_gate_reports_the_first_thing_to_fix(void) {
                           static_cast<int>(verdict.refusal));
 }
 
-// An announced Target Time the run cannot meet inside the configured limits is
-// refused by name, and the plan's own status travels with the refusal so the
-// operator is told which fact behind the plan refused it. Nothing is silently
-// violated: the alternative would be a run that either exceeds a limit or times
-// out mid-course.
-void test_an_unreachable_target_time_is_refused_with_the_plan_reason(void) {
+// An announced Target Time the diagnostic timing estimate cannot meet does **not**
+// refuse the run (S7). The estimate is unvalidated kinematics: it travels in the
+// verdict so the operator can see why the time looks unreachable, but an otherwise
+// legal announcement stands, because an unvalidated estimate must not invalidate a
+// legal run. Every surviving refusal spelling is still wire-safe.
+void test_an_unreachable_target_time_does_not_invalidate_a_legal_run(void) {
     const ev::ConfigurationBuildChecks passing = allChecksPassing();
     const ev::RunTimingPlan impossible = planForTargetTime(1.0);
     TEST_ASSERT_FALSE(impossible.valid);
@@ -496,17 +496,11 @@ void test_an_unreachable_target_time_is_refused_with_the_plan_reason(void) {
 
     const ev::AnnounceVerdict verdict =
         ev::announceVerdictFor(validStateConfig(), passing, impossible);
-    TEST_ASSERT_FALSE(verdict.ok);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::TargetTimeUnreachable),
+    TEST_ASSERT_TRUE(verdict.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::None),
                           static_cast<int>(verdict.refusal));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunTimingPlanStatus::TargetTimeTooShort),
                           static_cast<int>(verdict.plan.status));
-
-    // The refusal names a wire-safe reason, like every other refusal spelling.
-    const char* name = ev::announceRefusalName(verdict.refusal);
-    TEST_ASSERT_NOT_NULL(name);
-    TEST_ASSERT_NULL(strchr(name, ','));
-    TEST_ASSERT_EQUAL_STRING("TargetTimeUnreachable", name);
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +663,7 @@ int main(int, char**) {
     RUN_TEST(test_an_unparsed_request_is_refused_as_nothing);
     RUN_TEST(test_refusal_spellings_are_wire_safe);
     RUN_TEST(test_announcement_gate_reports_the_first_thing_to_fix);
+    RUN_TEST(test_an_unreachable_target_time_does_not_invalidate_a_legal_run);
     RUN_TEST(test_arm_readiness_maps_the_three_data_completeness_checks);
     RUN_TEST(test_arming_requires_every_check);
     RUN_TEST(test_telemetry_rate_maps_to_a_whole_stride);

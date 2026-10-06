@@ -268,6 +268,17 @@ plan.
 knot-freedom. Nothing new is promoted here; this step is what turns the timing
 plan from arithmetic into a measured behavior.
 
+**Enablement (S7):** running this step changes nothing by itself. The run's
+deliberate delay is its execution plan's `initialDelayS`, and while
+`vehicleConfig::kRunTimingModelValidated` is false the plan carries
+`timingReady = false`/`initialDelayS = 0`, the run's cruise is the configured
+strategy cruise, and the announcement gate does not consult the kinematic
+estimate for a refusal. Only after this step's records exist (raw data preserved),
+the accel/decel/cruise limits are promoted from `Provisional` to `Measured`
+through the normal procedure, and the realised-Run-Time comparison is reviewed may
+`kRunTimingModelValidated` be set true - as its own reviewed change, with the
+evidence cited.
+
 ## Step 13 - Repeatability (H10)
 
 **Setup:** the frozen competition configuration.

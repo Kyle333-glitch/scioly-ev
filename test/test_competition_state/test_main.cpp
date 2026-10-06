@@ -128,15 +128,16 @@ struct Harness {
     ev::CompetitionStateMachine machine;
     uint32_t nowMs;
 
-    // The most delay the fixture's policy permits. The fixture announcement
-    // spends that much, so a run that has to reach OptionalDelay announces its
+    // The delay the fixture run's own execution plan states. These fixtures
+    // deliberately spend the whole policy maximum (a legal/safety bound, never
+    // the run's value), so a run that has to reach OptionalDelay announces its
     // whole bound and a fixture with a zero bound skips the phase entirely - the
-    // delay is a per-announcement decision now, not a policy value.
-    double maximumDelayS;
+    // delay is the plan's per-run value, not a policy value.
+    double fixturePlanDelayS;
 
     Harness(const ev::RunPhaseConfig& config, const ev::ReversalConfig& reversal, uint32_t startMs,
-            double maximumDelayS_ = 0.0)
-        : machine(config, reversal), nowMs(startMs), maximumDelayS(maximumDelayS_) {}
+            double fixturePlanDelayS_ = 0.0)
+        : machine(config, reversal), nowMs(startMs), fixturePlanDelayS(fixturePlanDelayS_) {}
 };
 
 Harness defaultHarness(double maximumOptionalDelayS) {
@@ -144,16 +145,17 @@ Harness defaultHarness(double maximumOptionalDelayS) {
                    maximumOptionalDelayS);
 }
 
-// Announces the valid fixture run with an explicit planned delay. The run policy
-// bounds it by the announced policy (`maximumOptionalDelayS`).
-ev::RunStartStatus announceValidRunWithDelay(Harness& harness, double plannedDelayS) {
+// Announces the valid fixture run with an explicit per-run delay: the value a
+// run's execution plan would have supplied (`RunExecutionPlan::initialDelayS`).
+// The run policy bounds it by the announced policy (`maximumOptionalDelayS`).
+ev::RunStartStatus announceValidRunWithDelay(Harness& harness, double planDelayS) {
     const ev::RunConfig config = validRunConfig();
-    return harness.machine.announceRun(config, ev::validateRunConfig(config), plannedDelayS,
+    return harness.machine.announceRun(config, ev::validateRunConfig(config), planDelayS,
                                        harness.nowMs);
 }
 
 ev::RunStartStatus announceValidRun(Harness& harness) {
-    return announceValidRunWithDelay(harness, harness.maximumDelayS);
+    return announceValidRunWithDelay(harness, harness.fixturePlanDelayS);
 }
 
 // One cycle's stated evidence. Every field defaults to a stated, safe fact; the

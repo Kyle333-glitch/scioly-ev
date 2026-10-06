@@ -333,23 +333,24 @@ void test_announcement_refusals_carry_the_gate_that_refused(void) {
     TEST_ASSERT_EQUAL_STRING(
         "ERR,cmd=announce,reason=PolicyNotUsable,error=-,first_fail=RunPolicyUsable", buffer);
 
-    // An announced time the limits cannot meet: the detail is the plan's own
-    // status, so the operator sees which fact behind the plan refused it.
+    // An announced time the diagnostic timing estimate cannot meet is no longer a
+    // refusal (S7): the estimate is unvalidated kinematics, so it travels with the
+    // verdict but cannot invalidate an otherwise legal announcement.
     const ev::RunTimingPlan impossible = planForTargetTime(1.0);
     TEST_ASSERT_FALSE(impossible.valid);
     const ev::AnnounceVerdict unreachable =
         ev::announceVerdictFor(validStateConfig(), checks, impossible);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::TargetTimeUnreachable),
+    TEST_ASSERT_TRUE(unreachable.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AnnounceRefusal::None),
                           static_cast<int>(unreachable.refusal));
-    TEST_ASSERT_TRUE(ev::formatAnnounceRefusal(unreachable, buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING(
-        "ERR,cmd=announce,reason=TargetTimeUnreachable,error=TargetTimeTooShort,first_fail=-",
-        buffer);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunTimingPlanStatus::TargetTimeTooShort),
+                          static_cast<int>(unreachable.plan.status));
 }
 
-// The accepted announcement carries the plan the run was announced with, because
-// those are the numbers that decide the run's timing - not something the operator
-// can reconstruct from the typed configuration and the limits by eye.
+// The accepted announcement carries the diagnostic timing estimate, because it is
+// the kinematic picture behind the announcement - not something the operator can
+// reconstruct from the typed configuration and the limits by eye. It is reported,
+// not obeyed: the run's delay is its execution plan's (S7).
 void test_announce_ack_carries_the_run_plan(void) {
     char buffer[ev::kSerialLineBufferBytes];
     ev::AnnounceVerdict verdict;
@@ -363,8 +364,9 @@ void test_announce_ack_carries_the_run_plan(void) {
         "margin_s=2.8000",
         buffer);
 
-    // The plan the gate accepts for the fixture configuration is the production
-    // plan, built by the same arithmetic the vehicle layer runs.
+    // The estimate the gate accepts for the fixture configuration is built by the
+    // same arithmetic the vehicle layer runs, and the gate accepts it without
+    // consulting whether it can meet the announced time.
     const ev::RunTimingPlan fixturePlan = planForTargetTime(15.0);
     const ev::AnnounceVerdict gated =
         ev::announceVerdictFor(validStateConfig(), allChecksPassing(), fixturePlan);

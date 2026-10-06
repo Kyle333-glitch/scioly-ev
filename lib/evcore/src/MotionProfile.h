@@ -52,7 +52,7 @@ namespace ev {
 //   zero target rather than a shaped one - no measured limit exists yet, so no
 //   shaping value is written down here - with one exception: the cruise may be
 //   a cited `ValueSource::Derived` plan output (`cruiseProvenanceIsEstablished()`),
-//   because the run's timing plan computes it from measured inputs (D35).
+//   because a validated run timing model computes it from measured inputs (D35).
 //   The optional strategy ceiling is the module's one non-`Sourced` input: it is
 //   a run-strategy choice, conveyed explicitly as active or inactive, and the
 //   phase configuration that produces it (`RunPhaseConfig`) is where its
@@ -158,9 +158,9 @@ struct MotionDurationEstimate {
 
 // The time to travel `distanceM` under a trapezoidal (or, when the distance is
 // too short to reach cruise speed, triangular) profile, from kinematics alone and
-// with no provenance: the arithmetic `motionDurationS` and the run's timing plan
-// below both use this one formula, so "how long does this distance take" has a
-// single answer in this module.
+// with no provenance: the arithmetic `motionDurationS` and the diagnostic run
+// timing estimate below both use this one formula, so "how long does this
+// distance take" has a single answer in this module.
 //
 // Returns NaN when no duration exists: a non-finite or non-positive limit, a
 // non-finite or negative distance, or an arithmetic result that is not finite.
@@ -312,13 +312,14 @@ inline MotionTimingSummary motionTimingSummary(const MotionTimingIntent& intent,
 }
 
 // ---------------------------------------------------------------------------
-// The run's timing plan - how an announced Target Time becomes motion
+// The diagnostic run timing estimate - what an announced Target Time implies
 // ---------------------------------------------------------------------------
 //
 // The announced Target Time is a *scored* event parameter (rule 8.i): a run that
 // finishes far from it scores worse than one that lands on it, and the run may
-// not exceed the configured safety limits to chase it. This is the one place
-// that turns it into motion, and it answers three questions at once:
+// not exceed the configured safety limits to chase it. This is the one kinematic
+// arithmetic that answers what an announced time would need, and it answers
+// three questions at once:
 //
 //   1. **Which cruise speed?** The slowest cruise whose estimated travel fits
 //      inside the announced time, so the run spends its slack by covering the
@@ -338,6 +339,14 @@ inline MotionTimingSummary motionTimingSummary(const MotionTimingIntent& intent,
 // commands nothing. The numbers are kinematic arithmetic on caller-supplied
 // limits, the same way `motionTimingSummary()` is, and they are as good as those
 // limits - which are placeholders until a physical test replaces them.
+//
+// **It is diagnostic until a physical timing model is validated (S7).** An
+// unvalidated estimate must not control a run: it may not choose the run's
+// cruise, its `plannedDelayS` may not become the run's deliberate delay, and it
+// may not refuse an otherwise legal announcement. When a run's layer lets it
+// influence a run at all, the value it uses is recorded in that run's immutable
+// execution plan (`RunExecutionPlan::initialDelayS`); today no production run
+// does, and every production flag behind that decision is false.
 //
 // Every limit arrives as a `Sourced` value and a value that is not `Measured`
 // refuses the plan rather than shaping one; the announced Target Time is the one
@@ -378,8 +387,9 @@ inline const char* runTimingPlanStatusName(RunTimingPlanStatus status) {
     return "?";
 }
 
-// One announced run's plan. Deliberately no default constructor: a plan with no
-// announcement behind it must be impossible to write.
+// The diagnostic kinematic estimate for one announced run. Deliberately no
+// default constructor: an estimate with no announcement behind it must be
+// impossible to write.
 struct RunTimingPlan {
     constexpr RunTimingPlan(double plannedCruiseMps_, double plannedDelayS_, double travelDurationS_,
                             double reserveS_, double intendedTotalS_, double marginS_, bool valid_,
@@ -393,12 +403,15 @@ struct RunTimingPlan {
           valid(valid_),
           status(status_) {}
 
-    // The cruise speed the run shapes its travel toward, metres per second. 0.0
-    // when no plan exists.
+    // The cruise speed the estimate says the travel would need, metres per
+    // second. 0.0 when no estimate exists. Diagnostic: it is the run's shaped
+    // cruise only when a validated timing model says so.
     double plannedCruiseMps;
 
-    // The deliberate stationary delay the run spends before it travels, seconds.
-    // 0.0 when the announced time needs no delay (or when no plan exists).
+    // The deliberate stationary delay the estimate says the announced time has
+    // left over, seconds. 0.0 when the announced time needs no delay (or when no
+    // estimate exists). Diagnostic in the same sense as the cruise: the run's
+    // own delay is its execution plan's `initialDelayS`.
     double plannedDelayS;
 
     // Estimated travel time at `plannedCruiseMps`, seconds, from `travelDurationS()`:
@@ -482,7 +495,7 @@ inline RunTimingPlan refusedTimingPlan(RunTimingPlanStatus status) {
     return RunTimingPlan(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, status);
 }
 
-// Builds the plan for one announced run.
+// Builds the diagnostic estimate for one announced run.
 //
 // The algebra, and why it is exact rather than searched: for a cruise speed at
 // or below the peak of the triangular profile, the travel time is
@@ -703,7 +716,7 @@ struct MotionProfileLimitsValidation {
 };
 
 // True when a cruise may shape a target: measured on this vehicle, or computed
-// by the run's timing plan from measured inputs and cited as such
+// by a validated run timing model from measured inputs and cited as such
 // (`ValueSource::Derived` with evidence). Mirrors
 // `dwellProvenanceIsEstablished()` and `optionalDelayProvenanceIsEstablished()`:
 // a computed number is never relabelled Measured, and an uncited Derived value

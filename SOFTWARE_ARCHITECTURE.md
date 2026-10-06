@@ -478,20 +478,29 @@ another's, and none is a run state machine.
     claim about where the vehicle is, and not a stop command.
   - Target Time and an optional intentional delay are carried explicitly, and the
     estimated travel duration and its margin against Target Time are reported.
-    **The strategy that spends the margin is now decided (D34):**
-    `ev::planRunTiming()` in this module is the run layer's timing owner - it takes
-    the announced Target Time, the announced rule geometry (the whole course: out
-    to the Bottle Line and back) and the measured limits, and produces the cruise
-    the run is shaped with (the *slowest* cruise whose estimated travel fits the
-    announced time, never above the configured or safety ceiling, never below the
-    configured planned-cruise floor) and the deliberate pre-travel delay that
-    spends the remaining slack. An announced Target Time shorter than the fastest
-    admissible travel is refused at the announcement boundary, never met by
-    exceeding a limit. The chosen values reach the control path as the run's
-    `MotionProfileLimits` and as `CompetitionStateMachine::plannedDelayS()`; the
-    bounded `MotionTimingIntent`/`motionTimingSummary()` estimate remains the
-    vocabulary for a caller that has limits but no announced run, and both use the
-    one `travelDurationS()` arithmetic so they cannot disagree about a trip. The
+    **Timing ownership and readiness are decided (S7): the estimate is
+    diagnostic, and the run's delay has one owner.** `ev::planRunTiming()` in this
+    module is the one kinematic arithmetic that says what the announced Target
+    Time, the announced rule geometry (the whole course: out to the Bottle Line
+    and back) and the measured limits imply - the *slowest* cruise whose estimated
+    travel fits the announced time (never above the configured or safety ceiling,
+    never below the configured planned-cruise floor) and the slack that would
+    become a deliberate pre-travel delay. It commands nothing on its own. The
+    run's deliberate delay lives in its immutable `ev::RunExecutionPlan`
+    (`initialDelayS`, section 7), is handed to
+    `CompetitionStateMachine::announceRun()` at the announcement boundary, and is
+    spent by the `OptionalDelay` phase - read back through
+    `CompetitionStateMachine::initialDelayS()`; the phase policy's
+    `maximumOptionalDelayS` is only the legal/safety maximum that bounds it. While
+    no physical timing model is validated (`vehicleConfig::kRunTimingModelValidated`
+    is false) the estimate may not choose the run's cruise (the configured
+    strategy cruise is used), may not become the run's delay (the plan carries
+    `timingReady = false` and `initialDelayS = 0`), and may not refuse an otherwise
+    legal announcement for an unreachable announced Target Time - it is reported
+    in the `OK,cmd=announce` acknowledgement as the diagnostic it is. The bounded
+    `MotionTimingIntent`/`motionTimingSummary()` estimate remains the vocabulary
+    for a caller that has limits but no announced run, and all of it uses the one
+    `travelDurationS()` arithmetic so the numbers cannot disagree about a trip. The
     Target Time and the geometry stay announced (operator-typed) inputs.
   - Every limit is `Sourced`; a non-measured or malformed limit produces a zero
     target rather than a shaped one.

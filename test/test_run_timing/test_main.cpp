@@ -7,11 +7,13 @@
 #include <CompetitionStateMachine.h>
 #include <MotionProfile.h>
 #include <RunAxis.h>
+#include <RunExecutionPlan.h>
 
-// Host tests for the run's timing plan (lib/evcore/src/MotionProfile.h): how an
-// announced Target Time becomes a planned cruise speed and a deliberate delay,
-// when the announcement is refused instead, and the two per-direction /
-// ramp-down behaviors the vehicle layer depends on.
+// Host tests for the diagnostic run timing estimate (lib/evcore/src/MotionProfile.h)
+// and the run's delay ownership (S7): what an announced Target Time kinematically
+// implies, when the estimate refuses instead, that the run spends its execution
+// plan's own `initialDelayS` (bounded by the policy maximum), and the two
+// per-direction / ramp-down behaviors the vehicle layer depends on.
 //
 // Every limit below is a fixture. None is a measured vehicle value and none is a
 // tuning suggestion: the vehicle has no measured limits (VERIFIED_STATE.md #8,
@@ -377,37 +379,60 @@ void test_plan_inputs_still_require_measured_limits(void) {
                   ev::planRunTiming(derivedCeiling));
 }
 
-// The delay is a per-announcement value bounded by the policy: a plan that waits
-// longer than the policy permits is refused before anything is sequenced.
-void test_the_announced_delay_is_bounded_by_the_policy(void) {
+// The run's delay has one owner - the run's immutable execution plan - and the
+// policy's `maximumOptionalDelayS` is only the legal/safety maximum that bounds
+// it. Two synthetic plans (fixtures, not measurements) state 1.0 s and 1.5 s: the
+// over-maximum one cannot be announced, the other is the value the run spends,
+// and the OptionalDelay phase ends exactly when that value has elapsed. Nothing
+// reads a policy value as a delay.
+void test_the_run_spends_the_execution_plans_delay_bounded_by_the_policy_maximum(void) {
+    const ev::RunConfig run(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0);
+    const ev::BottleEvidenceConfig bottle(measured(0.10), measured(0.20), measured(0.05));
+    const ev::RunExecutionDependencies deps(measured(0.01), measured(0.20));
+    const ev::RunExecutionPlan planWithinBound =
+        ev::buildRunExecutionPlan(run, bottle, deps, true, 12.0, 1.0).plan;
+    const ev::RunExecutionPlan planOverBound =
+        ev::buildRunExecutionPlan(run, bottle, deps, true, 12.0, 1.5).plan;
+    TEST_ASSERT_TRUE(planWithinBound.valid);
+    TEST_ASSERT_TRUE(planOverBound.valid);
+    TEST_ASSERT_TRUE(planWithinBound.initialDelayS == 1.0);
+    TEST_ASSERT_TRUE(planOverBound.initialDelayS == 1.5);
+
     const ev::RunPhaseConfig config(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
         measured(5.0), measured(1.0),
         ev::NearZeroConfig(measured(0.05), measured(0.2),
                            ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured)),
-        measured(0.10), measured(0.30), measured(0.30), measured(0.30),
-        ev::BottleEvidenceConfig(measured(0.10), measured(0.20), measured(0.05)));
+        measured(0.10), measured(0.30), measured(0.30), measured(0.30), bottle);
     const ev::ReversalConfig reversal(
         ev::NearZeroConfig(measured(0.05), measured(0.2),
                            ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured)),
         measured(3.0));
     ev::CompetitionStateMachine machine(config, reversal);
 
-    const ev::RunConfig run(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0);
+    // Over the policy maximum, and negative, are both refused before anything is
+    // sequenced; neither latches anything.
     TEST_ASSERT_EQUAL_INT(
-        static_cast<int>(ev::RunStartStatus::PlannedDelayNotUsable),
-        static_cast<int>(machine.announceRun(run, ev::validateRunConfig(run), 1.5, 1000U)));
+        static_cast<int>(ev::RunStartStatus::InitialDelayNotUsable),
+        static_cast<int>(machine.announceRun(run, ev::validateRunConfig(run),
+                                             planOverBound.initialDelayS, 1000U)));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunStartStatus::InitialDelayNotUsable),
+        static_cast<int>(machine.announceRun(run, ev::validateRunConfig(run), -0.5, 1000U)));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Idle),
                           static_cast<int>(machine.phase()));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
                           static_cast<int>(machine.faultCode()));
 
+    // The plan's own value is the delay the run is announced with and spends.
     TEST_ASSERT_EQUAL_INT(
         static_cast<int>(ev::RunStartStatus::Started),
-        static_cast<int>(machine.announceRun(run, ev::validateRunConfig(run), 1.0, 1000U)));
-    TEST_ASSERT_TRUE(machine.plannedDelayS() == 1.0);
+        static_cast<int>(machine.announceRun(run, ev::validateRunConfig(run),
+                                             planWithinBound.initialDelayS, 1000U)));
+    TEST_ASSERT_TRUE(machine.initialDelayS() == planWithinBound.initialDelayS);
 
-    // The announced delay is what the run spends, and it is spent before travel.
+    // And it is spent before travel: the phase ends exactly at the plan's value,
+    // not at the policy maximum it was bounded by.
     ev::RunInputs inputs;
     inputs.authorityArmed = true;
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Armed),
@@ -421,9 +446,9 @@ void test_the_announced_delay_is_bounded_by_the_policy(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Approach),
                           static_cast<int>(machine.update(2040U, inputs).phase));
 
-    // And a new-run boundary clears it: no planned delay survives a reset.
+    // And a new-run boundary clears it: no per-run delay survives a reset.
     machine.reset(3000U);
-    TEST_ASSERT_TRUE(machine.plannedDelayS() == 0.0);
+    TEST_ASSERT_TRUE(machine.initialDelayS() == 0.0);
 }
 
 int main(int, char**) {
@@ -440,7 +465,7 @@ int main(int, char**) {
     RUN_TEST(test_the_builder_selects_the_brake_offset_by_direction);
     RUN_TEST(test_a_ramp_down_is_classified_apart_from_a_stop);
     RUN_TEST(test_a_stop_request_ramps_the_target_down_without_crossing_zero);
-    RUN_TEST(test_the_announced_delay_is_bounded_by_the_policy);
+    RUN_TEST(test_the_run_spends_the_execution_plans_delay_bounded_by_the_policy_maximum);
     RUN_TEST(test_a_computed_cruise_is_derived_never_measured);
     RUN_TEST(test_profile_limits_accept_a_cited_derived_cruise_only);
     RUN_TEST(test_plan_inputs_still_require_measured_limits);

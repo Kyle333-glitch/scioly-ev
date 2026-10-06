@@ -202,11 +202,16 @@ constexpr double kFixtureMaxIntegrationStepS = 0.05;
 // Long enough that only a scenario that deliberately starves a phase reaches
 // them; the nominal run spends about 16 s of scripted time in the whole
 // sequence at the fixture rate, so these bounds are runway, not policy.
-// The most deliberate pre-travel delay the fixture policy permits. The fixture
-// announcement spends it in full (`announce()`, below), which is what keeps the
-// scripted scenarios' timing - and their OptionalDelay phase - unchanged now that
-// the delay is a per-announcement plan value rather than a policy value.
+// The most deliberate pre-travel delay the fixture policy permits (a
+// legal/safety maximum, not a run's delay), plus the timing values the fixture
+// plan states. This harness deliberately models a **validated** timing model -
+// it is a synthetic host fixture - so the plan below is built `timingReady` and
+// the scripted scenarios keep their OptionalDelay phase now that the run's delay
+// is its own execution plan's value rather than a policy value. Production is
+// the other case (`timingReady` false, delay 0), pinned by `test_execution_plan`.
 constexpr double kFixtureMaximumOptionalDelayS = 0.1;
+constexpr double kFixtureInitialDelayS = 0.1;
+constexpr double kFixturePredictedMotionTimeS = 15.0;
 
 // The fixture planned-cruise floor and bottle-evidence distances: measured
 // fixtures, like every other value in this file, so the run policy is usable.
@@ -644,11 +649,20 @@ public:
     // adopted.
     ev::RunStartStatus announce(const ev::RunConfig& config) {
         const ev::RunConfigValidation validation = ev::validateRunConfig(config);
-        // The fixture announcement spends the whole delay the fixture policy
-        // permits, so the scripted runs keep their OptionalDelay phase now that
-        // the delay is decided per announcement by the run layer's timing plan.
+        // This run's execution plan, through the same production builder the
+        // vehicle layer calls, with the fixture dependencies in place of the
+        // production placeholders and the fixture timing values in place of a
+        // validated physical timing model. Built before the announcement,
+        // because the plan owns the run's deliberate delay: the run policy is
+        // handed this plan's `initialDelayS`, exactly as production hands it the
+        // production plan's (which is 0 while the timing model is unvalidated).
+        const ev::RunExecutionPlan fixturePlan =
+            ev::buildRunExecutionPlan(config, fixtures_.phase.bottleEvidence,
+                                      fixtureExecutionDependencies(), true,
+                                      kFixturePredictedMotionTimeS, kFixtureInitialDelayS)
+                .plan;
         const ev::RunStartStatus status =
-            run_.announceRun(config, validation, kFixtureMaximumOptionalDelayS, nowMs_);
+            run_.announceRun(config, validation, fixturePlan.initialDelayS, nowMs_);
         if (status != ev::RunStartStatus::RunAlreadyActive &&
             status != ev::RunStartStatus::FaultLatched) {
             configurationValid_ = validation.ok;
@@ -660,14 +674,10 @@ public:
             axisGeometry_ = ev::RunAxisGeometry::fromRunConfig(config);
             runOriginTicks_ = decoder_.ticks();
             legForward_ = true;
-            // This run's execution plan, through the same production builder the
-            // vehicle layer calls, with the fixture dependencies in place of the
-            // production placeholders. Adopted even when it refuses, so the run's
-            // own refusal travels with the run rather than being hidden.
-            executionPlan_.adopt(ev::buildRunExecutionPlan(config, fixtures_.phase.bottleEvidence,
-                                                           fixtureExecutionDependencies(), false,
-                                                           0.0, 0.0)
-                                     .plan);
+            // The same plan the run's delay came from. Adopted even when it
+            // refuses, so the run's own refusal travels with the run rather than
+            // being hidden.
+            executionPlan_.adopt(fixturePlan);
         }
         return status;
     }

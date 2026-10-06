@@ -119,12 +119,19 @@ Consequences that are easy to forget:
   vehicle was. Removed by: P-H8 recording independently observed bottle positions
   (witness mark, observer or camera) against the believed ones, and the constants
   promoted with that evidence.
-- **The run's timing plan has never been compared with a realised Run Time** (D34).
-  `aim: planRunTiming()` chooses the run's cruise and deliberate delay from the
-  announced Target Time and geometry, but every limit it uses is still a
-  placeholder, so nothing has been observed. Removed by: P-H14 step 12 - several
-  announced Target Times on a marked course, with the planned cruise/delay from the
-  `OK,cmd=announce` line and the realised Run Time recorded together.
+- **The run's timing model has never been compared with a realised Run Time**
+  (D34; declared diagnostic and disabled by S7). `aim: planRunTiming()` is now a
+  **diagnostic** kinematic estimate: while no physical timing model is validated
+  (`vehicleConfig::kRunTimingModelValidated` is false) it may not choose a run's
+  cruise, its numbers may not become a run's deliberate delay (that is the run's
+  execution plan's `initialDelayS`, and it is 0), and an announced Target Time it
+  cannot meet does not invalidate an otherwise legal run. Every limit it would use
+  is still a placeholder, so nothing about a run's timing has been observed.
+  Removed by: P-H14 step 12 - several announced Target Times on a marked course,
+  with the diagnostic cruise/delay from the `OK,cmd=announce` line and the
+  realised Run Time recorded together; the accel/decel/cruise limits then promoted
+  to `Measured` and `kRunTimingModelValidated` set true, with the raw data
+  preserved.
 - **The regulated ramp-down has never been observed on a vehicle** (D34). The run
   now keeps regulating toward the shaped target while the profile ramps it to zero
   (`isRunRampDownCommand()`), instead of coasting. What that does to a real

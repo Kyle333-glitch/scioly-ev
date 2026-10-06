@@ -120,9 +120,9 @@ constexpr double kPlannedCruiseMps = 0.5;
 constexpr double kPlannedAccelMps2 = 0.5;
 constexpr double kPlannedDecelMps2 = 1.0;
 
-// The slowest cruise at which travel is known to be reliable, m/s. The run's
-// timing plan never plans below it - a speed the drivetrain cannot follow is not
-// a way to spend time, so the slack it cannot spend travelling becomes a
+// The slowest cruise at which travel is known to be reliable, m/s. The diagnostic
+// timing model never estimates below it - a speed the drivetrain cannot follow is
+// not a way to spend time, so the slack it cannot spend travelling would become a
 // deliberate stationary delay instead. A rollout/velocity trace (H4/H5) plus a
 // "lowest commanded cruise that produces reliable movement" measurement replaces
 // this; until then it is a placeholder and no run may be announced on it.
@@ -182,16 +182,40 @@ constexpr uint32_t kMaxDwellGapMs = 28U;
 constexpr const char* kMaxDwellGapEvidence =
     "data/evidence/P-H0W-2026-09-28/h0w-step8-pins-baseline.log (worst_stall_ms), D28";
 
-// The **longest** deliberate pre-travel delay a run may spend, seconds. The delay
-// a run actually spends is decided per announcement by `planRunTiming()` from the
-// announced Target Time and the announced geometry; this is the bound that plan
-// may not exceed. It is the event's own maximum Target Time (rule 8.i): no run may
-// wait longer than the longest run the event can ask for, which is a bound the
-// rules state rather than a number anyone has to measure. Deliberately NOT
-// `Measured` - no experiment on this vehicle can establish what the event's rules
-// say - and it is RuleDerived rather than Provisional because it *is* a rule
-// value, cited below through `completeStopDwellS()`'s convention.
+// The **longest** deliberate pre-travel delay a run may spend, seconds: a
+// legal/safety maximum only. The delay a run actually spends is its own immutable
+// execution plan's `initialDelayS` (`ev::RunExecutionPlan`), handed to the run
+// policy at the announcement boundary, and that value may not exceed this bound.
+// It is the event's own maximum Target Time (rule 8.i): no run may wait longer
+// than the longest run the event can ask for, which is a bound the rules state
+// rather than a number anyone has to measure. Deliberately NOT `Measured` - no
+// experiment on this vehicle can establish what the event's rules say - and it is
+// RuleDerived rather than Provisional because it *is* a rule value, cited below
+// through `completeStopDwellS()`'s convention.
 constexpr double kPlannedMaximumOptionalDelayS = ev::rules2027::kTargetTimeMaxS;
+
+// Whether a **physical timing model** has been validated for this vehicle and
+// build: measured accel/decel/cruise behaviour correlated against realised Run
+// Times closely enough that the kinematic estimate may control a run's cruise and
+// deliberate delay. It is the one production flag behind that decision, and false
+// is its only value until the evidence exists.
+//
+// While it is false, none of the following may happen on a real run:
+//
+//   * `planRunTiming()` may not choose the run's cruise - the configured strategy
+//     cruise is used (the estimated numbers stay a labelled diagnostic);
+//   * the estimate's delay may not become the run's deliberate delay - the
+//     execution plan carries `timingReady = false` and `initialDelayS = 0`; and
+//   * an estimate that cannot meet the announced Target Time may not refuse an
+//     otherwise legal announcement (`announceVerdictFor()` does not consult the
+//     estimate for a refusal at all).
+//
+// Setting this true is not the validation; the evidence is. Validating the model
+// means replacing the `Provisional` accel/decel/cruise limits with measured ones
+// and recording several announced Target Times against realised Run Times on a
+// marked course (P-H14 step 12) with the raw data preserved, so the estimate can
+// be compared with what the vehicle actually did.
+constexpr bool kRunTimingModelValidated = false;
 
 // Bottle-interaction placeholders: how far before the Bottle Start Point the
 // pusher is taken to touch the bottle, how far past that the bottle counts as
@@ -408,12 +432,14 @@ inline ev::DirectionalMotionProfileLimits profileLimits() {
 }
 
 // The same limits with the run's *planned* cruise in place of the configured
-// strategy cruise: what the vehicle layer presents for an announced run once its
-// timing plan has chosen a speed (`ev::planRunTiming()`).
+// strategy cruise: what the vehicle layer presents for an announced run once a
+// **validated** physical timing model has chosen a speed (`ev::planRunTiming()`).
+// While the model is unvalidated the vehicle layer uses `profileLimits()` and this
+// path is not taken at all.
 //
 // The planned value is derived at the announcement boundary from the announced
-// Target Time and limits that are all `Measured` (the plan refuses otherwise, so
-// this path is unreachable on a placeholder). Its provenance is therefore
+// Target Time and limits that are all `Measured` (the estimate refuses otherwise,
+// so this path is unreachable on a placeholder). Its provenance is therefore
 // `ValueSource::Derived` (D35): a computed planning value, never a measurement
 // of the vehicle, with the derivation cited. Nothing may promote it to
 // `VERIFIED_STATE.md`, and no calibration gate may treat it as `Measured`.
@@ -458,8 +484,9 @@ inline ev::RunExecutionDependencies runExecutionDependencies() {
 }
 
 // The delay bound: the event's maximum Target Time, as a rule value (rule 8.i),
-// so a run's own plan can never wait longer than the longest run the event can
-// ask for. A rule citation is not a measurement, and this is not one.
+// so a run's execution plan can never wait longer than the longest run the event
+// can ask for. It bounds the run's own plan; it is never the run's delay. A rule
+// citation is not a measurement, and this is not one.
 inline ev::Sourced<double> maximumOptionalDelayS() {
     return ev::Sourced<double>(kPlannedMaximumOptionalDelayS, ev::ValueSource::RuleDerived,
                                "rules2027 8.i (Target Time maximum)");

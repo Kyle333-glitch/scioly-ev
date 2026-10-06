@@ -56,13 +56,19 @@ namespace ev {
 //   The plan does not re-implement the comparison and does not decide that a phase
 //   may advance.
 // * **It is not a motion profile and it is not a state machine.**
-//   `MotionProfile.h` owns shaping and the timing plan;
+//   `MotionProfile.h` owns shaping and the diagnostic timing estimate;
 //   `CompetitionStateMachine.h` owns phase transitions. This plan owns neither,
 //   and it carries no motion command.
-// * **It is not a timing model.** It carries `timingReady`, `predictedMotionTimeS`
-//   and `initialDelayS` because timing is per-run state, and it records them
-//   honestly: until empirical physical timing evidence exists, `timingReady` is
-//   false and both numbers are 0.0 ("not meaningfully available").
+// * **It is not a timing model.** It does not estimate travel time, but it is
+//   the one owner of the run's **deliberate start delay**: `initialDelayS` is
+//   what the run policy consumes at the announcement boundary
+//   (`CompetitionStateMachine::announceRun()`, the `OptionalDelay` phase), and no
+//   static phase policy holds a second copy of it (the phase policy contributes
+//   only the legal/safety maximum that bounds it). It carries `timingReady`,
+//   `predictedMotionTimeS` and `initialDelayS` because timing is per-run state,
+//   and it records them honestly: until empirical physical timing evidence
+//   exists, `timingReady` is false and both numbers are 0.0 ("not meaningfully
+//   available"), which overrides even a non-zero argument.
 // * **The run layer consumes it, and only through the accessors below.** S4 wired
 //   the plan into `VehicleRuntime` and the scenario harness: each leg's execution
 //   target (`legExecutionTargetM()`), the forward-leg progression thresholds
@@ -268,8 +274,11 @@ struct RunExecutionPlan {
     // run takes no time.
     const double predictedMotionTimeS;
 
-    // The deliberate stationary delay before travel, seconds, when `timingReady`
-    // is true. 0.0 otherwise.
+    // The run's deliberate stationary delay before travel, seconds: the one value
+    // the run policy consumes as its per-run delay (the `OptionalDelay` phase),
+    // bounded there by the phase policy's legal/safety maximum. Non-zero only when
+    // `timingReady` is true; 0.0 otherwise, which is the honest production value
+    // until a physical timing model is validated.
     const double initialDelayS;
 
     // Invariant: `valid == (status == RunExecutionPlanStatus::Planned)`.
@@ -357,7 +366,11 @@ inline RunExecutionPlanResult refusedExecutionPlanResult(RunExecutionPlanStatus 
 // plan carries `predictedMotionTimeS = 0.0` and `initialDelayS = 0.0` regardless
 // of the arguments, because an unvalidated idealized prediction is not available
 // evidence for a run's delay; with `timingReady` true both must be finite and
-// non-negative. Nothing here makes idealized timing control production behavior.
+// non-negative. The recorded `initialDelayS` is then the run's one per-run delay
+// - the run layer hands it to `CompetitionStateMachine::announceRun()` - so
+// "who decides the delay" has a single answer in an active run. Nothing here
+// makes idealized timing control production behavior: the readiness flag is the
+// caller's, and the production configuration never sets it.
 inline RunExecutionPlanResult buildRunExecutionPlan(
     const RunConfig& announcedConfig, const BottleEvidenceConfig& bottleConfig,
     const RunExecutionDependencies& dependencies, bool timingReady, double predictedMotionTimeS,
