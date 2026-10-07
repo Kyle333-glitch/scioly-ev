@@ -1199,3 +1199,28 @@ image.
   session, and the analyzer treats a line that is not a telemetry record as an
   ignored line. No bench verb is a control input, and adding one that could change
   run behavior would be a new contract, not a new verb.
+
+## 18. Pre-hardware freeze contract
+
+The software work this project defined before physical bring-up is finished.
+`docs/PRE_HARDWARE_FREEZE.md` records the frozen revision, the validation that was
+re-run from a clean build state, the checks that prove one image cannot contain
+another's behavior, and every remaining unknown with the protocol that resolves it.
+From that record:
+
+- the contracts in sections 1-17, the module layout, the safety invariants, the
+  telemetry schema (`ev::kTelemetrySchemaVersion`, **3**) and the command and
+  response vocabularies, the PlatformIO environment set and the host test suite are
+  frozen: changing any of them is a deliberate act recorded in
+  `DEVELOPMENT_LOG.md`, not a refactor;
+- **no speculative feature may be added.** The only permitted software work is
+  promoting a placeholder from a recorded physical measurement, fixing a defect a
+  reproduced failure has demonstrated, correcting a document or comment
+  that disagrees with the frozen code, or enabling one of the capabilities the
+  freeze names as deliberately off (the production watchdog, the driver-fault and
+  battery-voltage capabilities, and `kRunTimingModelValidated`);
+- anything else needs the measured problem it solves and is an escalation under
+  `AGENTS.md` sections 20 and 31, not an implementation task;
+- the freeze is a software statement only. It moves no `VERIFIED_STATE.md` row, and
+  the bring-up protocols in `docs/bringup/` remain the only path by which a
+  physical fact may become VERIFIED.

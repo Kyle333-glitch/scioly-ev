@@ -7270,3 +7270,83 @@ SUCCESS with 0 warnings (RAM 6772/6972/6956; Flash 74540/81380/80808);
 `tools/telemetry` **119/119 OK**; `git diff --check` clean; every changed file
 100% CRLF. These are the same numbers the stage recorded in `VERIFIED_STATE.md`,
 measured on this tree rather than inherited from an earlier entry.
+
+## D50 / S13 - 2026-10-06 - Pre-hardware architecture freeze: the deterministic software phase is closed at a validated revision
+
+S13 is the gate between software work and physical work. It re-ran the whole
+validation from a clean build state, audited the tree for the defects a freeze must
+not inherit, and recorded the frozen revision, the evidence, the separation checks
+and every remaining unknown in **`docs/PRE_HARDWARE_FREEZE.md`** (new). It changed
+no behavior: the two source edits below are comments, and all three firmware images
+rebuild **byte-for-byte identical** to the pre-change images
+(`nano_r4` `1ce01874...`, `bench` `2bc3fe5d...`, `bench-watchdog` `c78ef5b5...`).
+
+### Validation (clean build state - `.pio/build` removed first; nothing uploaded)
+
+- `pio test -e native` -> **628/628** cases in **35** suites, exit 0, 0 warnings.
+- `pio run -e nano_r4` -> SUCCESS, 0 warnings, RAM 6772/32768, Flash 74540/262144.
+- `pio run -e bench` -> SUCCESS, 0 warnings, RAM 6972/32768, Flash 81380/262144.
+- `pio run -e bench-watchdog` -> SUCCESS, 0 warnings, RAM 6956/32768, Flash 80808/262144.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -> **119/119 OK**.
+- `pio run -e emergency` -> fails, exit 1: `UnknownEnvNamesError: Unknown environment names 'emergency'. Valid names are 'bench-watchdog, nano_r4, native, bench'` (the trailing valid-name list is a set and reorders between runs).
+
+### Separation and audit checks (all green)
+
+`arm-none-eabi-nm` over the three images: the vehicle image matches **0** for
+`bench`, `hang`, `h1a` and `emergency`; `bench` matches 36 bench and 5 H1A symbols
+with no emergency; `bench-watchdog` matches 31 bench symbols with **0** H1A and no
+emergency (it overrides `build_flags`, so it does not inherit
+`-DEV_BENCH_H1A_DIAGNOSTIC=1`). Each image has exactly one `T setup` and one
+`T loop`. The three motor pin names appear only in `src/PinMap.h` (definitions) and
+`src/MotorDriver.h` (writes). `lib/` has no Arduino header, no
+`digitalWrite`/`analogWrite`, no `Serial.` and no `printf`. No `delay(` in `src/`
+or `lib/`; the only waits are the two bounded 2 s boot waits, and the only
+`for (;;)` is the bench-only hang hook (compiled out at its shipped `0U`). No
+`TODO`/`FIXME`/`HACK`/`XXX`/`TBD` anywhere in source, tests, tooling or
+`platformio.ini`. The stale ownership vocabulary
+(`temporaryLegExecutionTargetM`, `turnAroundPositionM`, `PlannedDelayNotUsable`,
+`TargetTimeUnreachable`) is absent; `plannedDelayS` survives only as
+`ev::RunTimingPlan`'s diagnostic field, not as the run's delay owner. The forward
+leg's shaping target and its progression threshold read the same stored
+`RunExecutionPlan::forwardStopMpPositionM`. The `NotInstalled` battery and nFAULT
+capabilities relax exactly one provenance requirement each and leave every numeric
+check and the `kMotorFaultBar == kNoPin` `static_assert` unconditional.
+
+### Concrete defects found and fixed
+
+1. **Two source comments named a removed wire prefix.** `src/main.cpp` (the boot
+   line note) and `src/VehicleRuntime.cpp` (the host-attach note in
+   `serviceStagedText`) described the live boot event as `EVE1`. The prefix has been
+   `EVE3` since S8 (`kTelemetrySchemaVersion = 3`), so both comments would have
+   sent a reader to a token the firmware no longer emits. Corrected to `EVE3`;
+   no code line changed, and the images are byte-identical (above).
+2. **The bench-symbol row overstated what reproduces.** `VERIFIED_STATE.md`
+   claimed the `bench` image's `nm` filter matches "the hang hook". The hook is a
+   compile-time constant at its inert shipped value (`kDeliberateHangAfterPasses
+   = 0U`), so the compiler removes its code and `hang` matches nothing in any
+   image. The row now records the D35 result **and** the S13 re-measurement, and
+   states why the hook symbol is absent. A new software row records the freeze
+   itself (validated revision, validation, separation checks, and that it moves no
+   hardware row).
+
+### Deliberately unchanged
+
+- **`AGENTS.md`** - no invariant it states changed. The freeze adds a *stage* rule
+  (which the new `SOFTWARE_ARCHITECTURE.md` **§18** carries as a contract), not a
+  change to the safety, ownership, provenance or evidence rules it already fixes.
+- **Every hardware row.** All twelve `VERIFIED_STATE.md` hardware rows remain
+  **UNVERIFIED**; no calibration was promoted; the only `Measured` production value
+  is still `kMaxDwellGapMs` (28 ms); `nFAULT` and battery/current sensing remain
+  `NotInstalled`; no raw count was relabelled.
+- **The recovery material.** `recovery/s2-overscope-snapshot` and
+  `recovery/d32-d34-v5-snapshot` are untouched, and nothing was pushed, merged,
+  tagged or uploaded.
+
+### Result
+
+The repository is waiting on **physical evidence and calibration**, not on
+unfinished deterministic software. Every remaining unknown is listed in
+`docs/PRE_HARDWARE_FREEZE.md` §7 with the protocol that resolves it (P-H1A through
+P-H14, and P-H0W step 8), and the one question no stage in this pack owns - the
+arming gate - is restated there rather than silently decided. **READY FOR
+INDEPENDENT PRE-HARDWARE AUDITS. No hardware work was started.**

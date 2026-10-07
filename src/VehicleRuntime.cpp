@@ -612,7 +612,7 @@ void VehicleRuntime::serviceStagedText(uint32_t nowMs) {
     // `kHostPollPasses`). A newly asserted line - DTR *or* RTS - is an attach: a
     // host that opens the port is greeted even if this port has been quiet for the
     // whole boot. The boot line says which firmware is running and with which
-    // configuration-build verdicts, and the `EVE1` boot record carries none of
+    // configuration-build verdicts, and the `EVE3` boot record carries none of
     // that. A line staged while nobody was reading is not a delivered line
     // (finding F-4, D21), so the state is tracked rather than assumed. Why two
     // bits are tracked, and why neither can make this a guarantee, is in

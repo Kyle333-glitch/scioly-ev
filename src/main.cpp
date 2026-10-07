@@ -97,7 +97,7 @@ void updateStatusLed(uint32_t nowMs) {
 }
 
 // Nothing is printed here any more. The boot line (`BOOT,...`, staged by
-// `runtime.begin()` before this point) and the `EVE1` boot event carry the same
+// `runtime.begin()` before this point) and the `EVE3` boot event carry the same
 // facts through the nonblocking transport, and `status`, `checks` and `version`
 // answer the rest on request. A blocking `Serial.print()` of a banner is exactly
 // what `SerialTransport.h` exists to avoid: the boot message must not depend on

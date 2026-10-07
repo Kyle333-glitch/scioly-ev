@@ -212,6 +212,12 @@ recorded in `DEVELOPMENT_LOG.md`.
   of the whole legal announced parameter space backs the plan arithmetic. Every
   `VERIFIED_STATE.md` row is unchanged: all twelve hardware rows remain UNVERIFIED
   and no calibration was promoted.
+- **Pre-hardware architecture freeze (S13, D50)** - the deterministic software
+  phase is closed at the revision `docs/PRE_HARDWARE_FREEZE.md` records, which
+  also fixes the rule from there: no speculative feature may be added, and the only
+  permitted work is promoting a placeholder from recorded physical evidence,
+  fixing a demonstrated defect, correcting a document or comment, or enabling a
+  capability the freeze names as deliberately off. Nothing physical moved.
 - **Next** - physical bring-up, executing those protocols in order: P-H0 (upload,
   boot and serial link), then its watchdog qualification P-H0W, then the driver
   electrical checks P-H1A and P-H1B. H0 (D25) and H0W (D28) are done. The powered
