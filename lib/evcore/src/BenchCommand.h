@@ -221,6 +221,38 @@ inline BenchVerb benchVerbFor(const BenchTokens& tokens) {
     return BenchVerb::Unknown;
 }
 
+// The largest number of tokens a verb accepts, including the leading `bench`:
+// `bench`, the verb, and its arguments. The console refuses a longer line before
+// dispatch, because a trailing token on a verb that takes none is a refusal and
+// not something to ignore (M3 - `bench arm <junk>` used to arm, and `bench stop
+// <junk>` used to stop). `drive`'s five and `resetsrc`'s optional `clear` are in
+// the table too, so every verb's token bound lives in one place; their own parsers
+// still give the specific error for a malformed argument.
+inline uint8_t benchVerbMaximumTokenCount(BenchVerb verb) {
+    switch (verb) {
+        case BenchVerb::Help:
+            return 2U;  // `bench`, `bench help`
+        case BenchVerb::Drive:
+            return 5U;  // `bench drive <fwd|rev> <permille> <ms>`
+        case BenchVerb::ResetCause:
+            return 3U;  // `bench resetsrc [clear]`
+        case BenchVerb::Arm:
+        case BenchVerb::Stop:
+        case BenchVerb::Reset:
+        case BenchVerb::Health:
+        case BenchVerb::DriveStatus:
+        case BenchVerb::Ticks:
+        case BenchVerb::Inputs:
+        case BenchVerb::Pins:
+        case BenchVerb::Wdt:
+            return 2U;  // `bench <verb>` only
+        case BenchVerb::None:
+        case BenchVerb::Unknown:
+            return 0U;  // never dispatched as a bench command
+    }
+    return 0U;
+}
+
 // Why a `bench drive` line could not be turned into a request. None means it was.
 enum class BenchArgumentError : uint8_t {
     None = 0,

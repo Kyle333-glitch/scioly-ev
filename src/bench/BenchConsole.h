@@ -64,7 +64,10 @@ namespace benchConsole {
 //      released on the next pass, or immediately if the tick ran out of order, and
 //      the tick resumes writing - so a bench command can never outlive the bench
 //      code, and a pass that failed its stage order never has a bench command
-//      written over its fail-safe write.
+//      written over its fail-safe write. A pass on which the instrument stops
+//      holding the driver - its own expiry, its stall latch, or an arbitration
+//      revocation - writes the de-energized state in that pass, before the pass
+//      ends, rather than depending on a later control tick (M1).
 //   4. The physical kill switch - the motor-supply disconnect - remains the
 //      primary stop. Nothing here replaces it, and no protocol that uses it may
 //      run with the switch out of reach.
@@ -106,15 +109,41 @@ constexpr uint16_t kMaxEffortPermille = 150U;
 constexpr uint32_t kMaxCommandDurationMs = 500U;
 
 // How long the encoder may show no change while commanded to drive before the
-// command is aborted as a latched fault. Wide relative to the control period: a
-// very slow rotation still produces edges well inside this, and a false abort is
-// a safe-direction annoyance rather than a hazard. H3 records whether it was
-// adequate at the smallest duty used.
-constexpr uint32_t kStallWindowMs = 1000U;
+// command is aborted as a latched fault.
+//
+// **400 ms, not the 1000 ms this shipped with (H3).** The bounded command is at
+// most 500 ms, so a 1000 ms window could never elapse while effort was applied:
+// the bounded expiry always fired first and the latch was unreachable for exactly
+// the condition it exists to catch - a stalled drivetrain, an unwired encoder, or
+// a command the drivetrain cannot follow. Lengthening the powered command was
+// rejected (the powered duration is not a convenience), so the window came down
+// instead. The margin below the 500 ms ceiling is 100 ms, five of the 20 ms
+// control periods, which is room for the latch to be *observed* before the
+// expiry with headroom for the loop's own lateness.
+//
+// It is a declared software budget, not a measured stopping behaviour and not a
+// claim about any real rotor: it bounds how long a stalled or unwired motor may
+// be driven, and a false abort at the smallest duty is a safe-direction annoyance
+// rather than a hazard. Whether a healthy very slow rotation produces edges
+// inside 400 ms is a physical question H3 answers at the bench, and that
+// qualification is still outstanding.
+constexpr uint32_t kStallWindowMs = 400U;
 
 // Commands allowed per arm. Not a rate limit: a bound on how long a confused
 // console can keep asking for effort without a fresh, deliberate arm.
 constexpr uint32_t kMaxCommandsPerArm = 8U;
+
+// The one limit set the console builds its instrument from, as a constexpr value,
+// so the reachability relationship below is a compile-time property of the
+// shipped numbers rather than a comment.
+constexpr ev::BenchDriveLimits kDriveLimits(kMaxEffortPermille, kMaxCommandDurationMs,
+                                            kStallWindowMs, kMaxCommandsPerArm);
+
+// H3: the shipped stall window must be short enough to trip inside one command.
+// An edit to either number that makes the latch unreachable again fails the build
+// here, instead of silently disarming the protection.
+static_assert(ev::benchStallProtectionReachable(kDriveLimits),
+              "H3: the bench stall window must be shorter than the longest command");
 
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
 // TEMPORARY - the ceiling for the H1A awake-EN-low hold (`bench h1a-brake`).
@@ -157,10 +186,7 @@ constexpr uint32_t kH1aHoldMaxMs = 30000U;
 // was the one with no bound behind it.
 constexpr uint32_t kReadoutLineCapacity = ev::kSerialLineCapacity;
 
-inline ev::BenchDriveLimits driveLimits() {
-    return ev::BenchDriveLimits(kMaxEffortPermille, kMaxCommandDurationMs, kStallWindowMs,
-                                kMaxCommandsPerArm);
-}
+inline ev::BenchDriveLimits driveLimits() { return kDriveLimits; }
 
 }  // namespace benchConfig
 
@@ -388,6 +414,19 @@ inline void healthLine(const VehicleRuntime& runtime, const WatchdogCheckpoint& 
 }
 
 // B2 - the bench drive state, and the answer to a command.
+// The direction this arm has fixed, for the `direction` field below: the fact the
+// one-direction-per-arm refusal is made from, so a session can see *why* the other
+// direction was refused without re-reading the source (H2).
+inline const char* lockedDirectionName(ev::MotorMode mode) {
+    if (mode == ev::MotorMode::DriveForward) {
+        return "fwd";
+    }
+    if (mode == ev::MotorMode::DriveReverse) {
+        return "rev";
+    }
+    return "none";
+}
+
 inline void driveLine() {
     const ev::BenchDrive& instrument = detail::drive();
     ev::BoundedText text(serialTransport::port().workingBuffer(),
@@ -397,6 +436,7 @@ inline void driveLine() {
     text.field("status").appendText(ev::benchDriveStatusName(instrument.status()));
     text.field("mode").appendText(ev::telemetryMotorModeName(instrument.output().mode()));
     text.field("effort_permille").appendUnsigned(instrument.output().magnitudePermille());
+    text.field("direction").appendText(lockedDirectionName(instrument.armedDirection()));
     text.field("fault").appendBool(instrument.faultLatched());
     text.field("commands").appendUnsigned(instrument.commandsIssued());
     text.field("stalls").appendUnsigned(instrument.stallFaults());
@@ -605,11 +645,14 @@ inline void helpLine() {
 // The bench verbs
 // ---------------------------------------------------------------------------
 
-// `bench arm` - the deliberate arm. Refused while an abort is latched, which is
-// what makes "stop" mean stopped until someone looks at why.
+// `bench arm` - the deliberate arm, a transition from Disarmed only (M3).
+// Refused while an abort is latched, which is what makes "stop" mean stopped until
+// someone looks at why, and refused while already armed or driving, so a repeated
+// arm can neither reset the per-arm budget nor cancel a live command.
 inline void applyArm() {
-    if (!detail::drive().arm()) {
-        refuseLine("ArmRefusedFaultLatched");
+    const ev::BenchArmRefusal refusal = detail::drive().arm();
+    if (refusal != ev::BenchArmRefusal::None) {
+        refuseLine(ev::benchArmRefusalName(refusal));
         return;
     }
     ackLine("bench_arm");
@@ -757,6 +800,41 @@ inline void applyH1aAwakeHold(const ev::BenchTokens& tokens, uint32_t nowMs) {
 }
 #endif  // EV_BENCH_H1A_DIAGNOSTIC
 
+// True while any bench instrument holds the driver: the bounded drive or the
+// temporary H1A hold. The production `disarm`/`reset` intercept (H1) is the caller
+// that cares about both.
+inline bool benchHoldsMotor() {
+    if (detail::drive().output().isDriving()) {
+        return true;
+    }
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    if (detail::h1aHoldActive()) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+// Revokes any bench-held output before a production command is forwarded (H1).
+//
+// The instrument is aborted - latched, so it cannot quietly resume applying effort
+// once the command's effect has passed - and the driver's de-energized levels are
+// written **directly**, so the stop reaches the pins in this pass and before the
+// forwarded command can rewrite the shared motion/encoder state.
+//
+// `failSafe()` is the adapter's de-energize-only write and deliberately ignores the
+// pass's ownership flag: this cannot suppress the forwarded command's own write
+// later in the pass, and it cannot produce powered output, so it is not a second
+// powered writer (`MotorDriver.h`).
+inline void revokeBenchOutputForProductionCommand() {
+    detail::drive().abort();
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    detail::h1aHoldActive() = false;
+#endif
+    motorDriver::failSafe();
+    driveLine();
+}
+
 // One complete line, dispatched. A line that is not a bench verb is handed back to
 // the production operator interface, so `status`, `checks`, `help` and the
 // configuration verbs keep working in a bench session and a bench image cannot
@@ -791,6 +869,23 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
         // Not a bench line: the production operator interface owns it, so `status`,
         // `checks`, the configuration verbs and the telemetry verbs keep working in
         // a bench session rather than being reimplemented here.
+        //
+        // H1: with the bench holding the driver, two production commands are not
+        // forwarded as they stand. `disarm` and `reset` are the only production
+        // commands a bench session can type that would otherwise leave a bench
+        // drive applied (the production authority is *already* disarmed during a
+        // bench drive, so its own stop changes nothing the bench can see while the
+        // console answers `OK,cmd=disarm`) or rewrite the shared motion/encoder
+        // state a live bench command is running against. The bench revokes its own
+        // output first, in this same dispatch, and then the command is forwarded -
+        // so an acknowledged stop can never describe a bench drive that is still
+        // applied.
+        if (benchHoldsMotor()) {
+            const ev::CommandParseResult parsed = ev::parseOperatorCommand(line, length);
+            if (parsed.ok && ev::benchRevokesForProductionCommand(parsed.request.id)) {
+                revokeBenchOutputForProductionCommand();
+            }
+        }
         runtime.handleCommandLine(line, length, nowMs);
         return;
     }
@@ -798,6 +893,16 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
     // An over-long line is refused before dispatch: acting on the tokens that fit
     // is how a command nobody typed gets applied.
     if (tokens.overflow) {
+        ++detail::refusedLines();
+        refuseLine("TooManyTokens");
+        return;
+    }
+
+    // M3: the verb's own token bound, checked before dispatch. A trailing token on
+    // a verb that takes none is a refusal and not something to ignore -
+    // `bench arm <junk>` used to arm, and `bench reset <junk>` used to reset the
+    // instrument.
+    if (tokens.count > ev::benchVerbMaximumTokenCount(verb)) {
         ++detail::refusedLines();
         refuseLine("TooManyTokens");
         return;
@@ -909,6 +1014,13 @@ inline PassArbitration& passArbitration() {
 // encoder-stall fault are evaluated from this pass's clock and count, and it sets
 // or clears `motorDriver::setMotorPinsOwned()`.
 //
+// When the instrument stops holding the driver on this pass - its own expiry, its
+// stall latch, or an arbitration revocation - the de-energized state is written
+// here, in this pass (M1). The tick's stage-9 write is the only other writer, and
+// it is skipped whenever the bench owns the pass and does not run at all on a pass
+// with no control tick, so depending on it would leave the last command applied
+// for a variable interval (and indefinitely under a stalled loop).
+//
 // When the instrument is driving and the verdict refuses it, the instrument is
 // **aborted** - latched, not silently disarmed - so the bench cannot quietly
 // resume applying effort once the blocking condition clears. The operator sees the
@@ -920,19 +1032,23 @@ inline void beginPass(uint32_t nowMs, const VehicleRuntime& runtime) {
 
     // A lapsed command is reported once, when it lapses, so a session's log shows
     // the expiry rather than only the absence of motion.
-    if (status == ev::BenchDriveStatus::Expired ||
-        status == ev::BenchDriveStatus::EncoderStallFault) {
+    const bool commandLapsed =
+        (status == ev::BenchDriveStatus::Expired ||
+         status == ev::BenchDriveStatus::EncoderStallFault);
+    if (commandLapsed) {
         driveLine();
     }
 
     bool benchOutputActive = instrument.output().isDriving();
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    bool h1aHoldLapsed = false;
     // The temporary H1A hold is the bench's other output. It expires here, on
     // the pass clock, so it can never outlive its own bound; at most one of the
     // two instruments is active at a time (`applyDrive`/`applyH1aAwakeHold`).
     if (detail::h1aHoldActive()) {
         if (static_cast<int32_t>(nowMs - detail::h1aHoldExpiresAtMs()) >= 0) {
             detail::h1aHoldActive() = false;
+            h1aHoldLapsed = true;
             h1aHoldLine(nowMs);
         } else if (!instrument.output().isDriving()) {
             benchOutputActive = true;
@@ -947,18 +1063,38 @@ inline void beginPass(uint32_t nowMs, const VehicleRuntime& runtime) {
     PassArbitration arbitration;
     arbitration.refusal = verdict.refusal;
     arbitration.ownsMotor = verdict.mayApply;
+
+    // True when the instrument stopped holding the driver on this pass (M1). What
+    // the pins must show then is the de-energized state, and this pass is where it
+    // has to be written.
+    bool benchReleasedThisPass = commandLapsed;
+#if defined(EV_BENCH_H1A_DIAGNOSTIC)
+    benchReleasedThisPass = benchReleasedThisPass || h1aHoldLapsed;
+#endif
+
     if (!verdict.mayApply) {
         if (instrument.output().isDriving()) {
             instrument.abort();
             arbitration.ownsMotor = false;
+            // M1: the de-energize lands in this pass rather than whenever the next
+            // control tick happens to write. `failSafe()` ignores the ownership
+            // flag, so a competing writer's own command still reaches the driver
+            // later in the pass.
+            motorDriver::failSafe();
             refuseLine(ev::benchApplyRefusalName(verdict.refusal));
+        } else if (benchReleasedThisPass) {
+            // M1: nothing else writes the de-energized state on this pass - the
+            // tick's stage-9 write is skipped whenever the bench owns the pass and
+            // does not run at all on a pass with no control tick.
+            motorDriver::failSafe();
         }
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
         else if (detail::h1aHoldActive()) {
             // Something outranks the diagnostic (a latched fault, a violated
-            // tick order, an armed run or a run under way): the hold ends and
-            // the pins are left to the tick's own write this pass.
+            // tick order, an armed run or a run under way): the hold ends, the
+            // driver is de-energized in this pass, and the pins are handed back.
             detail::h1aHoldActive() = false;
+            motorDriver::failSafe();
             refuseLine(ev::benchApplyRefusalName(verdict.refusal));
             h1aHoldLine(nowMs);
         }

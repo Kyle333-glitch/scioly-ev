@@ -226,6 +226,59 @@ void test_every_argument_error_has_its_own_name(void) {
     }
 }
 
+// --- M3: the exact token bound of every verb ----------------------------------
+
+// A no-argument verb accepts exactly `bench <verb>` and nothing more. The console
+// refuses a longer line from this table before dispatch, which is what stops
+// `bench arm <junk>` from arming and `bench stop <junk>` from stopping.
+void test_each_verb_has_its_exact_token_bound(void) {
+    TEST_ASSERT_EQUAL_UINT8(2U, ev::benchVerbMaximumTokenCount(ev::BenchVerb::Help));
+    TEST_ASSERT_EQUAL_UINT8(5U, ev::benchVerbMaximumTokenCount(ev::BenchVerb::Drive));
+    TEST_ASSERT_EQUAL_UINT8(3U, ev::benchVerbMaximumTokenCount(ev::BenchVerb::ResetCause));
+
+    const ev::BenchVerb noArgumentVerbs[] = {
+        ev::BenchVerb::Arm,   ev::BenchVerb::Stop,         ev::BenchVerb::Reset,
+        ev::BenchVerb::Health, ev::BenchVerb::DriveStatus, ev::BenchVerb::Ticks,
+        ev::BenchVerb::Inputs, ev::BenchVerb::Pins,        ev::BenchVerb::Wdt,
+    };
+    for (uint8_t index = 0U; index < 9U; ++index) {
+        TEST_ASSERT_EQUAL_UINT8(2U, ev::benchVerbMaximumTokenCount(noArgumentVerbs[index]));
+    }
+
+    // The two that are never dispatched as a bench command accept nothing.
+    TEST_ASSERT_EQUAL_UINT8(0U, ev::benchVerbMaximumTokenCount(ev::BenchVerb::None));
+    TEST_ASSERT_EQUAL_UINT8(0U, ev::benchVerbMaximumTokenCount(ev::BenchVerb::Unknown));
+}
+
+// The bound is judged against the actual split line: a verb whose tokens fit
+// inside the tokenizer's capacity still has a bound, and a well-formed line is
+// inside it.
+void test_the_bound_is_measured_against_the_split_line(void) {
+    static const char malformed[] = "bench arm trailing-argument";
+    const ev::BenchTokens tokens = split(malformed);
+    const ev::BenchVerb verb = ev::benchVerbFor(tokens);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Arm), static_cast<int>(verb));
+    TEST_ASSERT_FALSE(tokens.overflow);
+    TEST_ASSERT_EQUAL_UINT8(3U, tokens.count);
+    TEST_ASSERT_TRUE(tokens.count > ev::benchVerbMaximumTokenCount(verb));
+
+    static const char wellFormed[] = "bench arm";
+    const ev::BenchTokens ok = split(wellFormed);
+    TEST_ASSERT_TRUE(ok.count <= ev::benchVerbMaximumTokenCount(ev::benchVerbFor(ok)));
+}
+
+// The drive grammar's bound agrees with its own parser: an over-long drive line is
+// refused by both, and the parser still names the specific reason.
+void test_the_drive_bound_agrees_with_the_parser(void) {
+    static const char tooLong[] = "bench drive fwd 100 250 extra";
+    const ev::BenchTokens tokens = split(tooLong);
+    const ev::BenchVerb verb = ev::benchVerbFor(tokens);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Drive), static_cast<int>(verb));
+    TEST_ASSERT_TRUE(tokens.count > ev::benchVerbMaximumTokenCount(verb));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchArgumentError::ExtraTokens),
+                          static_cast<int>(ev::parseBenchDriveRequest(tokens).error));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_tokens_are_split_on_spaces_and_tabs_without_copying);
@@ -242,5 +295,8 @@ int main(int, char**) {
     RUN_TEST(test_each_malformed_drive_line_is_refused_with_its_own_reason);
     RUN_TEST(test_a_refused_parse_leaves_no_usable_request);
     RUN_TEST(test_every_argument_error_has_its_own_name);
+    RUN_TEST(test_each_verb_has_its_exact_token_bound);
+    RUN_TEST(test_the_bound_is_measured_against_the_split_line);
+    RUN_TEST(test_the_drive_bound_agrees_with_the_parser);
     return UNITY_END();
 }

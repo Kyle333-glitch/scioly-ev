@@ -7350,3 +7350,91 @@ unfinished deterministic software. Every remaining unknown is listed in
 P-H14, and P-H0W step 8), and the one question no stage in this pack owns - the
 arming gate - is restated there rather than silently decided. **READY FOR
 INDEPENDENT PRE-HARDWARE AUDITS. No hardware work was started.**
+
+## D51 / S14 - 2026-10-07 - The bench first-power surface is repaired against five audited safety defects, with a failing-before reproduction
+
+S14 (`POST-S13-REPAIR-ROADMAP.md` stage A) repairs the five bench-control defects
+registered as B1, B2, B3, B4 and B6 — **H1** (an ordinary `disarm`/`reset` left a
+bench drive applied and acknowledged it as a stop), **H2** (opposite-direction
+commands admitted with no stop evidence), **H3** (the 1000 ms stall window was
+unreachable inside the 500 ms command ceiling), **M1** (ownership could be released
+on a pass on which no writer wrote OFF: 18 ms of measured residual duty, unbounded
+under a stalled loop), and **M3** (malformed no-argument bench lines executed, and a
+repeated arm erased the per-arm command budget). Each is a demonstrated-defect fix
+under the freeze rule (`docs/PRE_HARDWARE_FREEZE.md` §6): reproduced against the
+pre-repair revision, repaired, and pinned by focused host regression tests.
+**B5/M2 (serial framing) is deliberately not in this stage** — the roadmap's
+stage-A findings bucket names it but its validation criteria do not, and the stage
+instruction deferred it; it remains "MUST fix before F" for diagnosis/log integrity.
+**The first powered bench test therefore stays BLOCKED.** No hardware action was
+taken: no upload, no serial port opened, no arming, no motor command.
+
+### Validation (final content; the whole list re-run after the last edit; nothing uploaded)
+
+- `pio test -e native` -> **643/643** cases in **35** suites, exit 0 (628 + 15 new, all registered).
+- `pio run -e nano_r4` -> SUCCESS, 0 warnings, RAM 6772/32768, Flash 74540/262144.
+- `pio run -e bench` -> SUCCESS, 0 warnings, RAM 6972/32768, Flash 81700/262144.
+- `pio run -e bench-watchdog` -> SUCCESS, 0 warnings, RAM 6964/32768, Flash 81036/262144.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -> untouched by this stage; inherits **119/119 OK** (no `tools/` file changed).
+- `git diff --check` -> clean, exit 0; all seven changed files 100 % CRLF.
+
+Byte-identity: the vehicle image's `firmware.elf` `sha256 1ce0187475512f09...` is
+**identical to the S13 freeze image**, so the repair is confined to the bench path.
+The bench images changed as intended (`bench` `55f82aee...`, previously `2bc3fe5d...`;
+`bench-watchdog` `063508af...`, previously `c78ef5b5...`). Deltas against S13: native
+**+15 cases**; RAM **+0 / +0 / +8**; Flash **+0 / +320 / +228**.
+
+### Reproduction and regression evidence
+
+`.agent-work/reviews/s14-2026-10-07/` holds a real-source mock-I/O probe that
+compiles the actual bench dispatch header plus the actual `src/VehicleRuntime.cpp`
+and `src/EncoderInput.cpp` against the mock Arduino headers, and mirrors the frozen
+pass order of `src/bench/BenchMain.cpp::loop()`. One identical 33-check program was
+run twice: against a pristine `git archive HEAD` extract (revision `370435d...`,
+pre-repair) it reports **19 failed checks and exits 1**; against the repaired
+working tree it reports **0 failed checks and exits 0**. `run_probe.sh` and
+`run_probe_pristine.sh` reproduce both runs; both compiler logs are empty. The
+fifteen new host cases (10 in `test_bench_drive`, 3 in `test_bench_command`, 2 in
+`test_bench_arbitration`) pin each repaired behavior; the one pre-existing case that
+had *endorsed* re-arming as a budget reset was corrected rather than left as the
+defect's acceptance test.
+
+### Corrections
+
+- `lib/evcore/src/BenchDrive.h`: `BenchCommandRefusal::DirectionChangeRequiresReset`
+  and one drive direction per arm (`armedDirection_`, cleared only by `reset()`);
+  `BenchArmRefusal` (`None`/`FaultLatched`/`NotDisarmed`) with `arm()` as a
+  Disarmed-only transition that no longer resets `commandsIssued_`;
+  `benchStallProtectionReachable()`.
+- `lib/evcore/src/BenchCommand.h`: `benchVerbMaximumTokenCount()` — the exact token
+  bound of every verb in one table.
+- `lib/evcore/src/MotorArbitration.h`: `benchRevokesForProductionCommand()` — exactly
+  `disarm` and `reset`.
+- `src/bench/BenchConsole.h`: `kStallWindowMs` 1000 -> 400 ms, the shipped numbers as
+  one `constexpr kDriveLimits` with `static_assert(benchStallProtectionReachable(...))`;
+  the revoke-before-forward intercept in `handleLine()` (`abort()` + `failSafe()` +
+  `driveLine()` in the same dispatch); the pre-dispatch token-bound refusal
+  (`TooManyTokens`); the named arm refusal; `failSafe()` on **every** ownership-release
+  pass in `beginPass()` (own expiry, stall latch, arbitration revocation, H1A hold
+  lapse); an additive `direction` field on the `BENCH,drive` line.
+
+### Deliberately unchanged
+
+- The powered duration ceiling (500 ms), the effort ceiling (150 permille), the
+  per-arm budget (8), the `disarm`/`reset` acknowledgments, every non-revoking
+  forwarded command, the production image, the telemetry schema, all calibration and
+  `VERIFIED_STATE.md` statuses, and `AGENTS.md`.
+- The two reversed alternatives: the powered duration was **not** lengthened to make
+  the old 1000 ms window reachable, and no settling time was invented — the direction
+  barrier is procedural (`reset()` + a fresh arm) and claims no standstill.
+
+### Result
+
+S14 PASS for the five findings. The first powered bench test is **not yet unblocked**:
+it still requires M2/B5 and the S17 paper corrections C3/C4, on top of physical
+block E. The two pre-existing orphaned tests
+(`test/test_near_zero_verifier/test_main.cpp:159`,
+`test/test_operator_response/test_main.cpp:354`) remain unregistered and are S15's
+P9. Two observations are recorded rather than silently decided: a refused arm is not
+counted in the refusal diagnostic counter, and the `BENCH,drive` line gained an
+additive field (`BENCH` is ignored by the analyzer, so no tooling change is needed).

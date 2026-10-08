@@ -146,6 +146,36 @@ void test_every_refusal_has_its_own_name(void) {
     TEST_ASSERT_EQUAL_STRING("None", ev::benchApplyRefusalName(ev::BenchApplyRefusal::None));
 }
 
+// --- H1: the production commands the bench must revoke its own output for -----
+
+// Exactly the two production commands that would otherwise leave a bench drive
+// applied (`disarm`, which the operator reads as a stop while the production
+// authority is already disarmed) or rewrite the state a live bench command is
+// running against (`reset`).
+void test_disarm_and_reset_are_the_commands_that_revoke_the_bench(void) {
+    TEST_ASSERT_TRUE(ev::benchRevokesForProductionCommand(ev::OperatorCommandId::Disarm));
+    TEST_ASSERT_TRUE(ev::benchRevokesForProductionCommand(ev::OperatorCommandId::Reset));
+}
+
+// Everything else is forwarded untouched. The bench is not a filter on the
+// operator interface, so a readout or an announcement must reach it unchanged.
+void test_every_other_production_command_is_forwarded_untouched(void) {
+    const ev::OperatorCommandId others[] = {
+        ev::OperatorCommandId::None,         ev::OperatorCommandId::Help,
+        ev::OperatorCommandId::Status,       ev::OperatorCommandId::Version,
+        ev::OperatorCommandId::Checks,       ev::OperatorCommandId::Boot,
+        ev::OperatorCommandId::ConfigShow,   ev::OperatorCommandId::ConfigCheck,
+        ev::OperatorCommandId::Plan,         ev::OperatorCommandId::ConfigSet,
+        ev::OperatorCommandId::ConfigClear,  ev::OperatorCommandId::Announce,
+        ev::OperatorCommandId::Arm,          ev::OperatorCommandId::TelemetryOn,
+        ev::OperatorCommandId::TelemetryOff, ev::OperatorCommandId::TelemetryStatus,
+        ev::OperatorCommandId::TelemetryRate,
+    };
+    for (uint8_t index = 0U; index < 17U; ++index) {
+        TEST_ASSERT_FALSE(ev::benchRevokesForProductionCommand(others[index]));
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_a_driving_instrument_with_an_idle_run_may_apply);
@@ -157,5 +187,7 @@ int main(int, char**) {
     RUN_TEST(test_the_reported_reason_is_the_most_severe_condition);
     RUN_TEST(test_may_apply_holds_exactly_when_the_refusal_is_none);
     RUN_TEST(test_every_refusal_has_its_own_name);
+    RUN_TEST(test_disarm_and_reset_are_the_commands_that_revoke_the_bench);
+    RUN_TEST(test_every_other_production_command_is_forwarded_untouched);
     return UNITY_END();
 }

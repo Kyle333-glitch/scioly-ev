@@ -25,7 +25,7 @@ namespace ev {
 //   build contains both; production contains neither the bench code nor any way to
 //   reach this type's output.
 //
-// The four properties that make it safe to have at all
+// The five properties that make it safe to have at all
 //
 //   1. **Bounded by construction.** Every command carries its own duration and
 //      expires on its own. A lost host, a dropped serial line, a frozen console or
@@ -42,6 +42,14 @@ namespace ev {
 //      is refused with a named reason and changes no state: effort, duration and
 //      direction all have hard ceilings, and a per-arm command budget means a
 //      stuck console cannot loop commands forever.
+//   5. **One drive direction per deliberate arm, and a stall watch that can
+//      actually fire.** The first accepted command in an arm fixes the physical
+//      direction (H2); the other direction is refused until `reset()` then
+//      `arm()`, because a timed command's own expiry is a software fact and not
+//      evidence that the drivetrain has stopped. The stall window is required to
+//      be shorter than the longest command (H3), or the expiry would always fire
+//      first and the latch would be unreachable while the motor is serviced
+//      normally.
 //
 // What it is not
 //
@@ -78,6 +86,17 @@ struct BenchDriveLimits {
     // How long the encoder may show no change while a command is driving before
     // the command is aborted as a latched fault, milliseconds. This is the fault
     // H3 provokes deliberately; it also catches a stalled or unwired encoder.
+    //
+    // **It must be shorter than `maxDurationMs` (H3).** The expiry and this watch
+    // are both evaluated by one `update()`; if the window is not shorter than the
+    // longest command, the bounded expiry always fires first and the latch is
+    // unreachable while the motor is serviced normally.
+    // `benchStallProtectionReachable()` below states the relationship, the shipped
+    // console asserts it at compile time, and the host suite pins it - so a future
+    // limit set cannot silently lose the protection. The window is a software
+    // budget, not a measured stopping behaviour: it bounds how long a stalled or
+    // unwired motor may be driven, and a false abort at a very slow healthy
+    // rotation is a safe-direction annoyance the protocol records.
     uint32_t stallWindowMs;
 
     // How many commands one arm may issue. A budget, not a rate: it bounds how
@@ -99,6 +118,13 @@ enum class BenchCommandRefusal : uint8_t {
     DurationZero = 7,          // a command with no duration is not bounded
     DurationAboveCeiling = 8,
     CommandBudgetExhausted = 9,
+    // The instrument has already been commanded in the other direction during
+    // this arm. A reversal needs evidence that the drivetrain has stopped, and
+    // this path has none: a timed command's own expiry says only that the
+    // software stopped asking (H2). `reset()` then `arm()` is the deliberate way
+    // to change direction; this refusal is a pacing restriction, not a claim that
+    // anything has stopped.
+    DirectionChangeRequiresReset = 10,
 };
 
 inline const char* benchCommandRefusalName(BenchCommandRefusal refusal) {
@@ -123,8 +149,45 @@ inline const char* benchCommandRefusalName(BenchCommandRefusal refusal) {
             return "DurationAboveCeiling";
         case BenchCommandRefusal::CommandBudgetExhausted:
             return "CommandBudgetExhausted";
+        case BenchCommandRefusal::DirectionChangeRequiresReset:
+            return "DirectionChangeRequiresReset";
     }
     return "?";
+}
+
+// Why a deliberate arm did not arm the instrument.
+enum class BenchArmRefusal : uint8_t {
+    None = 0,
+    // An abort is latched. The latch exists so that re-arming is a separate
+    // decision made after looking at why it stopped: `reset()` then `arm()`.
+    FaultLatched = 1,
+    // The instrument is already Armed or Driving. `arm()` is a transition from
+    // Disarmed only, so a repeated `bench arm` can neither reset the per-arm
+    // command budget nor cancel a command that is being applied (M3). Re-arming
+    // is `reset()` first.
+    NotDisarmed = 2,
+};
+
+inline const char* benchArmRefusalName(BenchArmRefusal refusal) {
+    switch (refusal) {
+        case BenchArmRefusal::None:
+            return "None";
+        case BenchArmRefusal::FaultLatched:
+            return "FaultLatched";
+        case BenchArmRefusal::NotDisarmed:
+            return "NotDisarmed";
+    }
+    return "?";
+}
+
+// True when a limit set's stall watch can trip inside one command at all (H3).
+//
+// The expiry and the stall watch are both evaluated by `update()`; a command
+// whose maximum duration is not longer than the stall window always expires
+// first, so the latch is unreachable while the motor is serviced normally. The
+// shipped limit set asserts this at compile time (`src/bench/BenchConsole.h`).
+constexpr bool benchStallProtectionReachable(const BenchDriveLimits& limits) {
+    return limits.stallWindowMs < limits.maxDurationMs;
 }
 
 // The bench instrument's state. Disarmed is the zero value: a default-constructed
@@ -227,20 +290,28 @@ public:
         expiresAtMs_ = 0U;
         commandsIssued_ = 0U;
         stallFaults_ = 0U;
+        armedDirection_ = MotorMode::Disabled;
     }
 
-    // The deliberate arm. Refused while an abort is latched: the point of the
-    // latch is that re-arming is a separate decision made after looking at why it
-    // stopped, which is what `reset()` then `arm()` are.
-    bool arm() {
+    // The deliberate arm: a transition from Disarmed only (M3).
+    //
+    // Refused while an abort is latched (re-arming is a separate decision made
+    // after looking at why it stopped), and refused while already Armed or
+    // Driving, so a repeated `bench arm` can neither reset the per-arm command
+    // budget nor replace a command that is being applied. The instrument is
+    // Disarmed only at construction and after `reset()`, both of which already
+    // zero the command count, so the budget cannot be erased by an arm.
+    BenchArmRefusal arm() {
         if (faultLatched_) {
-            return false;
+            return BenchArmRefusal::FaultLatched;
+        }
+        if (state_ != BenchDriveState::Disarmed) {
+            return BenchArmRefusal::NotDisarmed;
         }
         state_ = BenchDriveState::Armed;
         status_ = BenchDriveStatus::Armed;
         hasCommand_ = false;
-        commandsIssued_ = 0U;
-        return true;
+        return BenchArmRefusal::None;
     }
 
     // An abort: whatever is applied stops now and stays stopped until `reset()`.
@@ -285,11 +356,21 @@ public:
         if (commandsIssued_ >= limits_.maxCommandsPerArm) {
             return BenchCommandRefusal::CommandBudgetExhausted;
         }
+        // One drive direction per deliberate arm (H2). The first accepted command
+        // fixes it; a request for the other direction is refused until `reset()`
+        // then `arm()`. This is the conservative first-bring-up policy: the bench
+        // interface cannot establish standstill, so the only stop boundary a
+        // reversal may cross is a deliberate one. It does not claim the drivetrain
+        // has stopped - see `DirectionChangeRequiresReset` above.
+        if (armedDirection_ != MotorMode::Disabled && mode != armedDirection_) {
+            return BenchCommandRefusal::DirectionChangeRequiresReset;
+        }
 
         state_ = BenchDriveState::Driving;
         status_ = BenchDriveStatus::Driving;
         hasCommand_ = true;
         mode_ = mode;
+        armedDirection_ = mode;
         permille_ = magnitudePermille;
         expiresAtMs_ = nowMs + durationMs;
         ++commandsIssued_;
@@ -374,6 +455,11 @@ public:
     uint32_t commandsIssued() const { return commandsIssued_; }
     uint32_t stallFaults() const { return stallFaults_; }
 
+    // The drive direction this arm has fixed, or Disabled when no command has been
+    // accepted in it. Reported for diagnostics; it is the fact the
+    // one-direction-per-arm refusal is made from.
+    MotorMode armedDirection() const { return armedDirection_; }
+
     // Milliseconds until the command expires, or 0 when none is applied. Saturating
     // rather than wrapping, for the same reason the expiry test is signed.
     uint32_t remainingMs(uint32_t nowMs) const {
@@ -392,6 +478,7 @@ private:
     bool hasCommand_ = false;
     bool hasLastTicks_ = false;
     MotorMode mode_ = MotorMode::Disabled;
+    MotorMode armedDirection_ = MotorMode::Disabled;
     uint16_t permille_ = 0U;
     int32_t lastTicks_ = 0;
     uint32_t expiresAtMs_ = 0U;

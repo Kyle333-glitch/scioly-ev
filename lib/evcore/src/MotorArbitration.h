@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "SerialCommandParser.h"
+
 namespace ev {
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,30 @@ inline BenchApplyVerdict benchApplyVerdict(bool benchDriving, bool runArmed, boo
         return {false, BenchApplyRefusal::InstrumentNotDriving};
     }
     return {true, BenchApplyRefusal::None};
+}
+
+// Which production commands the bench must revoke its own output for before it
+// forwards them (H1).
+//
+// A bench session forwards every line that is not a bench verb to the production
+// operator interface, and two production commands must not run while a bench
+// drive is applied:
+//
+//   * `disarm` - the production authority is *already* disarmed during a bench
+//     drive (the arbitration refuses an armed run), so its `disarm()` changes
+//     nothing the bench can see while the console answers `OK,cmd=disarm`. An
+//     operator reading that acknowledgment as a stop is reading it correctly in
+//     every other mode and wrongly here;
+//   * `reset` - which rewrites the shared motion/encoder state a live bench
+//     command is running against.
+//
+// The console does not refuse them: it revokes its own output first (latched, and
+// de-energized in the same pass) and then forwards the command, so the operator's
+// stop is honoured and the production command runs against a driver that is
+// already de-energized. This predicate is the seam, extracted here so the host
+// suite can pin the exact command set.
+inline bool benchRevokesForProductionCommand(OperatorCommandId id) {
+    return id == OperatorCommandId::Disarm || id == OperatorCommandId::Reset;
 }
 
 }  // namespace ev
