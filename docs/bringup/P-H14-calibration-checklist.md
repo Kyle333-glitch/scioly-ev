@@ -12,10 +12,23 @@ the change is logged (`VERIFIED_STATE.md`, "How to promote a fact").
 
 **Rules that apply to every step**
 
-- Do not raise the bench effort ceiling (`kPlannedMaxEffortPermille`, currently
-  **300 permille**) to make a step easier. If a step needs more, stop and say so.
+- **Do not raise any ceiling to make a step pass.** The bench ceiling is
+  `benchConfig::kMaxEffortPermille` = **150 permille**, with
+  `kMaxCommandDurationMs` = **500 ms** and a per-arm budget of **8 commands**
+  (`src/bench/BenchConsole.h`); `kPlannedMaxEffortPermille` (300 permille) is the
+  *production* placeholder safety ceiling, **not** a bench ceiling. If a step
+  needs more than the bench ceiling, stop and say so (C4/C7).
 - One behavior at a time. Drivetrain unloaded (wheels off the floor) for
   steps 1-4; on the floor only from step 5, with a clear runout and a kill switch.
+- **The execution order is the bootstrap section of `docs/bringup/README.md`**
+  ("Calibration bootstrap order"): levels 0/1, then the conservative bootstrap
+  that makes the run path armable, then the first run-path tests. This checklist
+  is the per-step detail of that order; where the two disagree, the bootstrap
+  order is what makes the gates pass without fabricating a value (C2).
+- Repetition counts below are **floors**: the pre-registration records the
+  smallest effect the series must detect and derives the count from it
+  (`docs/bringup/README.md`); "five because the step said five" is not a
+  derivation (C18).
 - Record raw data, not conclusions: serial captures under `data/evidence/`, and
   the arithmetic you used. Keep rejected runs with their reason.
 - The acceptance rule is a pre-registered pass/fail, written before the runs.
@@ -51,17 +64,20 @@ pin.
 **Image:** `env:bench`. **Commands:** `bench health`, `bench pins`, then the H1A
 gate diagnostic if it is still built into the bench image.
 **Measure:** the levels on PH, EN, nSLEEP at boot and after `bench pins`.
-**Reps:** 5 boots.
+**Reps:** 5 boots (floor; derive the count in the pre-registration).
 **Acceptance:** the same de-energized combination every boot; no powered output.
 **Establishes:** #2 (driver truth table, de-energized direction).
 
 ## Step 2 - Command polarity (H1A/H3) - **unlocks everything below**
 
 **Setup:** drivetrain unloaded, wheels free, conservative effort only.
-**Image:** `env:bench`. **Commands:** `bench drive <permille>` at the lowest value
-that moves the motor, both signs, one direction at a time.
+**Image:** `env:bench`. **Commands:** `bench arm`, then `bench drive <fwd|rev>
+<permille> <ms>` at the lowest value that moves the motor, one direction at a
+time - the live grammar takes direction, permille and duration together, and B2
+refuses a direction change until `bench reset` + a fresh `bench arm` (S14). Record
+the exact triple per trial.
 **Measure:** which physical direction the wheel turns for a positive command.
-**Reps:** 5 each direction.
+**Reps:** 5 each direction (floor; derive the count in the pre-registration).
 **Acceptance:** one repeatable direction per sign, no stutter, no unexpected
 direction.
 **Calculation:** none - it is an observation.
@@ -73,91 +89,117 @@ direction.
 **Setup:** motor supply off, drivetrain unloaded.
 **Image:** `env:bench`. **Commands:** `bench ticks` (raw count readout) while
 turning the wheel by hand in each direction.
-**Measure:** raw tick count sign for hand-forward and hand-reverse travel.
-**Reps:** 10 forward, 10 reverse, at least one full revolution each.
-**Acceptance:** sign is consistent and opposite between directions; no double
-counts or missed counts (compare counted edges with revolutions x expected
-counts/turn).
+**Measure:** raw tick count sign for hand-forward and hand-reverse travel, and
+the ticks-per-revolution count.
+**Reps:** 10 forward, 10 reverse, at least one full revolution each (floor; derive
+the count in the pre-registration).
+**Acceptance:** sign is consistent and opposite between directions; the
+ticks-per-revolution count is **repeatable run-to-run within the pre-registered
+spread** (P-H2's rule - the expected count is what this measurement establishes,
+so comparing against a predicted number would be circular; C12).
 **Establishes:** `kPlannedPositiveTicksDirection` (then `TickPolarityAgrees`), and
 `VERIFIED_STATE.md` #4, #5.
 
 ## Step 4 - Rollout (distance per tick) (H4)
 
-**Setup:** on the floor, straight line, no bottle, loaded drivetrain.
-**Image:** `env:bench` (datalog on: `telemetry on`).
-**Commands:** drive a fixed distance at low effort; or push the vehicle by hand
-over a measured distance with the encoder counting.
-**Measure:** physically measured travel (tape, >= 2 m, mm resolution) and the tick
-delta from the log.
-**Reps:** 5 in each direction.
-**Calculation:** `distancePerEncoderTickM = travelM / ticks` per run; take the
-mean and report the spread.
-**Acceptance:** spread within the pre-registered tolerance and the mean within 1%
-of the tape measurement; both directions agree.
+**Setup:** on the floor, straight line, no bottle.
+**Image:** `env:bench` (raw tick readout B3; telemetry if it helps the record).
+**Commands:** part A - push the vehicle by hand over a measured span with the
+encoder counting (motor de-energized). Part B - bounded `bench drive` commands,
+still between **ground marks**. B2 takes effort and duration only, never a
+distance: the span is defined by the marks (C12).
+**Measure:** physically measured travel between line crossings (tape, >= 2 m,
+mm resolution) and the raw tick delta over the same mark-to-mark span.
+**Reps:** 5 in each direction (floor; derive the count in the pre-registration).
+**Calculation:** `distancePerEncoderTickM = travelM / ticks` per run, per part;
+take the Part A mean and report the spread; subtract the deadband and coast parts
+from Part B before reading its residual.
+**Acceptance:** run-to-run spread within the pre-registered tolerance and both
+directions inside the pre-registered band - the tape is the *input*, so "the mean
+is within 1% of the tape" is not a criterion (C12). The promoted value is the
+**Part A mean**; Part B never enters the scale - its residual is the #10 slip
+record (C8).
 **Establishes:** `kPlannedDistancePerEncoderTickM` (`CalibrationMeasured` can now
-pass), #6.
+pass), #6, and the first #10 slip evidence.
 
 ## Step 5 - Minimum reliable cruise and velocity ceilings (H5)
 
 **Setup:** on the floor, straight line, runout clear, telemetry on, one direction
 per series.
-**Image:** `env:bench` first (bounded effort), `env:nano_r4` once step 4 is in.
-**Commands:** `telemetry on`, `telemetry rate 50`, then a bounded drive at a series
-of commanded speeds from the lowest to the highest admissible.
-**Measure:** the commanded speed, the measured speed (`vel_mps`), the tick delta
-and the travel time; the lowest commanded speed that produced steady travel (no
-stall, no stop-start).
-**Reps:** 5 per speed point.
-**Calculation:** the lowest speed with zero stalls is `kPlannedMinimumCruiseMps`.
-The highest speed at which the vehicle still tracked its command without
-saturation is the ceiling; keep the configured ceilings at or below it.
-**Acceptance:** a clean monotone speed series with the stall point identified.
+**Image:** `env:bench` (bounded effort; the run path cannot arm yet).
+**Commands:** `telemetry on`, `telemetry rate 50`, then a series of bounded bench
+**efforts** (typed `bench drive <fwd|rev> <permille> <ms>` triples), from the
+lowest to the highest admissible. This is H5's effort series: B2 takes effort, not
+commanded speed, so the speeds below are *measured* steady-state velocities, and
+"the vehicle tracked its command" can only mean "it travelled steadily at the
+recorded effort" here (C12).
+**Measure:** the effort triple, the measured steady-state speed (`vel_mps` with
+`vel_ok`), the independent tick-count velocity, the tick delta and the travel
+time; the lowest effort whose steady travel showed no stall or stop-start.
+**Reps:** 5 per effort point (floor; derive the count in the pre-registration).
+**Calculation:** the lowest steady speed with zero stalls is
+`kPlannedMinimumCruiseMps`. Set the configured ceilings at or below the highest
+steady speed the series actually recorded, reduced by the pre-registered margin,
+and record them as **conservative bootstrap** values (evidence: this series) to
+be confirmed once the run path tracks (P-H7 Part L) - a "highest speed the loop
+can hold" claim needs the loop, and Step 7+ carries it (C12).
+**Acceptance:** a clean monotone effort-to-speed series with the stall point
+identified and the spread reported.
 **Establishes:** `kPlannedMinimumCruiseMps`, `kPlannedCruiseMps`,
-`kPlannedMaxForwardVelocityMps`, `kPlannedMaxReverseVelocityMps` (then
-`SafetyLimitsValid` and `ProfileLimitsValid`).
+`kPlannedMaxForwardVelocityMps`, `kPlannedMaxReverseVelocityMps` (bootstrap
+values; then `SafetyLimitsValid` and `ProfileLimitsValid`).
 
-## Step 6 - Regulator gains (FF/P/I) (H6)
+## Step 6 - Regulator gains (FF/P/I) (H6) - pointer
 
-**Setup:** as step 5, several speed steps up and down.
-**Image:** `env:bench`/`env:nano_r4`.
-**Measure:** the per-step response: rise time, overshoot, steady-state error,
-effort (`effort_permille`), saturation flags.
-**Reps:** 5 per step.
-**Calculation:** feed-forward from the effort that holds a steady speed; P from the
-error-vs-effort relationship; I small enough not to oscillate. Keep
-`kPlannedMaxIntegralPermille` and `kPlannedMaxIntegrationStepS` as the anti-windup
-bounds they are.
-**Acceptance:** each step settles inside the pre-registered band without sustained
-oscillation.
+**Run `P-H6-ff-pi-tuning.md` (as amended, C1/C10).** Summary: the feed-forward is
+measured from H5's open-loop effort-to-speed relation; P/I are a **conservative
+bootstrap** derived from it under a pre-registered rule and promoted with that
+citation, because no bench command runs the regulator; the closed-loop criterion
+and the windup characterization (`kPlannedMaxIntegralPermille`,
+`kPlannedMaxIntegrationStepS`, the pinned-effort duration after sign change) are
+executed in **P-H7 Part L**, and the gains are re-promoted from those loaded
+records. P-H6 is authoritative for the method; this checklist does not restate a
+weaker variant (C10).
 **Establishes:** `kPlannedFeedForwardPermillePerMps`,
 `kPlannedProportionalPermillePerMps`, `kPlannedIntegralPermillePerMpsSecond`
-(then `ControllerConfigValid`); #8.
+(feed-forward + bootstrap; refined at P-H7 Part L) (then `ControllerConfigValid`);
+#8.
 
-## Step 7 - Acceleration, and braking per direction (H7 part 1)
+## Step 7 - Acceleration, and braking per direction (H7 part 1) - pointer
 
+**Run `P-H7-distance-braking-reversal.md` Part B. That protocol is authoritative
+for the brake-offset measurement** (the command instant is the last non-zero
+`vel_cmd_mps` tick, the speed is `vel_mps` at that tick, the residual is
+ground-truth rest minus the planned endpoint; C9). The one-line formula this
+checklist used to give is superseded: do not compute `brakeOffsetM` independently
+here - two procedures would produce two irreconcilable numbers.
 **Setup:** on the floor, straight line, runout >= 2 m past the stop point, one
 direction per series.
-**Measure:** for each commanded deceleration/stop: entry speed, distance travelled
-after the stop command, time to near zero.
-**Reps:** 10 per direction and speed point.
-**Calculation:** `brakeOffsetM = mean(coast + brake distance after the stop
-command)` per direction; acceleration limit from the measured ramp-up.
+**Measure (per P-H7 Part B):** entry speed, ground-truth distance after the
+command instant, time to near zero, per direction.
+**Reps:** 10 per direction and speed point (floor; derive the count in the
+pre-registration).
 **Acceptance:** the per-direction spread is reported, not just the mean; stops
-completed without a fault.
+completed without a fault; both offsets promoted from their own direction's
+series.
 **Establishes:** `kPlannedForwardBrakeOffsetM`, `kPlannedReverseBrakeOffsetM`,
 `kPlannedAccelMps2`, `kPlannedDecelMps2`; #9.
 
 ## Step 8 - Near-zero verification (reversal gate) (H7 part 2)
 
-**Setup:** as step 7.
+**Setup:** as step 7; bounded bench stop trials through B2 for the physical
+bootstrap, the real run path for the verification.
 **Measure:** at several entry speeds, the speed and time at which the vehicle is
 genuinely stopped (independent observation: the wheels are not turning), and what
-the firmware reported (`vel_mps`, phase, `authz`).
-**Reps:** 10.
+the firmware reported (`vel_mps`, phase, `authz`). The physical settle quantities
+are measurable off-path with B2 and a stopwatch; the firmware's own stop
+verification runs only on the run path.
+**Reps:** 10 (floor; derive the count in the pre-registration).
 **Calculation:** the threshold is the largest measured speed that is still "no
 travel" (below it the vehicle does not move a measurable distance in the dwell);
 the dwell is long enough to cover the longest observed settle at the highest entry
-speed.
+speed. The bootstrap values come from those bounded bench stop trials through
+B2; the first run-path series confirms or refines them.
 **Acceptance:** the reversal never starts before the vehicle is physically stopped,
 and never times out on a legal stop.
 **Establishes:** `kPlannedReversalStopThresholdMps`, `kPlannedReversalStopDwellS`,
@@ -166,24 +208,43 @@ and never times out on a legal stop.
 
 ## Step 9 - Final stop and stop-evidence limits
 
-**Setup:** as step 8, full stop at a target.
+**Setup:** as step 8, full stop at a target. The bootstrap values come from the
+bounded bench stop trials through B2 and the arithmetic limit relationships; the
+full-stop behaviour itself is confirmed on the run path.
 **Measure:** the same as step 8 for the final stop, plus the age of the
 window-derived speed fact the packet pairs with the claim (`composeStopEvidence`'s
 `speedMaxAgeMs` against the dwell).
-**Reps:** 10.
+**Reps:** 10 (floor; derive the count in the pre-registration).
 **Calculation:** the final-stop threshold from the measured stop; the evidence age
 limit must span the dwell (`stopEvidenceLimitSpansDwell()` refuses one that does
 not). The dwell itself is rule 8.p and is not tunable.
 **Acceptance:** `FinalBrake` reaches `Done` with no `PhaseTimeout`, and the
 `Complete Stop` is held for the whole rule interval.
-**Establishes:** `kStopEvidenceMaxAgeMs`, `kPlannedFinalStopTimeoutS`,
-`StopEvidenceSpansFinalStop`; confirms the rule dwell.
+**Establishes:** `kPlannedFinalStopTimeoutS` (promoted); the
+`kStopEvidenceMaxAgeMs` relationship, adjusted only if the recorded dwell
+requires it - it is a time limit checked against the dwell, never a
+provenance-marked value; `StopEvidenceSpansFinalStop`; confirms the rule dwell.
 
 ## Step 10 - Phase bounds and the final approach (H7 part 3)
 
-**Setup:** a full announced run, no bottle first.
+**Setup:** a full announced run, no bottle first. The plan's two dependencies
+are the conservative bootstraps from `P-H7` Part B's braking series plus the
+placement range plus the margin (see the README bootstrap section); **no promotion
+touching `runExecutionDependencies()` before the S16 arming-gate check exists or
+is explicitly declined** (the deadline sentence in Step 11).
 **Measure:** the time each phase actually takes, and the largest legal excursion.
-**Reps:** 5 per configuration.
+**Reps:** 5 per configuration (floor; derive the count in the pre-registration).
+**Bootstrap (the first run cannot wait for its own measurement, C2).** The first
+announced run cannot exist while its own timeouts are placeholders, so the initial
+values are set conservatively and promoted as **Measured bootstraps** citing
+their evidence: each timeout = the longest bounded trial actually recorded for
+that phase (B2 bounded-trial duration plus the pre-registered margin);
+`kPlannedFinalApproachDistanceM` from the measured stopping distance at the
+bootstrap ceiling speed; `kPlannedMaxRunDurationS` from the longest bounded trial
+run plus the same margin. The run path is then armed and this step **refines each
+value from the first run-path series** through the normal promotion procedure,
+superseding the bootstrap. No gate is weakened, and no value is promoted without
+the record it cites.
 **Calculation:** each timeout is the measured worst case plus the pre-registered
 margin; the final-approach distance is the distance at which the run can still stop
 inside the reversing leg's measured stopping distance; `kPlannedMaxRunDurationS` is
@@ -253,6 +314,16 @@ can complete a forward phase until then; the three ceilings keep
 `PhaseConfigValid` false until they are measured, so no run may be armed on
 placeholders either. Only then `VERIFIED_STATE.md` #11.
 
+**Promotion deadline (F3/S16).** **No promotion touching
+`runExecutionDependencies()` before the arming-gate check exists or is explicitly
+declined in `DEVELOPMENT_LOG.md`.** Option D in `ARMING-PLAN-GATE-REVIEW.md` is
+the recommendation - announce reports the plan status and its forward stop, and a
+named plan-usability check gates arming; **S16 owns that implementation, and
+nothing in this checklist implements it.** Until it lands or is declined, a green
+`checks` does not imply a usable plan: before any bootstrap run's trigger, confirm
+`plan` reads `Planned` (a refused plan otherwise burns the 20 s approach bound on
+`PhaseTimeout` with no motion).
+
 ## Step 12 - Plan verification (Target Time)
 
 **Setup:** a marked course for one tournament level, the bottle in place,
@@ -267,7 +338,7 @@ sample's own timeline as `internal_run_time_s = dwell_start_ms - run_start_ms`
 Complete Stop interval and no longer ends at the `Done` tick, so it is not the
 official number); the diagnostic cruise/delay from the `OK,cmd=announce` line; and
 the final position error.
-**Reps:** 5 per announced time.
+**Reps:** 5 per announced time (floor; derive the count in the pre-registration).
 **Calculation:** the realised run time minus the announced Target Time (mean and
 spread); the same for the final position.
 **Acceptance:** pre-registered: each announced time produces a distinct planned
@@ -290,8 +361,11 @@ evidence cited.
 
 ## Step 13 - Repeatability (H10)
 
-**Setup:** the frozen competition configuration.
-**Commands:** the competition sequence, 20+ times.
+**Setup:** the frozen competition configuration. **Pre-gate (C11): P-H0W Step 8
+(loaded watchdog/dwell-gap re-validation) must be re-run and recorded first** -
+freezing a competition build requires it.
+**Commands:** the competition sequence, 20+ times (floor; derive the count in the
+pre-registration).
 **Measure:** distance error, time error, fault count, lateral deviation.
 **Acceptance:** the pre-registered median/percentile error, with every outlier
 kept and explained.
@@ -306,15 +380,24 @@ kept and explained.
 | 0 | pin map (wiring fact) |
 | 2 | `kPlannedPositiveCommandDirection`, `kPlannedPositiveEffortMode` |
 | 3 | `kPlannedPositiveTicksDirection` |
-| 4 | `kPlannedDistancePerEncoderTickM` |
-| 5 | `kPlannedMinimumCruiseMps`, `kPlannedCruiseMps`, both velocity ceilings |
-| 6 | `kPlannedFeedForwardPermillePerMps`, `kPlannedProportionalPermillePerMps`, `kPlannedIntegralPermillePerMpsSecond` |
-| 7 | `kPlannedForwardBrakeOffsetM`, `kPlannedReverseBrakeOffsetM`, `kPlannedAccelMps2`, `kPlannedDecelMps2` |
-| 8 | `kPlannedReversalStopThresholdMps`, `kPlannedReversalStopDwellS`, `kPlannedReversalTimeoutS` |
-| 9 | `kStopEvidenceMaxAgeMs`, `kPlannedFinalStopTimeoutS` |
-| 10 | the six phase timeouts, `kPlannedFinalApproachDistanceM`, `kPlannedMaxRunDurationS` |
-| 11 | `kPlannedBottleContactLeadM`, `kPlannedBottleCaptureAdvanceM`, `kPlannedBottlePushMarginM` |
+| 4 | `kPlannedDistancePerEncoderTickM` (the Part A mean; Part B is the #10 slip record) |
+| 5 | `kPlannedMinimumCruiseMps`, `kPlannedCruiseMps`, both velocity ceilings (bootstrap values; confirmed at P-H7 Part L) |
+| 6 | `kPlannedFeedForwardPermillePerMps` (open-loop, H5), `kPlannedProportionalPermillePerMps`, `kPlannedIntegralPermillePerMpsSecond` (conservative bootstrap; refined at P-H7 Part L) |
+| 7 | `kPlannedForwardBrakeOffsetM`, `kPlannedReverseBrakeOffsetM`, `kPlannedAccelMps2`, `kPlannedDecelMps2` (P-H7 Part B is authoritative, C9) |
+| 8 | `kPlannedReversalStopThresholdMps`, `kPlannedReversalStopDwellS`, `kPlannedReversalTimeoutS` (B2 bootstrap; confirmed on the run path) |
+| 9 | `kPlannedFinalStopTimeoutS` (bootstrap from bounded bench stop trials through B2; confirmed on the run path); the `kStopEvidenceMaxAgeMs` relationship spans the recorded dwell |
+| 10 | the six phase timeouts, `kPlannedFinalApproachDistanceM`, `kPlannedMaxRunDurationS` (bootstrap first, then refined from the first run-path series) |
+| 11 | `kPlannedBottleContactLeadM`, `kPlannedBottleCaptureAdvanceM`, `kPlannedBottlePushMarginM`, plus the five plan/policy dependencies: `kPlannedContactWindowToleranceM`, `kPlannedForwardStopMarginBeyondBottleLineM`, and the three strategy ceilings `kPlannedApproachCeilingMps`/`kPlannedCaptureCeilingMps`/`kPlannedPushCeilingMps` (bootstrap values superseded here; C2/F3) |
 | 12-13 | nothing new: these verify the behavior the values produce |
+
+**Before Step 13 (the freeze):** `P-H0W` Step 8 (loaded watchdog/dwell-gap
+re-validation) must be re-run and recorded under the loaded run path - it is
+scheduled in the README order table after H7 and is a hard pre-gate for freezing
+a competition build (C11).
+
+**Before any promotion touching `runExecutionDependencies()`:** the S16
+arming-gate check must exist or be explicitly declined (Step 11's deadline
+sentence; `ARMING-PLAN-GATE-REVIEW.md`, Option D).
 
 `kPlannedMaxEffortPermille` is deliberately absent: it is a **safety ceiling**, not
 a calibration value. Raise it only by a separate, deliberate decision - never to

@@ -24,10 +24,14 @@ direction, speed or distance result downstream means anything.
   A0's table.
 - H2 passed: the forward-direction convention is documented and the hand-driven
   tick sign is recorded.
-- H1B passed, so the driver's fault output has a **measured** polarity and
-  `bench inputs`' `nfault_low` is a level anyone can read. If H1B was skipped or
-  inconclusive, stop: a powered test with an uninterpreted fault line is the test
-  this protocol's Step 0 exists to make safe.
+- **H1B Parts 1, 2 and 4 passed; Part 3 is recorded N/A per D32.** The external
+  nFAULT line is not installed on the assembled vehicle (`kMotorFaultBar` is
+  `kNoPin`, capability `NotInstalled`), so there is no polarity to measure and
+  nothing to interpret - a literal "wait for a measured nFAULT polarity" would
+  deadlock this protocol forever. If Parts 1/2/4 were skipped or inconclusive,
+  stop. The stop authority for this protocol is the supply's **current limit**,
+  the physical **kill switch** and B2's bounded expiry/abort demonstrated in
+  Step 0; the paragraph below states the no-fault-stop reality.
 - **The firmware is not watching an `nFAULT` line, and on this vehicle there is
   no line to watch.** The external DRV8874 nFAULT signal is **not installed**
   (`kPlannedDriverFaultCapability` is `NotInstalled`), so `ev::observedDriverFault()`

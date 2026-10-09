@@ -19,6 +19,9 @@ analysis tooling, which is used here for the first time on a real capture.
   the build between runs - a change resets the series.
 - Tape and stopwatch (or video with a visible clock), telemetry capture per run,
   kill switch, second person.
+- **USB tether discipline (moving runs).** Strain-relieve the capture cable and
+  record the arrangement; before a run enters the distribution, check the
+  capture's validity (`drop_s`/`drop_e`, `dt_ms` distribution) (C15).
 - (Pre-register) in `data/prereg/`: the acceptance criteria, the number of runs,
   the **held-out** target and/or level (chosen before the primary series is
   analysed), the run-time measurement method, and the exclusion rule.

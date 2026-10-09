@@ -5,10 +5,12 @@
 vocabulary and latching).
 **Order:** after H3 and H7.
 **Answers:** does each fault path stop motion, name the fault, and stay latched
-until deliberately cleared; what does the firmware currently do about electrical
-faults it does not yet map; and what happens when the encoder is **lost or stops
-changing while the motor is still driven** - the case that can make the zero-speed
-gate report a stop the vehicle is not making.
+until deliberately cleared **in a live session** (the latch is RAM state; a reboot
+clears it while booting de-energized and unarmed - see the note below); what does
+the firmware currently do about electrical faults it does not yet map; and what
+happens when the encoder is **lost or stops changing while the motor is still
+driven** - the case that can make the zero-speed gate report a stop the vehicle is
+not making.
 **Bench instrumentation required:** none beyond the shipped interface for the
 state-machine faults; a current-limited supply and a means of briefly loading the
 driver for the electrical faults. **The driver-fault part has no subject on the
@@ -124,12 +126,17 @@ Exactly one injected fault at a time, from the pre-registered list.
 
 ## Measurements and logs
 
-Per trial, record: the exact command sequence; the named refusal or fault (verbatim); the
-phase timeline from `EVE3` (schema 3); whether the motor command became de-energized, and
-how long after the fault; whether a power cycle cleared the fault (it must not
-clear a **latched** fault without a deliberate `reset`); whether `reset` cleared
-it; and the vehicle's physical state (stationary, or still moving - the latter is
-a hard finding).
+Per trial, record: the exact command sequence; the named refusal or fault
+(verbatim); the phase timeline from `EVE3` (schema 3); whether the motor command
+became de-energized, and how long after the fault; whether `reset` cleared the
+latch; and the vehicle's physical state (stationary, or still moving - the latter
+is a hard finding). **The latch is RAM state and a reboot deliberately forgets it
+while staying de-energized and unarmed** (`AGENTS.md` section 5: a reset never
+resumes motion), so a power cycle's effect on the latch is *not* a criterion. What
+is recorded about a reboot is the safe direction of that volatility: the motor
+comes up off, no command resumes, and a fresh deliberate `reset` (plus a fresh
+`bench arm` for a bench command) is required. The persistent diagnosis is the
+preserved capture, not the latch (C7).
 
 ## Repetitions
 
@@ -146,14 +153,14 @@ unresolved.
 ## Acceptance / decision rule
 
 Pass requires: every latched fault stops motion; each named fault matches its
-injection; no fault clears silently (nothing but a deliberate `reset` clears a
-latched fault, and a reboot does not resume a command); the time from fault to
-de-energize is recorded. Electrical and sensing faults are recorded for what the
-firmware actually does; where enforcement does not exist, the protocol reports
-"enforcement pending", which is an honest outcome, not a failure of the test -
-**except** for a sensing fault that leaves the vehicle moving while the firmware
-believes it has stopped, which is a hard finding and a block on H10 until the
-gate is guarded.
+injection; a fault never keeps the motor energized (a reboot clears the RAM latch
+but boots de-energized, unarmed, and resumes nothing - `AGENTS.md` section 5);
+the time from fault to de-energize is recorded. Electrical and sensing faults are
+recorded for what the firmware actually does; where enforcement does not exist,
+the protocol reports "enforcement pending", which is an honest outcome, not a
+failure of the test - **except** for a sensing fault that leaves the vehicle
+moving while the firmware believes it has stopped, which is a hard finding and a
+block on H10 until the gate is guarded.
 
 ## If it passes
 

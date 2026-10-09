@@ -18,6 +18,12 @@ level. Do not "tune" a rule value to make a run look better.
 ## Prerequisites
 
 - H7 passed, with the vehicle stopping at a target and reversing correctly.
+  Some of this protocol's dependencies already exist as **conservative
+  bootstraps** established before the first run (the three strategy ceilings and
+  the plan's two dependencies, from the H5/H7-B evidence plus pre-registered
+  margins - see `docs/bringup/README.md`, "Calibration bootstrap order"). H8 is
+  where they are re-established as bottle-evidence values and the bootstrap
+  values are superseded.
 - The bottle mechanism fitted, mechanically safe (no sharp edges or stored
   energy that can release unexpectedly), and confirmed by hand before powering.
 - The official bottle, identified by its making/type **and condition** (fill level
@@ -32,6 +38,9 @@ level. Do not "tune" a rule value to make a run look better.
   to see the contact. The firmware's `pos_m` is a belief; #11 needs an observation.
 - Kill switch and clear runout; a second person able to stop the vehicle if the
   operator is watching the bottle.
+- **USB tether discipline (moving runs).** Strain-relieve the capture cable as in
+  P-H7 and record the arrangement; before a run enters the success fraction,
+  check the capture's validity (`drop_s`/`drop_e`, `dt_ms` distribution) (C15).
 - (Pre-register) in `data/prereg/`: the **success fraction** that counts as
   passing (for example "at least 8 of 10 runs finish with the bottle past the line"),
   and the reasoning behind it - the allowed number of failures must come from what
@@ -134,7 +143,14 @@ parameters are chosen from the data.
   `pushCeilingMps`, three `Provisional` placeholders today): they are
   `Measured`-only, so while they are placeholders the run policy is refused and no
   run may be armed, and each ceiling may only slow its own phase - record the
-  speed used and the evidence that the phase still succeeds at it. If the believed
+  speed used and the evidence that the phase still succeeds at it. Two
+  attribution rules apply (C17): (a) the **placement-error bound** must be
+  recorded per series (tape resolution plus hand placement) and shown **smaller
+  than** the reported contact window, so the window is a vehicle property and not
+  the placement procedure - if it is not, add a placement-repeatability sub-check
+  before the window is reported; (b) each ceiling is set at least the
+  pre-registered **ceiling margin** below the fastest speed at which its phase was
+  still shown to succeed, and the margin used is recorded with it. If the believed
   progression and the observed contact disagree systematically, fix the estimator
   or the mechanism - do not move the threshold that hides it.
 - Log in `DEVELOPMENT_LOG.md`.

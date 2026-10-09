@@ -43,7 +43,10 @@ firmware image, motor temperature (let it return to ambient between runs).
   one at a time, at one fixed command level: the point is to record what a
   candidate value does to the `vel_ok` windows and the steady-state lag, so the
   value chosen later is chosen from evidence. These are policy values, not
-  measurements - nothing measured here becomes a `Measured` fact.
+  measurements - nothing measured here becomes a `Measured` fact. They are
+  **compile-time constants**: each candidate is a rebuild and a reflash, so record
+  the flashed image identity (`VERSION,fw=` and `git rev-parse HEAD`) with each
+  candidate's series, or the series is unattributable (C16).
 
 ## Measurements and logs
 
@@ -74,10 +77,14 @@ is the thing under test:
   wheel mark) converted with H4's measured distance per revolution - a slower but
   fully independent check of the powered scale, and the one that does not depend on
   the tick count that `vel_mps` is also built from;
-- the **zero-speed-claim latency**: after the command is removed, the interval until
-  the estimator reports a usable velocity again with a near-zero value, and whether
-  the near-zero verifier's dwell dominates that interval. Record it per level; a
-  stop is only as trustworthy as this latency.
+- the **usable-estimate recovery latency**: after the command is removed, the
+  interval until `vel_ok=1` again with a near-zero value, and the interval the
+  near-zero dwell occupies inside it. Record it per level. The firmware's
+  *internal* explicit zero-speed claim (`zeroSpeedClaimed`, a policy statement
+  about observed non-change) is **not a distinct wire flag**, so a capture cannot
+  time the claim itself; what a bench capture can time is this recovery, and the
+  claim's adequacy for a real stop is bounded physically in H7. A stop is only as
+  trustworthy as this latency.
 
 Record the raw capture filename with every derived number.
 
@@ -110,14 +117,17 @@ to fix the cause rather than to tune against unstable data.
   and informs the #5 (powered signal quality) and estimator-window questions.
 - Record the trace as a named artifact (raw capture plus derived table) in
   `DEVELOPMENT_LOG.md`, marked unloaded, including the independent tick-count
-  velocity and the zero-speed-claim latency.
+  velocity and the usable-estimate recovery latency (the internal
+  `zeroSpeedClaimed` field is not on the wire; do not report a "claim" time the
+  capture cannot show).
 - If the estimator's `vel_ok` windows are longer than a policy value expects
   (`kEstimatorWindowMs`, `kEstimatorNoEdgeTimeoutMs`), record that as a finding,
   together with which candidate value produced which window; those are policy
   values, not measurements.
-- Record the **unloaded** zero-speed-claim latency as the number a loaded stop has
-  to be compared against: the loaded latency is measured in H7, and a zero-speed
-  gate is only trusted where that measurement exists.
+- Record the **unloaded** usable-estimate recovery latency as the number a loaded
+  stop has to be compared against: the loaded latency is measured in H7, and a
+  zero-speed gate is only trusted where that measurement exists. (The claim
+  itself is internal - see the note above.)
 
 ## If it fails or is inconclusive
 

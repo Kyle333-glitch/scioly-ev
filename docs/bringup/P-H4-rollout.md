@@ -84,8 +84,15 @@ Part B (powered):
    start line to the mark crossing the finish line. Record the interval covered, so
    the definition of D matches between A and B.
 4. Record the interval from the command to the **first tick change** (enable plus
-   deadband), separately from the rolling count. Part A has no such interval; it is
-   a part-B bias, and it is measured rather than assumed to be zero.
+   deadband), separately from the rolling count, and record which condition each
+   trial used: a command issued **immediately after wake** or one issued **while
+   the driver is already awake**. This interval is the named owner of the driver's
+   wake (`tSLEEP`) component (C14): the wake-versus-awake difference is recorded
+   here as part of the deadband record, so no other protocol has to carry it. The
+   PH-before-EN write order is an ordering, not a timed guarantee, and this
+   protocol's command-to-first-motion interval is where its residual is measured.
+   Part A has no such interval; it is a part-B bias, and it is measured rather
+   than assumed to be zero.
 
 For both parts record `countedEdges`/`ignoredUpdates` so a noisy run is
 identifiable rather than silently averaged in.
@@ -143,8 +150,12 @@ coast biases the protocol separates, or the criterion cannot tell those from sli
 record the reasoning when it is set. Once accepted:
 
 - set `kPlannedDistancePerEncoderTickM` in `src/VehicleConfig.h` to the measured
-  mean, with `ValueSource::Measured`, and record the raw D/N pairs with it. Do
-  not round to a suspiciously neat value.
+  mean **of Part A (the geometric, unpowered series)**, with
+  `ValueSource::Measured`, and record the raw D/N pairs with it. **Part B never
+  enters the scale**: its residual, after the deadband and coast parts are
+  subtracted, is the #10 slip evidence (C8). Averaging A with B would launder
+  slip into the scale, which is exactly what the A/B separation exists to
+  prevent. Do not round to a suspiciously neat value.
 - if the two directions differ systematically, compare it against part C's
   measured hysteresis before calling it backlash, then record it. Do not average
   across a systematic difference.

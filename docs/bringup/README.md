@@ -59,7 +59,8 @@ fact and a physical fact have different evidence and must not be confused.
 
 Run them in order. Each protocol states which earlier protocols must have passed.
 The series extends the program's own names (`H0`, `H0W`, `H1A`); the rest follow
-the same pattern.
+the same pattern. The **calibration bootstrap order** below is the order that
+actually makes the run path armable.
 
 | # | Protocol | Primary class | Blocked by |
 |---|----------|---------------|------------|
@@ -73,9 +74,69 @@ the same pattern.
 | H5 | [Low-speed velocity trace](P-H5-velocity-trace.md) | P | H2, H3, H4 |
 | H6 | [Feed-forward and PI tuning](P-H6-ff-pi-tuning.md) | P | H5 |
 | H7 | [Distance, braking and reversal](P-H7-distance-braking-reversal.md) | P | H4, H6 |
+| H0W-S8 | [Loaded-run watchdog / dwell-gap re-validation (owed)](P-H0W-watchdog-qualification.md) | S | H7 (a loaded run path); required before the competition freeze |
 | H8 | [Bottle integration](P-H8-bottle-integration.md) | P | H7 |
 | H9 | [Fault injection](P-H9-fault-injection.md) | P (+E, +S) | H3, H7 |
 | H10 | [Full-run repeatability](P-H10-full-run-repeatability.md) | P | H7, H8, H9 |
+
+## Calibration bootstrap order (roadmap C2 - the order that makes the run path armable)
+
+The protocols above are executed in one order. Each level can only produce what it
+can actually measure; nothing is promoted from a guess, and every conservative
+bootstrap value cites the bounded trial it came from and is later superseded by
+run-path evidence through the normal promotion procedure. The gate names below are
+the live ones (`configurationBuildChecks()`, `src/VehicleConfig.h`).
+
+- **Level 0 - unpowered, hand and meter** (no `bench drive`, no motor power): H1A
+  continuity and the de-energized levels; H1B Parts 1/2/4 (raw counts only); H2
+  hand-driven sign, repeatability and hysteresis; the manual wheel/tape measurements
+  the later protocols use as ground truth. Closes no arming gate by itself and gates
+  everything.
+- **Level 1 - bounded bench, drivetrain unloaded** (`env:bench`, after the
+  first-power fixes): H3 Step 0 demonstrates B2's bounded expiry and latched abort;
+  H3 records the polarity (`CommandPolarityAgrees`) and the smallest moving effort;
+  H4 A/C then H4 B record the scale (one of `CalibrationMeasured`'s three values;
+  the two brake offsets follow at P-H7 Part B) and the first #10 slip evidence;
+  H5 records the open-loop effort-to-speed relation (`kPlannedMinimumCruiseMps`,
+  the velocity ceilings); H6 records the feed-forward from H5 and a conservative
+  P/I bootstrap (`ControllerConfigValid`).
+- **Conservative bootstrap - before the first armed run.** The run path cannot arm
+  on placeholders, and its own timeouts, ceilings and plan dependencies cannot be
+  measured without it, so each is first set from recorded bounded-trial evidence
+  plus a pre-registered margin as a **Measured bootstrap** that names its evidence
+  and is explicitly flagged as untested on the run path: the phase timeouts, final
+  approach distance and `kPlannedMaxRunDurationS` (H14 Step 10); the near-zero and
+  reversal values (H14 Steps 8-9, from bounded bench stop trials through B2), with
+  `kStopEvidenceMaxAgeMs` adjusted so it still spans the recorded dwell (a
+  relationship check, not a provenance-marked value); the three strategy ceilings
+  (H5's measured steady speeds, reduced by the margin);
+  and the plan's two dependencies (`kPlannedContactWindowToleranceM`,
+  `kPlannedForwardStopMarginBeyondBottleLineM`, from P-H7 Part B's braking series
+  plus the placement range plus the margin). **No promotion touching
+  `runExecutionDependencies()` before the S16 arming-gate check exists or is
+  explicitly declined in `DEVELOPMENT_LOG.md`** (Option D in
+  `ARMING-PLAN-GATE-REVIEW.md`; S16 owns the implementation - this file only states
+  the dependency and deadline).
+- **Level 2 - first run-path tests, loaded, clear runout** (`env:nano_r4`): P-H7
+  Parts A0 and B first (B2, off the run path), then promote scale, offsets and
+  limits; then the first announced and armed runs - P-H7 Part L (the closed-loop
+  gains are refined here; the bench cannot run the regulator), Part A at three or
+  more targets and Part C at three speeds; H14 Steps 8-10 refine their bootstrap
+  values from this series, and H14 Step 12 compares the internal time against the
+  official one.
+- **Level 3 - bottle and loaded-run qualification:** H8 (the five plan
+  dependencies and the three strategy ceilings are re-established from bottle
+  evidence and the bootstrap values are superseded); P-H0W **Step 8** (loaded
+  watchdog/dwell-gap re-validation - scheduled in the order table above and
+  required before any competition freeze); H9 (fault injection; an encoder loss
+  that leaves motion continuing blocks H10 until answered).
+- **Level 4 - holdout:** H10 repeatability plus the independent, pre-registered
+  holdout condition; H14 Step 13. The holdout series never enters tuning.
+
+Every trial names its executing interface: Levels 0-1 and P-H7 A0/B use the
+`bench` image and the typed bench triple (B2); Level 2+ use the `nano_r4` image
+and the real run path. The capture records what the firmware believed; the hand
+measurements are the evidence.
 
 ## Bench instrumentation (built; B1, the pin, reset-cause and watchdog readouts and the hang hook exercised)
 

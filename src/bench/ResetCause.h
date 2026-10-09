@@ -58,13 +58,14 @@ namespace resetCause {
 //   `read()` writes nothing, so a readout cannot destroy the evidence it reports,
 //   and the protocol can read the same value twice and see the same answer.
 //   `clear()` is the only write in this file, and it exists because of what was
-//   measured on the board (2026-09-29, D30): **these flags latch**. A board that
-//   has taken one watchdog reset reports `wdtrf=1` on every later boot - across
-//   uploads, across a re-flash of a different image, across power cycles - so a
-//   bare read cannot attribute a *new* reset. The attribution experiment is
-//   therefore read, clear, observe, read: without the clear, `wdtrf=1` after a
-//   deliberate hang is indistinguishable from a leftover from a previous session,
-//   which is exactly what the first baseline capture showed.
+//   measured on the board (2026-09-29, D30): **these flags latch across software
+//   resets**. A board that has taken one watchdog reset reports `wdtrf=1` on
+//   every later boot - across uploads, across a re-flash of a different image -
+//   **until a genuine power cycle clears RSTSR1** (`porf=1` and nothing else,
+//   D30), so a bare read cannot attribute a *new* reset. The attribution
+//   experiment is therefore read, clear, observe, read: without the clear,
+//   `wdtrf=1` after a deliberate hang is indistinguishable from a leftover from
+//   a previous session, which is exactly what the first baseline capture showed.
 struct Snapshot {
     // The raw register contents, reported so a decode can be checked and so a
     // flag this file does not name is not silently dropped.

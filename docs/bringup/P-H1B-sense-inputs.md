@@ -44,9 +44,11 @@ a load and is P-H9). Those stay open until the protocols that can isolate them.
   low current limit; drivetrain unloaded.
 - A bench supply whose voltage can be set and **measured** with a meter; the
   meter and its resolution recorded.
-- Access to the trigger's two terminals; a way to pull the nFAULT line to ground
-  and release it (the line is open-drain on the driver side, so pulling it low is
-  safe).
+- Access to the trigger's two terminals; on a vehicle that wires the **nFAULT**
+  line, a way to pull it to ground and release it (it is open-drain on the driver
+  side, so pulling it low is safe). On the assembled vehicle there is no line
+  (`kMotorFaultBar` is `kNoPin`, D32), so Part 3 is recorded **N/A** and this
+  prerequisite is not consumed.
 
 ## Setup
 
@@ -79,7 +81,7 @@ state explicitly that the current scaling is unestablished and is deferred to H3
 proportional to load current, but what that proportion is on this board is a fact
 this protocol cannot supply.
 
-## Part 3 - nFAULT input
+## Part 3 - nFAULT input (on a vehicle that wires the line; **N/A on the assembled vehicle**, D32)
 
 1. **MCU input alone.** With the driver connected but not in a fault, pull the
    nFAULT line to ground and release it, at least ten times. Record the
@@ -138,7 +140,8 @@ resolution and the MCU power source with every reading.
 
 ## Repetitions
 
-Battery: at least five voltages x three repeats. nFAULT line-pull: at least ten.
+Battery: at least five voltages x three repeats. nFAULT line-pull: at least ten
+**on a vehicle that wires the line (N/A on the assembled vehicle, D32)**.
 Trigger: at least twenty actuations.
 
 ## Safe-stop (abort) conditions
@@ -153,15 +156,18 @@ Pass requires: the battery raw pairs recorded over the range, with a
 clearly-stated established or not-established verdict against the pre-registered
 fit criterion; the zero-load current count recorded with the scaling marked
 unestablished; the nFAULT idle level, release behaviour and MCU-input tracking
-recorded with the trip behaviour marked unestablished; the trigger idle/active
+recorded **on a vehicle that wires the line (N/A on the assembled vehicle,
+D32; Parts 1, 2 and 4 still pass without it)** with the trip behaviour marked
+unestablished; the trigger idle/active
 levels recorded and the bounce quantified with a debounce-needed verdict.
 
 ## If it passes
 
 - #7 only if the battery fit criterion was met; otherwise leave #7 UNVERIFIED
   with the raw pairs recorded in the log.
-- Add rows for the measured trigger active level and the nFAULT idle level (new
-  facts, or fold them into #1 as the input-level part of the wiring fact).
+- Add rows for the measured trigger active level (new fact, or fold it into #1
+  as the input-level part of the wiring fact); the nFAULT idle level on a
+  vehicle that wires the line, N/A on the assembled vehicle (D32).
 - Log in `DEVELOPMENT_LOG.md`, including the explicit "unestablished" statements,
   so a later reader does not mistake a recorded raw count for a measurement.
 

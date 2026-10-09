@@ -243,8 +243,9 @@ port: a staged reply goes out first, then at most one received command is applie
 and answered, then the telemetry queue drains.
 
 The production vehicle image cannot be commanded to move: every calibration value,
-safety limit and gain in
-`src/VehicleConfig.h` is a `Provisional` placeholder, the regulator refuses to
+safety limit and gain the run path still needs is a `Provisional` placeholder
+(the recorded exceptions - the cited 28 ms measured `kMaxDwellGapMs` and the
+rule-derived final-stop dwell - make nothing armable), the regulator refuses to
 enable, no run has been announced, and the run policy stays in `Idle`. Two further
 dependencies are unmeasured: the run's immutable execution plan cannot be built at
 all until P-H8 supplies its five bottle-interaction measurements (three interaction
@@ -276,8 +277,10 @@ emergency image (since deleted, D35) drove the vehicle forward and backward
 autonomously. None of that was captured and no protocol was run to its acceptance
 rule, so it is an **informal observation, not evidence**: **every hardware row in
 `VERIFIED_STATE.md` still reads UNVERIFIED**, no calibration was promoted - every
-value in `src/VehicleConfig.h` is still `Provisional`, so the production image
-has never been armed for a run - and no run record exists for it. Sensor, battery
+run-path calibration value in `src/VehicleConfig.h` is still `Provisional` (the
+only promoted constants are the cited 28 ms dwell-gap bound and rule-derived
+values such as the final-stop dwell), so the production image has never been
+armed for a run - and no run record exists for it. Sensor, battery
 and bottle-mechanism behavior remain unobserved; battery/current sensing and the
 nFAULT line are not installed at all. Upload, boot, greeting, the serial link and
 the watchdog path *have* been observed on target, USB only with the motor supply

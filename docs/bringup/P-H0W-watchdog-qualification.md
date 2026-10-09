@@ -315,6 +315,13 @@ is recorded. **It has been written down:** `data/prereg/P-H0W-step8-2026-09-29.m
 holds the criteria, the bench numbers the trial is compared against (including the
 realized 174 ms), and what would make the timeout change.
 
+**Schedule and owner (C11):** this step is scheduled in the bring-up order table
+(`docs/bringup/README.md`) **after H7** and is the explicit **pre-gate for P-H14
+Step 13 (the competition freeze)**. Its owner is the loaded run-path session: the
+operator of that session executes it under the pre-registration above, and no
+bench session can close it. Until it is recorded, the chosen timeout remains a
+bench number.
+
 Freezing a competition build requires this re-validation to exist; until then the
 chosen timeout is a bench number and is recorded as such.
 

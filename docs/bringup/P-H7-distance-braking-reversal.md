@@ -15,9 +15,11 @@ and the end-to-end accuracy check.
 
 ## Prerequisites
 
-- H4 passed (measured rollout) and H6 passed (tuned, unloaded). If H6's gains
-  were tuned unloaded, expect the loaded response to differ - measure it (part
-  L), do not assume it.
+- H4 passed (measured rollout) and H6's amended parts completed: the
+  feed-forward measured from H5's open-loop relation and the conservative P/I
+  bootstrap promoted (see `P-H6-ff-pi-tuning.md`). The closed-loop tuning itself
+  cannot happen on the bench; it happens in part L below, and the loaded response
+  is expected to differ - measure it, do not assume it.
 - **H1A bench test 3 recorded, and the `Brake` question answered.** The run's
   deliberate stop (`RunMotionCommand::BrakeForward`/`BrakeReverse`) is
   `MotorMode::Brake`, whose planned pin combination is `nSLEEP` high with `PH` and
@@ -40,6 +42,12 @@ and the end-to-end accuracy check.
   recorded one is not evidence (see `P-H0W-watchdog-qualification.md`).
 - A straight course with a marked start, target point and a **clear runout**
   beyond the target; no person in the path.
+- **USB tether discipline (moving runs).** The vehicle is driven while
+  USB-tethered for capture: strain-relieve the cable (a slack loop fixed to the
+  chassis so it cannot tug the vehicle) and note the arrangement in the record. A
+  disconnect loses the capture the acceptance depends on; before a run enters any
+  statistic, check the capture's own validity - `drop_s`/`drop_e` and the `dt_ms`
+  distribution across the run (C15).
 - Tape and stopwatch, or a measured course with position marks; record the
   instrument and resolution. Pre-place tape marks along the runout (every 0.5 m
   is a reasonable default) so a physical position at an instant can be bracketed
@@ -86,6 +94,17 @@ it is not to pretend a distance-targeted run exists before the numbers do:
 Record this bootstrap explicitly. A number measured off the run path and then used
 by the run path must be identified as such, and the distance-targeted accuracy
 result is not reported as if it had been available from the start.
+
+**The full sequence is `docs/bringup/README.md` ("Calibration bootstrap
+order").** Parts A0 and B execute through **B2**, off the run path; parts L, A
+and C execute through the **real run path**. Before the first announced run,
+every gate that blocks arming must be `Measured` from level-0/1 evidence plus
+explicitly flagged conservative bootstraps (H14 Steps 8-10; the three strategy
+ceilings; the plan's two dependencies from this protocol's part-B braking
+series), and **no promotion touching `runExecutionDependencies()` may happen
+before the S16 arming-gate check exists or is explicitly declined in
+`DEVELOPMENT_LOG.md`** (Option D in `ARMING-PLAN-GATE-REVIEW.md`; S16 owns the
+implementation - this file only states the dependency and deadline).
 
 ## Part A0 - bootstrap scale, open-loop (before the offsets exist)
 
@@ -184,11 +203,15 @@ recorded limitation, not something to average away.
 
 ## Part L - loaded tracking re-check (the gains were tuned unloaded)
 
-H6 tuned the feed-forward and PI with the drivetrain unloaded, and the loaded
-plant is different. Before any accuracy or reversal result is used to judge the
-vehicle, run H6's fixed command profile once with the vehicle loaded (B2, clear
-runout) and record the tracking error, the fraction of time the effort sits at the
-ceiling, and the pinned-effort duration.
+The feed-forward is from unloaded open-loop data and the P/I pair is only a
+conservative bootstrap; the loaded plant is different. This part is the
+**closed-loop tuning** H6 cannot perform on the bench: through the **real run
+path** (the regulator is in the loop - B2 cannot run it), with the vehicle loaded
+and a clear runout, run H6's fixed command profile and record the tracking error,
+the fraction of time the effort sits at the ceiling, and the pinned-effort
+duration (P-H6 part 3's authoritative metric). Vary **one gain at a time**; adopt
+a candidate only against the pre-registered criterion, and re-promote the gains
+with the loaded records substituted for the bootstrap citation.
 
 If the loaded response degrades materially, that is the finding: retune loaded and
 record which gains the loaded tuning produced, rather than assuming the unloaded
@@ -209,8 +232,11 @@ Run the stop-and-reverse sequence through the real path and verify, from the
 
 Do this at **three speeds**: the lowest speed that still triggers a reversal (the
 near-threshold case, where the stop logic is most marginal), the planned cruise,
-and the maximum speed the safety ceilings allow. A reversal that verifies at one
-speed and not another is the finding.
+and the **maximum controllable speed recorded in part B** - the safety ceilings
+are not set from evidence at this point, so "the maximum the ceilings allow" is
+undefined here; part B establishes the maximum the vehicle was shown to control
+and stop first, and part C uses it (C19). A reversal that verifies at one speed
+and not another is the finding.
 
 The phase timeline and the estimated velocity are the firmware's *belief*.
 Confirm the stop independently as well: mark the vehicle's position at the moment

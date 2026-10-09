@@ -38,20 +38,27 @@ with power off. Re-check after any rewire.
 
 Power the MCU only (motor supply off is fine for level measurement, on and
 current-limited if the driver needs its rail to drive its inputs). With the
-firmware at rest, measure `nSLEEP`, `PH`, `EN` and `nFAULT` at the MCU pins. This
-is the firmware's de-energized startup state; record whether the pins actually do
-what `MotorDriver.h` drives (`nSLEEP` low, `PH` low, `EN` at zero duty) and
-whether `nFAULT` reads high through the planned pull-up. Record the logic levels
-in volts, and whether any line needs a level shifter or a pull-up/down at all.
-**On the assembled vehicle the `nFAULT` line has no pin at all** (`kMotorFaultBar`
-is `kNoPin`; it is not installed, D32), so only `nSLEEP`/`PH`/`EN` are measured
-here and the `nFAULT` record applies only to a vehicle that wires the line.
+firmware at rest, measure `nSLEEP`, `PH` and `EN` at the MCU pins - and measure
+`nFAULT` too **only on a vehicle that wires the line**. **On the assembled vehicle
+the `nFAULT` line has no pin at all** (`kMotorFaultBar` is `kNoPin`; it is not
+installed, D32), so its row is recorded **not applicable**, not deferred. This is
+the firmware's de-energized startup state; record whether the pins actually do
+what `MotorDriver.h` drives (`nSLEEP` low, `PH` low, `EN` at zero duty), and on a
+wired vehicle whether `nFAULT` reads high through the planned pull-up. Record the
+logic levels in volts, and whether any line needs a level shifter or a
+pull-up/down at all.
 
 ## Setup, step A2 - truth table, motor disconnected
 
 With a low supply current limit, apply each row for a short bounded time and
-record the *output* state measured at the two output terminals (voltage to
-ground and terminal-to-terminal, plus the supply current):
+record the *output* state at the two output terminals (each terminal to ground,
+terminal-to-terminal, plus the supply current). **With no load connected the
+outputs are open H-bridge terminals, so a DMM reads switching-average or float
+artifacts rather than a clean level:** the rows are **level-presence checks**
+(does the row produce output, does the Disabled row produce none), not precision
+measurements. A supply current of about zero across the rows confirms nothing is
+drawing it. If a row's output state is genuinely ambiguous, a light resistive
+load (value recorded) may be fitted to resolve it:
 
 | `nSLEEP` | `PH` | `EN` | Intent to test |
 |---|---|---|---|
@@ -105,10 +112,11 @@ current limit is the primary protection.
 ## Acceptance / decision rule
 
 Pass requires: the continuity table matches `src/PinMap.h` (or the map is
-corrected and re-verified); the three repeats agree on the output state for every
-row; the Disabled combination produces no output; the awake-`EN`-low state is
-identified as brake or high-Z; the `EN` PWM frequency and duty response are
-recorded. If the measured mapping contradicts the plan in
+corrected and re-verified); the three repeats agree on the output state
+**presence** for every row (which row produces output, which does not - with no
+load they are not required to agree on a precise voltage); the Disabled
+combination produces no output; the awake-`EN`-low state is identified as brake
+or high-Z; the `EN` PWM frequency and duty response are recorded. If the measured mapping contradicts the plan in
 `docs/hardware/motor-driver-drv8874.md`, the fix is the plan table or the wiring -
 never a sign added elsewhere.
 
