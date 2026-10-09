@@ -407,7 +407,13 @@ or what remains provisional about the numbers it justified.
   With no plan there is no forward execution target, no leg target and no
   progression completion - so the run's forward phases have nothing to complete
   at, and the vehicle cannot shape a forward leg at all (the run layer fails
-  closed rather than substituting the Bottle Line rule landmark). Separately, the
+  closed rather than substituting the Bottle Line rule landmark). Since S16 that
+  fact is also stated before a run can be armed: `arm` is refused with the named
+  `ExecutionPlanNotEstablished` refusal while the announced run's adopted plan is
+  not usable, so the refusal is reported at the operator's deliberate boundary
+  instead of only through the approach-phase timeout after the trigger (the
+  announce acknowledgement and the `AnnounceAccepted` event carry the plan's
+  status, and `plan` remains the live view of it). Separately, the
   three per-phase **strategy velocity ceilings**
   (`RunPhaseConfig::approachCeilingMps` / `captureCeilingMps` / `pushCeilingMps`)
   are `Provisional` placeholders, so `ev::validateRunPhaseConfig()` refuses the run

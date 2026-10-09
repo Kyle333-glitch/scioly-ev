@@ -113,10 +113,13 @@ the live ones (`configurationBuildChecks()`, `src/VehicleConfig.h`).
   and the plan's two dependencies (`kPlannedContactWindowToleranceM`,
   `kPlannedForwardStopMarginBeyondBottleLineM`, from P-H7 Part B's braking series
   plus the placement range plus the margin). **No promotion touching
-  `runExecutionDependencies()` before the S16 arming-gate check exists or is
-  explicitly declined in `DEVELOPMENT_LOG.md`** (Option D in
-  `ARMING-PLAN-GATE-REVIEW.md`; S16 owns the implementation - this file only states
-  the dependency and deadline).
+  `runExecutionDependencies()` before the S16 arming gate exists.** That gate
+  landed in S16 (2026-10-08, D53; Option D in `ARMING-PLAN-GATE-REVIEW.md`): `arm`
+  is refused with the named `ExecutionPlanNotEstablished` refusal while the
+  announced run's adopted execution plan is not usable, before the authority is
+  asked. The deadline is therefore satisfied and no longer blocks a promotion; the
+  per-trial discipline (confirm `plan` reads `Planned` before a trigger) still
+  applies.
 - **Level 2 - first run-path tests, loaded, clear runout** (`env:nano_r4`): P-H7
   Parts A0 and B first (B2, off the run path), then promote scale, offsets and
   limits; then the first announced and armed runs - P-H7 Part L (the closed-loop

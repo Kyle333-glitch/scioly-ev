@@ -517,9 +517,13 @@ inline ev::BottleEvidenceConfig bottleEvidenceConfig() {
 
 // What the execution plan is built from, besides the announcement and the
 // bottle-interaction calibration above: the two physical facts behind the forward
-// stop. Both are placeholders, so the plan refuses and a run has no execution
-// target at all - which is why this vehicle cannot be armed for a run. See
-// `kPlannedForwardStopMarginBeyondBottleLineM`.
+// stop. Both are placeholders, so `buildRunExecutionPlan()` refuses and the run has
+// no execution target at all: a run announced on them cannot shape a forward leg
+// and cannot claim a forward completion. Since S16 that refusal is also an arming
+// precondition in its own right - `arm` is refused with the named
+// `ExecutionPlanNotEstablished` refusal while the run's adopted plan is not usable
+// - so this configuration cannot produce an armed run even after every other
+// configuration check passes. See `kPlannedForwardStopMarginBeyondBottleLineM`.
 inline ev::RunExecutionDependencies runExecutionDependencies() {
     return ev::RunExecutionDependencies(provisionalValue(kPlannedContactWindowToleranceM),
                                         provisionalValue(kPlannedForwardStopMarginBeyondBottleLineM));
@@ -654,6 +658,11 @@ inline bool allPromotedValuesCiteEvidence() {
     const ev::NearZeroConfig finalStop = finalStopVerification();
     const ev::RunPhaseConfig phase = runPhaseConfig();
     const ev::ReversalConfig reversal = reversalConfig();
+    // The execution plan's own two dependencies (audit S13R M-2): they establish
+    // the forward execution target the plan is built from, so a promotion that
+    // turns either of them `Measured` has to name its evidence exactly like every
+    // other promoted value. They travel with the rest of the aggregate.
+    const ev::RunExecutionDependencies planDependencies = runExecutionDependencies();
 
     const bool calibrationCited =
         provenance::cited(calibrationValues.distancePerEncoderTickM) &&
@@ -691,9 +700,12 @@ inline bool allPromotedValuesCiteEvidence() {
                             provenance::cited(phase.bottleEvidence.contactLeadDistanceM) &&
                             provenance::cited(phase.bottleEvidence.captureAdvanceDistanceM) &&
                             provenance::cited(phase.bottleEvidence.pushMarginDistanceM);
+    const bool planDependenciesCited =
+        provenance::cited(planDependencies.contactWindowToleranceM) &&
+        provenance::cited(planDependencies.forwardStopMarginBeyondBottleLineM);
 
     return calibrationCited && limitsCited && controllerCited && polarityCited && profileCited &&
-           stopCited && phaseCited;
+           stopCited && phaseCited && planDependenciesCited;
 }
 
 // ---------------------------------------------------------------------------

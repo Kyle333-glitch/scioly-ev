@@ -102,9 +102,11 @@ every gate that blocks arming must be `Measured` from level-0/1 evidence plus
 explicitly flagged conservative bootstraps (H14 Steps 8-10; the three strategy
 ceilings; the plan's two dependencies from this protocol's part-B braking
 series), and **no promotion touching `runExecutionDependencies()` may happen
-before the S16 arming-gate check exists or is explicitly declined in
-`DEVELOPMENT_LOG.md`** (Option D in `ARMING-PLAN-GATE-REVIEW.md`; S16 owns the
-implementation - this file only states the dependency and deadline).
+before the S16 arming gate exists** (Option D in `ARMING-PLAN-GATE-REVIEW.md`).
+The gate landed in S16/D53 - `arm` refuses with the named
+`ExecutionPlanNotEstablished` refusal while the announced run's adopted plan is
+not usable - so the deadline is satisfied and this file only states the
+dependency.
 
 ## Part A0 - bootstrap scale, open-loop (before the offsets exist)
 

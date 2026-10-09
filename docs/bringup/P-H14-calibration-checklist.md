@@ -315,14 +315,16 @@ can complete a forward phase until then; the three ceilings keep
 placeholders either. Only then `VERIFIED_STATE.md` #11.
 
 **Promotion deadline (F3/S16).** **No promotion touching
-`runExecutionDependencies()` before the arming-gate check exists or is explicitly
-declined in `DEVELOPMENT_LOG.md`.** Option D in `ARMING-PLAN-GATE-REVIEW.md` is
-the recommendation - announce reports the plan status and its forward stop, and a
-named plan-usability check gates arming; **S16 owns that implementation, and
-nothing in this checklist implements it.** Until it lands or is declined, a green
-`checks` does not imply a usable plan: before any bootstrap run's trigger, confirm
-`plan` reads `Planned` (a refused plan otherwise burns the 20 s approach bound on
-`PhaseTimeout` with no motion).
+`runExecutionDependencies()` may happen before the arming gate that requires a
+usable execution plan exists.** That gate **landed in S16** (2026-10-08, D53;
+Option D in `ARMING-PLAN-GATE-REVIEW.md`): a run announced with a refused plan has
+`arm` refused with the named `ExecutionPlanNotEstablished` refusal before
+`SafetyAuthority::arm()` is asked, so a refused plan can no longer be discovered
+only at the trigger. Announce still reports the plan status and its forward stop
+on its acknowledgement and event (`exec=`, `fwd_stop_m=`), and `plan` remains the
+live view. The promotion this deadline covers is therefore unblocked; the per-trial
+discipline is not - still confirm `plan` reads `Planned` before a bootstrap run's
+trigger, because the refusal is *reported* by `arm`, not repaired by it.
 
 ## Step 12 - Plan verification (Target Time)
 
@@ -395,9 +397,9 @@ re-validation) must be re-run and recorded under the loaded run path - it is
 scheduled in the README order table after H7 and is a hard pre-gate for freezing
 a competition build (C11).
 
-**Before any promotion touching `runExecutionDependencies()`:** the S16
-arming-gate check must exist or be explicitly declined (Step 11's deadline
-sentence; `ARMING-PLAN-GATE-REVIEW.md`, Option D).
+**Before any promotion touching `runExecutionDependencies()`:** the S16 arming
+gate must exist or be explicitly declined (Step 11's deadline sentence;
+`ARMING-PLAN-GATE-REVIEW.md`, Option D). It exists as of S16/D53.
 
 `kPlannedMaxEffortPermille` is deliberately absent: it is a **safety ceiling**, not
 a calibration value. Raise it only by a separate, deliberate decision - never to

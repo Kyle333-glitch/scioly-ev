@@ -144,6 +144,30 @@ void test_refusals_name_the_command_and_the_reason(void) {
     TEST_ASSERT_EQUAL_STRING("ERR,cmd=none,reason=UnknownCommand", buffer);
 }
 
+// S16: an arm refused because the announced run holds no usable execution plan
+// names that fact, rather than "checks failed" or "nothing announced". The
+// refusal travels the ordinary refusal channel, so no new response family, field
+// order or line width is introduced for it.
+void test_the_refused_arm_names_a_missing_execution_plan(void) {
+    char buffer[ev::kSerialLineBufferBytes];
+    const char* reason =
+        ev::commandRefusalName(ev::CommandRefusal::ExecutionPlanNotEstablished);
+
+    const uint16_t length = ev::formatOperatorRefusal(
+        ev::OperatorCommandId::Arm, reason, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(length > 0U);
+    TEST_ASSERT_TRUE(length < ev::kSerialLineCapacity);
+    TEST_ASSERT_EQUAL_STRING("ERR,cmd=arm,reason=ExecutionPlanNotEstablished", buffer);
+
+    // It is not the same refusal as "no run announced": the operator's next
+    // action depends on which of the two holds.
+    TEST_ASSERT_NOT_EQUAL(0,
+                          strcmp(reason, ev::commandRefusalName(ev::CommandRefusal::NoRunAnnounced)));
+    // The worst-case checks report still bounds every response, so the shared
+    // line capacity is unaffected by the new refusal name.
+    TEST_ASSERT_TRUE(ev::kOperatorResponseWorstCaseChars >= length);
+}
+
 // A configuration that has not been filled in says so field by field. A missing
 // value is marked, never omitted: the columns of the response never move, so an
 // operator can see what is still missing.
@@ -853,6 +877,7 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_acknowledgements_name_the_command);
     RUN_TEST(test_refusals_name_the_command_and_the_reason);
+    RUN_TEST(test_the_refused_arm_names_a_missing_execution_plan);
     RUN_TEST(test_incomplete_configuration_marks_every_missing_field);
     RUN_TEST(test_valid_configuration_echoes_values_and_derived_bottle_start);
     RUN_TEST(test_rejected_configuration_echoes_values_and_the_rule_error);

@@ -7544,3 +7544,151 @@ Resource deltas against S14: native **+15 cases**; RAM **+592 / +592 / +592**
   semantics, the encoder-loss response, the configuration cross-checks and the
   timing model: S18's, not this stage's.
 - `AGENTS.md` (no invariant changed).
+## D53 / S16 - 2026-10-08 - Arming requires the announced run's own usable execution plan, and the refusal is named
+
+S16 (`POST-S13-REPAIR-ROADMAP.md` stage C) implements the user-approved **Option D**
+of `ARMING-PLAN-GATE-REVIEW.md` for the arming-gate finding (`GATE`): the October 6
+audit **M6**, S13R **I-1**, S13I **I-1** and S13X **F3** are one root cause, folded
+here with S13R **M-1** and **M-2**. **No hardware action**: no upload, no serial
+port opened, no arming, no motor command, no measurement. All twelve
+`VERIFIED_STATE.md` hardware rows remain UNVERIFIED; no calibration value was
+promoted and neither `runExecutionDependencies()` value became `Measured`.
+
+### The defect
+
+`announceVerdictFor()` reads only the rules, the held configuration and
+`checks.runPolicyUsable`; `armVerdictFor()` reads only the 16-check
+configuration-build report; nothing on the announce-and-arm path read
+`runExecutionDependencies()` or the run's adopted plan. So once a run could be
+announced (a state reachable as soon as the phase configuration is measured),
+`announce` -> OK and `arm` -> OK could be followed by a run whose plan is refused:
+the plan has no forward execution target, no leg target and no progression fact, so
+the run could only end `PhaseTimeout` at the 20 s approach bound after the trigger -
+fail-safe (no motion) but a configuration fact the gate was positioned to state
+before a human pulled the trigger.
+
+### The decision: the recorded 17th check was evaluated and not selected
+
+`ARMING-PLAN-GATE-REVIEW.md` section 5.2 proposed a 17th `ConfigurationCheckId`
+(`ExecutionPlanEstablished`) appended last, with `failureMask()` widened to
+`uint32_t`. Two shapes were compared before editing, as the stage contract required:
+
+* **the check shape** - append the check, widen the mask, move
+  `ArmVerdict::failedCheckMask` and the `CHECK` line's worst case, and extend the
+  telemetry `check` vocabulary (which is mirrored in
+  `tools/telemetry/evtelemetry/schema.py` and pinned by
+  `test_schema_mirror.py`); and
+* **the narrow state-based refusal** - one new `CommandRefusal` name, one boolean
+  on `OperatorSystemState`, one gate in `admissibilityOf()`, next to
+  `NoRunAnnounced`.
+
+The narrow shape was chosen. The reason is not that the check shape is wrong; it is
+that the requirements it was proposed to satisfy are already carried elsewhere and
+the narrower shape satisfies them with no wire change:
+
+1. **Announcement diagnostics already exist and are already pinned** (`P12`/OBS-FWD,
+   S15): `OK,cmd=announce` ends with `exec=<RunExecutionPlanStatus>` and
+   `fwd_stop_m=<metres|->`, the `AnnounceAccepted` event carries the plan's status
+   as its `detail`, and `plan` is the live view. A 17th check would restate a fact
+   the command response and the event already carry, which this stage's contract
+   explicitly discourages.
+2. **Arming already has a run-state refusal vocabulary**, and this is exactly that
+   kind of fact: `NoRunAnnounced` says there is no run to arm for; the new name says
+   the run that was announced has no usable execution plan. Both are read from the
+   state the command arrived in, and both are reported through
+   `ERR,cmd=arm,reason=<name>`.
+3. **There is no cache to go stale.** `configurationBuildChecks()` is computed on
+   control ticks, so a check-based gate would need care at the arm boundary;
+   `systemState()` derives the plan fact from `executionPlan_.plan().valid` on every
+   command, so the gate reads the plan the layer is holding at the moment the arm is
+   typed.
+4. **No mask, no schema, no formatter capacity moves.** `ConfigurationChecks.h`,
+   `ArmVerdict`, the `CHECK` line (445 characters), the width of the mask, the
+   telemetry schema (still v3) and the Python mirror are untouched.
+
+Recorded as an explicit deviation from the roadmap's proposed mechanism, satisfying
+the roadmap's own acceptance criteria in substance: a refused plan refuses `arm`
+with a named fact and accepts once both dependencies are `Measured` (the plan is
+then `Planned`); the announcement stays admissible and names the plan's status and
+forward stop; `CHECK`/`ERR,cmd=arm` stay within capacity; and the new cases are
+executed (see the validation below). The current lockout's refusal reason is
+unchanged in practice - with every phase configuration value still `Provisional` no
+run can be announced at all, so `arm` still reports `NoRunAnnounced`, and the plan
+refusal is reached only once a run *has* been announced. The one wording in the
+roadmap that no longer holds literally is "the 17th check + `uint32_t` mask"; it is
+recorded here as declined in favour of the state-refusal shape, which is what this
+entry is for.
+
+### What changed
+
+* `lib/evcore/src/OperatorPolicy.h` - `CommandRefusal::ExecutionPlanNotEstablished`
+  (appended after `NoRunAnnounced`, with its `commandRefusalName()` spelling);
+  `OperatorSystemState::executionPlanEstablished` (default `false`, the fail-closed
+  value); and the `Arm` case of `admissibilityOf()` refuses when it is false, after
+  `AlreadyArmed` and `NoRunAnnounced` and after the fault gate that precedes the
+  switch. The safety-significant precedence is therefore unchanged: `FaultLatched`
+  still outranks everything, "no run announced" outranks "no plan", and the new
+  refusal outranks the configuration-build verdict because a refused plan is a fact
+  about the run being armed, not about a configuration value.
+* `src/VehicleRuntime.cpp` - `systemState()` fills the fact from the adopted plan
+  (`executionPlan_.plan().valid`); `applyArm()` re-asserts the same condition with
+  the same named refusal immediately before `SafetyAuthority::arm()`, so an unusable
+  plan cannot reach the authority even if a future caller reached that private
+  method another way.
+* `src/VehicleConfig.h` - **M-1**: the comment above `runExecutionDependencies()`
+  no longer claims plan refusal alone is "why this vehicle cannot be armed"; it now
+  records that the plan's refusal fail-closes travel *and* is itself an arming
+  precondition. **M-2**: `allPromotedValuesCiteEvidence()` now folds the two
+  `Sourced` dependencies (`contactWindowToleranceM`,
+  `forwardStopMarginBeyondBottleLineM`) into the aggregate evidence-citation check
+  with the existing `provenance::cited()` convention, so a promotion of either must
+  name its evidence like every other promoted value.
+* `SOFTWARE_ARCHITECTURE.md` (sections 15 and 16), `docs/limitations.md`, and the
+  three `docs/bringup` deadline sentences (README, P-H14 Step 11, P-H7): the
+  behaviour is documented and the S16 promotion deadline is recorded as satisfied,
+  naming the mechanism and the operator's remaining per-trial discipline.
+
+### Not changed, deliberately
+
+The 16-check vocabulary, `failureMask()`'s width, `ArmVerdict`, every formatter and
+its worst-case constants, the telemetry wire schema (v3), the timing model
+(`kRunTimingModelValidated` stays false and is never an arming dependency),
+`AnnounceRefusal` (a legal configuration is still announced - Option C was
+rejected), the bench image, the reversal/taper/encoder-loss policies (S18's), every
+calibration value and `Sourced` provenance, and every `VERIFIED_STATE.md` row.
+
+### The F3 deadline
+
+S17 already landed the procedure side of F3 (P-H14 Step 11 lists the five plan
+constants and carries the deadline sentence; README and P-H7 state it too). S16
+satisfies that deadline: the gate exists. The three sentences now say so and name
+`ExecutionPlanNotEstablished` rather than "a named plan-usability check" that was
+still to come.
+
+### Validation (final content; nothing uploaded, no board connected)
+
+* `pio test -e native` -> **664/664** in 36 suites, exit 0 (658 + 6 new, all
+  registered: five in `test_operator_policy`, one in `test_operator_response`).
+* **Failing-before evidence**: with only the `admissibilityOf()` gate removed from
+  the same tree, `pio test -e native -f test_operator_policy` reports **5 failed,
+  23 succeeded** - the five new/extended cases that assert the gate - captured at
+  `.agent-work/reviews/s16-2026-10-08/pre-gate-test_operator_policy.log`.
+* `pio run -e nano_r4` / `-e bench` / `-e bench-watchdog` (clean rebuilds) -> 3
+  SUCCESS, **0 warnings**, RAM 7364/7564/7556, Flash 76120/83628/82968.
+* `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` ->
+  **142/142 OK** (unchanged; no analyzer or schema input moved).
+* `git diff --check` -> clean. Resource delta against S15: Flash **+888** bytes per
+  image, RAM **unchanged** - the new refusal name, its switch case and the gate at
+  two call sites; no allocation and no new `.bss`.
+
+### What the host tests do not cover
+
+`applyArm()` and `systemState()` are Arduino-side (`src/`), which the host suite
+cannot compile. The gate's decision function, the production plan builder and the
+response formatter are tested as real production logic; the runtime *wiring* (one
+assignment, one guarded call) is verified by the three firmware builds and by the
+invariant re-assertion inside `applyArm()`, and is stated as a residual gap rather
+than claimed as host-verified. `allPromotedValuesCiteEvidence()`'s new citations
+cannot change its value while every production value is `Provisional`, so M-2 is a
+review-verified correction with no executable regression; exercising it would
+require the promotion S16 is forbidden to make.

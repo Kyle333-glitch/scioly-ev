@@ -1030,7 +1030,13 @@ is the implementation of the wiring obligations sections 12-14 recorded
 - **The run boundary is the operator's deliberate decision, and the checks are what
   refuse it.** `announce` consumes the held configuration through the single
   rule-validation entry point, and `arm` reads the configuration-build report
-  through `ev::armVerdictFor()` before `SafetyAuthority::arm()` is asked. With the
+  through `ev::armVerdictFor()` before `SafetyAuthority::arm()` is asked. A passing
+  configuration-build report is still not enough (S16): the run that was announced
+  must hold a **usable execution plan** (`RunExecutionPlan::status == Planned`),
+  and arming otherwise is refused with the named `ExecutionPlanNotEstablished`
+  refusal before the authority is asked - the plan's absence is a fact about the
+  run, stated at the operator's deliberate boundary rather than discovered at the
+  approach bound after the trigger. With the
   provisional configuration in `src/VehicleConfig.h` every arming intent is refused
   and is attributable to the first failing check - the intended state of this
   firmware. Nothing may auto-arm, resume a command after a reset, or treat a
@@ -1061,8 +1067,9 @@ any of them.
   no dynamic allocation anywhere in it.
 - **Admissibility is one module, and it is the only place a command is allowed or
   refused.** `ev::OperatorPolicy` (`lib/evcore/src/OperatorPolicy.h`) answers,
-  for the current `OperatorSystemState` (run phase, armed fact, latched fault and
-the configuration-build report), whether a command may be applied and, when it
+  for the current `OperatorSystemState` (run phase, armed fact, latched fault, the
+configuration-build report, and whether the announced run holds a usable execution
+plan), whether a command may be applied and, when it
 may not, why (`ev::CommandRefusal`, named by `commandRefusalName()`). It also owns
 the two run-boundary verdicts (`armVerdictFor()`, `announceVerdictFor()`), the
 held-configuration verdict (`heldRunConfigVerdict()`) and the telemetry rate to a
@@ -1097,14 +1104,17 @@ that a command is acceptable.
   still refused while a run's phases are underway, because discarding a fault is
   not the same thing as abandoning a moving run: the arming/disarming decision is
 the operator's, and `disarm` is the command for that.
-- **One announcement per run, and arming reads the checks.** `announce` consumes
+- **One announcement per run, and arming reads the plan and the checks.**
+  `announce` consumes
   the held configuration through the single rule-validation entry point
   (`ev::validateRunConfig()`); a second announcement is refused as
   `RunAlreadyActive`, and arming with no announcement is refused as
-  `NoRunAnnounced`. `arm` reads the configuration-build report through
-  `armVerdictFor()` *before* `SafetyAuthority::arm()` is asked, so a refused arm
-  names the first failing check instead of producing an armed state with
-  unverified configuration behind it.
+  `NoRunAnnounced`. Arming an announced run whose adopted execution plan is not
+  usable is refused as `ExecutionPlanNotEstablished` - the same plan fact the
+  `plan` query reports - and `arm` then reads the configuration-build report
+  through `armVerdictFor()` *before* `SafetyAuthority::arm()` is asked, so a
+  refused arm names the first failing check instead of producing an armed state
+  with unverified configuration behind it.
 - **Formatting is one module, and it emits one line per response.**
   `ev::OperatorResponse` (`lib/evcore/src/OperatorResponse.h`) owns every response
   spelling: the prefix vocabulary (`OK`, `ERR`, `STATUS`, `CONFIG`, `CHECK`,

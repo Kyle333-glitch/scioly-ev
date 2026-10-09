@@ -1058,6 +1058,21 @@ void VehicleRuntime::applyArm() {
         return;
     }
 
+    // The arm-time requirement `admissibilityOf()` already enforces, re-asserted
+    // where the authority is actually asked (S16). Same condition, same named
+    // refusal: the run that was announced must still hold a usable execution
+    // plan. It is repeated here because this is the boundary the invariant is
+    // about - an invalid plan must not reach `authority_.arm()` no matter which
+    // caller got this far, and the plan is read live rather than from a cached
+    // copy of the state the command was admitted against.
+    if (!executionPlan_.plan().valid) {
+        const char* reason =
+            ev::commandRefusalName(ev::CommandRefusal::ExecutionPlanNotEstablished);
+        respondRefusal(ev::OperatorCommandId::Arm, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::ArmRefused, reason);
+        return;
+    }
+
     // The authority decides, and it can still refuse (a latched fault of its own);
     // the operator sees that as a refusal rather than as an armed vehicle.
     if (!authority_.arm(verdict.readiness)) {
@@ -1199,6 +1214,14 @@ ev::OperatorSystemState VehicleRuntime::systemState() const {
     // the authority's are separate latches, and `reset` clears both.
     state.faultLatched = faultLatched();
     state.checks = configurationChecks_;
+    // The plan the run layer is holding right now, read here instead of being
+    // cached with the checks: every command is judged against the announcement
+    // that is current when it is typed, so a plan cleared by `reset` or replaced
+    // by a new announcement cannot be read as the previous one's (S16). It is the
+    // adopted plan's own invariant that makes this one fact sufficient - plan
+    // positions exist only when `valid` is true, so "usable" is exactly what the
+    // run has to travel with.
+    state.executionPlanEstablished = executionPlan_.plan().valid;
     return state;
 }
 

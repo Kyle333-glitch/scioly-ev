@@ -5,7 +5,9 @@
 
 #include <unity.h>
 
+#include <BottleEvidence.h>
 #include <OperatorPolicy.h>
+#include <RunExecutionPlan.h>
 
 // Contract tests for the operator policy (lib/evcore/src/OperatorPolicy.h): which
 // command may be applied in which state, what a held configuration means under
@@ -77,9 +79,72 @@ void expectValue(double expected, double actual) {
     TEST_ASSERT_TRUE(fabs(expected - actual) <= 1.0e-9);
 }
 
+// A state with a phase and nothing else: no plan, no fault, not armed. It is the
+// fail-closed fixture - in particular `executionPlanEstablished` is left at its
+// default (false), which is exactly the "no usable execution plan" fact the
+// arm gate refuses.
 ev::OperatorSystemState stateOf(ev::RunPhase phase) {
     ev::OperatorSystemState state;
     state.phase = phase;
+    return state;
+}
+
+// --- Synthetic execution-plan fixtures -------------------------------------
+//
+// Every value below is a **synthetic test fixture**: the numbers the production
+// plan builder needs to produce a usable plan. They are not measurements of this
+// vehicle, `src/VehicleConfig.h` is not changed by them, and no production
+// `Measured` provenance rests on anything here. They exist so the gate can be
+// driven against the real `buildRunExecutionPlan()` rather than a hand-built
+// struct.
+
+ev::Sourced<double> fixtureMeasured(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::Measured);
+}
+
+ev::Sourced<double> fixtureProvisional(double value) {
+    return ev::Sourced<double>(value, ev::ValueSource::Provisional);
+}
+
+// The plan's own two physical dependencies: the credible contact-window tolerance
+// and the forward-stop margin beyond the Bottle Line. Each is supplied either
+// established (a fixture `Measured`) or as a placeholder, so the two can be failed
+// independently.
+ev::RunExecutionDependencies fixtureDependencies(bool windowEstablished,
+                                                bool marginEstablished) {
+    return ev::RunExecutionDependencies(
+        windowEstablished ? fixtureMeasured(0.01) : fixtureProvisional(0.01),
+        marginEstablished ? fixtureMeasured(0.15) : fixtureProvisional(0.15));
+}
+
+// Synthetic bottle-interaction calibration, established for the purposes of
+// exercising the valid path only.
+ev::BottleEvidenceConfig fixtureBottleEvidence() {
+    return ev::BottleEvidenceConfig(fixtureMeasured(0.02), fixtureMeasured(0.05),
+                                    fixtureMeasured(0.01));
+}
+
+// One announced run's execution plan, through the **production builder** - the
+// same call the vehicle layer makes at the announcement boundary. The Regional
+// fixture announcement is 5.00 m Target Distance / 1.00 m Bottle Line Distance
+// with the Regional 2.0 m bottle placement. `timingReady` is false and the delay
+// is 0, which is the honest production value until a physical timing model is
+// validated: the plan's usability must not depend on the timing model.
+ev::RunExecutionPlanResult fixturePlanResult(bool windowEstablished, bool marginEstablished) {
+    return ev::buildRunExecutionPlan(
+        ev::RunConfig(ev::TournamentLevel::RegionalInvitational, 5.0, 10.0, 1.0, 2.0),
+        fixtureBottleEvidence(), fixtureDependencies(windowEstablished, marginEstablished),
+        false, 0.0, 0.0);
+}
+
+// The operator state of a run announced with `plan`: the phase an announcement
+// leaves behind, and the plan fact read from the plan itself (`RunExecutionPlan`
+// invariant: `valid == (status == Planned)`). The live wiring is the same
+// derivation `VehicleRuntime::systemState()` performs.
+ev::OperatorSystemState announcedStateOf(const ev::RunExecutionPlan& plan) {
+    ev::OperatorSystemState state;
+    state.phase = ev::RunPhase::ParameterValid;
+    state.executionPlanEstablished = plan.valid;
     return state;
 }
 
@@ -416,11 +481,16 @@ void test_configuration_changes_require_the_idle_boundary(void) {
 }
 
 // Arming needs a run to arm *for*: the announcement is the deliberate second
-// step, and arming without it would arm a vehicle with nothing to run.
+// step, and arming without it would arm a vehicle with nothing to run. Since S16
+// an announcement is also not sufficient on its own: the run must hold a usable
+// execution plan, so the admissible fixture is a run announced with the plan the
+// production builder produced for it.
 void test_arming_requires_an_announced_run_and_is_refused_when_already_armed(void) {
-    expectAdmissible(ev::OperatorCommandId::Arm, stateOf(ev::RunPhase::ParameterValid));
+    const ev::RunExecutionPlanResult planned = fixturePlanResult(true, true);
+    TEST_ASSERT_TRUE_MESSAGE(planned.valid, "the fixture plan must be usable");
+    expectAdmissible(ev::OperatorCommandId::Arm, announcedStateOf(planned.plan));
 
-    ev::OperatorSystemState armed = stateOf(ev::RunPhase::ParameterValid);
+    ev::OperatorSystemState armed = announcedStateOf(planned.plan);
     armed.armed = true;
     expectRefused(ev::OperatorCommandId::Arm, armed, ev::CommandRefusal::AlreadyArmed);
 
@@ -428,6 +498,141 @@ void test_arming_requires_an_announced_run_and_is_refused_when_already_armed(voi
                   ev::CommandRefusal::NoRunAnnounced);
     expectRefused(ev::OperatorCommandId::Arm, stateOf(ev::RunPhase::Done),
                   ev::CommandRefusal::NoRunAnnounced);
+    // Announcing changed the phase but no run produced a plan: still no plan to
+    // arm with, and that is a different named refusal from "nothing announced".
+    expectRefused(ev::OperatorCommandId::Arm, stateOf(ev::RunPhase::ParameterValid),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+}
+
+// S16 / Option D: an announced run whose adopted plan was refused has no forward
+// execution target and no forward completion, so arming it is refused by name at
+// the arm decision - it must not wait for the run to discover the refusal at the
+// approach bound after the trigger. The configuration-build checks all pass here
+// on purpose: the plan is the only thing missing, and it is still enough.
+void test_arming_is_refused_while_the_announced_runs_plan_is_not_usable(void) {
+    const ev::RunExecutionPlanResult refused = fixturePlanResult(false, true);
+    TEST_ASSERT_FALSE(refused.valid);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunExecutionPlanStatus::MissingBottleInteractionCalibration),
+        static_cast<int>(refused.status));
+    TEST_ASSERT_TRUE_MESSAGE(ev::armVerdictFor(allChecksPassing()).ok,
+                             "every configuration check must pass for this case to be about the plan");
+
+    const ev::CommandAdmissibility gate =
+        ev::admissibilityOf(ev::OperatorCommandId::Arm, announcedStateOf(refused.plan));
+    TEST_ASSERT_FALSE(gate.allowed);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::CommandRefusal::ExecutionPlanNotEstablished),
+                          static_cast<int>(gate.refusal));
+    TEST_ASSERT_EQUAL_STRING("ExecutionPlanNotEstablished",
+                             ev::commandRefusalName(gate.refusal));
+    TEST_ASSERT_TRUE(gate.refusal != ev::CommandRefusal::NoRunAnnounced);
+
+    // The same state with a usable plan is admitted, and the authority then arms
+    // on the readiness the same verdict carries: the refusal above is the plan's
+    // and nothing else's.
+    const ev::RunExecutionPlanResult planned = fixturePlanResult(true, true);
+    const ev::OperatorSystemState ready = announcedStateOf(planned.plan);
+    expectAdmissible(ev::OperatorCommandId::Arm, ready);
+    const ev::SafetyReadiness readiness = ev::armReadinessFor(allChecksPassing());
+    TEST_ASSERT_TRUE(readiness.allReady());
+    ev::SafetyAuthority authority;
+    TEST_ASSERT_TRUE(authority.arm(readiness));
+    TEST_ASSERT_TRUE(authority.isArmed());
+}
+
+// Each of the plan's two dependencies is individually sufficient to refuse the
+// plan, and therefore to refuse the arm. `Provisional` is a placeholder: it never
+// authorizes a plan that depends on it, whichever of the two it is.
+void test_each_plan_dependency_independently_refuses_the_arm(void) {
+    const ev::RunExecutionPlanResult missingMargin = fixturePlanResult(true, false);
+    TEST_ASSERT_FALSE(missingMargin.valid);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunExecutionPlanStatus::MissingForwardExecutionTarget),
+        static_cast<int>(missingMargin.status));
+    expectRefused(ev::OperatorCommandId::Arm, announcedStateOf(missingMargin.plan),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+
+    const ev::RunExecutionPlanResult missingWindow = fixturePlanResult(false, true);
+    TEST_ASSERT_FALSE(missingWindow.valid);
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunExecutionPlanStatus::MissingBottleInteractionCalibration),
+        static_cast<int>(missingWindow.status));
+    expectRefused(ev::OperatorCommandId::Arm, announcedStateOf(missingWindow.plan),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+
+    // Both established: the plan is usable and the arm gate opens.
+    const ev::RunExecutionPlanResult planned = fixturePlanResult(true, true);
+    TEST_ASSERT_TRUE(planned.valid);
+    expectAdmissible(ev::OperatorCommandId::Arm, announcedStateOf(planned.plan));
+}
+
+// Timing readiness is deliberately **not** part of plan validity (Option D, point
+// C): the production build has `timingReady` false and a 0 s delay, and such a
+// plan is still a usable plan. An empirical timing predictor must never become a
+// mandatory arming dependency.
+void test_a_usable_plan_without_a_timing_model_still_opens_the_arm_gate(void) {
+    const ev::RunExecutionPlanResult planned = fixturePlanResult(true, true);
+    TEST_ASSERT_TRUE(planned.valid);
+    TEST_ASSERT_FALSE(planned.plan.timingReady);
+    expectValue(0.0, planned.plan.initialDelayS);
+    expectValue(0.0, planned.plan.predictedMotionTimeS);
+    expectAdmissible(ev::OperatorCommandId::Arm, announcedStateOf(planned.plan));
+}
+
+// The refusal precedence is deliberate and safety-significant. A latched fault and
+// "no run at all" are checked first, so a plan refusal can never conceal either;
+// "already armed" is checked before the plan because a second arm has nothing to
+// do with this run's plan; and the plan precedes the configuration-build verdict,
+// because a refused plan is a fact about the run being armed rather than about a
+// configuration value.
+void test_the_plan_gate_precedence_is_deliberate(void) {
+    const ev::RunExecutionPlanResult refused = fixturePlanResult(false, true);
+    ev::OperatorSystemState announced = announcedStateOf(refused.plan);
+    announced.checks = allChecksPassing();
+
+    ev::OperatorSystemState faulted = announced;
+    faulted.faultLatched = true;
+    expectRefused(ev::OperatorCommandId::Arm, faulted, ev::CommandRefusal::FaultLatched);
+
+    ev::OperatorSystemState idle = announced;
+    idle.phase = ev::RunPhase::Idle;
+    expectRefused(ev::OperatorCommandId::Arm, idle, ev::CommandRefusal::NoRunAnnounced);
+
+    ev::OperatorSystemState armed = announced;
+    armed.armed = true;
+    expectRefused(ev::OperatorCommandId::Arm, armed, ev::CommandRefusal::AlreadyArmed);
+
+    expectRefused(ev::OperatorCommandId::Arm, announced,
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+}
+
+// The gate reads the plan the run layer actually holds, so the plan's own
+// lifecycle decides: before an announcement there is no plan; a new-run boundary
+// clears the one that was there; and a later announcement that adopts a refused
+// plan never inherits the previous, usable one.
+void test_only_the_current_plan_can_authorize_an_arm(void) {
+    ev::RunExecutionPlanHolder holder;
+    TEST_ASSERT_FALSE(holder.plan().valid);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunExecutionPlanStatus::NotPlanned),
+                          static_cast<int>(holder.plan().status));
+    expectRefused(ev::OperatorCommandId::Arm, announcedStateOf(holder.plan()),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+
+    const ev::RunExecutionPlanResult planned = fixturePlanResult(true, true);
+    holder.adopt(planned.plan);
+    TEST_ASSERT_TRUE(holder.plan().valid);
+    expectAdmissible(ev::OperatorCommandId::Arm, announcedStateOf(holder.plan()));
+
+    holder.clear();
+    TEST_ASSERT_FALSE(holder.plan().valid);
+    expectRefused(ev::OperatorCommandId::Arm, announcedStateOf(holder.plan()),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
+
+    const ev::RunExecutionPlanResult refused = fixturePlanResult(true, false);
+    holder.adopt(refused.plan);
+    TEST_ASSERT_FALSE(holder.plan().valid);
+    expectRefused(ev::OperatorCommandId::Arm, announcedStateOf(holder.plan()),
+                  ev::CommandRefusal::ExecutionPlanNotEstablished);
 }
 
 // A request that was never parsed carries no command, and is refused as such
@@ -443,7 +648,8 @@ void test_an_unparsed_request_is_refused_as_nothing(void) {
 // Every refusal spelling is a comma-free token: the response formatter writes
 // these names into comma-separated lines.
 void test_refusal_spellings_are_wire_safe(void) {
-    for (uint8_t index = 0U; index <= static_cast<uint8_t>(ev::CommandRefusal::NoRunAnnounced);
+    for (uint8_t index = 0U;
+         index <= static_cast<uint8_t>(ev::CommandRefusal::ExecutionPlanNotEstablished);
          ++index) {
         const char* name = ev::commandRefusalName(static_cast<ev::CommandRefusal>(index));
         TEST_ASSERT_NOT_NULL(name);
@@ -678,6 +884,11 @@ int main(int, char**) {
     RUN_TEST(test_reset_is_available_at_every_boundary);
     RUN_TEST(test_configuration_changes_require_the_idle_boundary);
     RUN_TEST(test_arming_requires_an_announced_run_and_is_refused_when_already_armed);
+    RUN_TEST(test_arming_is_refused_while_the_announced_runs_plan_is_not_usable);
+    RUN_TEST(test_each_plan_dependency_independently_refuses_the_arm);
+    RUN_TEST(test_a_usable_plan_without_a_timing_model_still_opens_the_arm_gate);
+    RUN_TEST(test_the_plan_gate_precedence_is_deliberate);
+    RUN_TEST(test_only_the_current_plan_can_authorize_an_arm);
     RUN_TEST(test_an_unparsed_request_is_refused_as_nothing);
     RUN_TEST(test_refusal_spellings_are_wire_safe);
     RUN_TEST(test_announcement_gate_reports_the_first_thing_to_fix);

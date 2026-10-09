@@ -167,6 +167,12 @@ enum class CommandRefusal : uint8_t {
     FaultLatched,      // a fault is of record; reset clears it, and nothing else may
     AlreadyArmed,      // the authority already reports armed
     NoRunAnnounced,    // arm without a valid announcement
+    // Arm with an announcement whose **execution plan** is not usable: absent,
+    // refused, cleared or replaced. A separate name from `NoRunAnnounced` because
+    // "there is no run to arm for" and "the run that was announced has no
+    // execution target" are different facts, and an operator has to be told which
+    // one holds (S16; Option D in `ARMING-PLAN-GATE-REVIEW.md`).
+    ExecutionPlanNotEstablished,
 };
 
 inline const char* commandRefusalName(CommandRefusal refusal) {
@@ -185,6 +191,8 @@ inline const char* commandRefusalName(CommandRefusal refusal) {
             return "AlreadyArmed";
         case CommandRefusal::NoRunAnnounced:
             return "NoRunAnnounced";
+        case CommandRefusal::ExecutionPlanNotEstablished:
+            return "ExecutionPlanNotEstablished";
     }
     return "None";
 }
@@ -196,6 +204,14 @@ struct OperatorSystemState {
     bool armed = false;
     bool faultLatched = false;
     ConfigurationBuildChecks checks{};
+    // True only when the announced run's **adopted** execution plan is usable
+    // (`RunExecutionPlan::valid`, i.e. status `Planned`). The vehicle layer fills
+    // it from the plan it actually holds, so the fact is the run's current plan
+    // and not a re-derivation from the configuration: a plan cleared by `reset`,
+    // replaced by a new announcement or never adopted all read false here. False
+    // is also the fail-closed default for a caller that states no plan, because
+    // arming must not become easier when a state field is omitted.
+    bool executionPlanEstablished = false;
 };
 
 struct CommandAdmissibility {
@@ -322,6 +338,24 @@ inline CommandAdmissibility admissibilityOf(OperatorCommandId id, const Operator
             // with nothing announced would arm a vehicle with no run to run.
             if (state.phase != RunPhase::ParameterValid) {
                 verdict.refusal = CommandRefusal::NoRunAnnounced;
+                return verdict;
+            }
+            // An announcement on its own is not enough (S16): the run it announced
+            // must still hold a **usable** execution plan. Without one there is no
+            // forward execution target and no forward completion, so the run could
+            // only discover the refusal by timing out at the approach bound long
+            // after the trigger - which is exactly the failure this gate exists to
+            // state up front, as a named refusal, before the authority is asked.
+            // The fact is read from the plan the run layer actually holds, so it
+            // cannot be satisfied by a stale copy of a previous announcement.
+            // Ordering: the safety-significant preconditions above (an already
+            // armed authority, no announcement at all) and the fault gate before
+            // the switch are checked first, so this refusal can never conceal one
+            // of those - and it in turn precedes the configuration-build verdict,
+            // because a refused plan is a fact about the run being armed rather
+            // than about a configuration value.
+            if (!state.executionPlanEstablished) {
+                verdict.refusal = CommandRefusal::ExecutionPlanNotEstablished;
                 return verdict;
             }
             verdict.allowed = true;
