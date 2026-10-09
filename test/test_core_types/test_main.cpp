@@ -77,6 +77,22 @@ void test_only_measured_values_count_as_measured(void) {
     TEST_ASSERT_TRUE(ev::Sourced<double>(0.5, ev::ValueSource::Measured).isMeasured());
 }
 
+// The citation rule asks for a *name*, not merely a non-null pointer (audit L1):
+// an empty citation used to pass it, which would let a promoted value claim it had
+// a record while naming nothing. A placeholder still needs no citation at all.
+void test_a_non_placeholder_citation_must_name_something(void) {
+    TEST_ASSERT_TRUE(ev::Sourced<double>(0.5, ev::ValueSource::Measured,
+                                         "VERIFIED_STATE.md #6")
+                         .citesEvidence());
+    TEST_ASSERT_FALSE(ev::Sourced<double>(0.5, ev::ValueSource::Measured, "").citesEvidence());
+    TEST_ASSERT_FALSE(ev::Sourced<double>(0.5, ev::ValueSource::Measured).citesEvidence());
+    TEST_ASSERT_FALSE(ev::Sourced<double>(0.5, ev::ValueSource::RuleDerived, "").citesEvidence());
+    TEST_ASSERT_FALSE(ev::Sourced<double>(0.5, ev::ValueSource::Derived, "").citesEvidence());
+
+    // A placeholder is not a claim about the vehicle and needs no citation.
+    TEST_ASSERT_TRUE(ev::Sourced<double>(0.5, ev::ValueSource::Provisional).citesEvidence());
+}
+
 void test_calibration_is_fully_measured_only_when_every_value_is_measured(void) {
     TEST_ASSERT_TRUE(calibrationWith(ev::ValueSource::Measured).isFullyMeasured());
     TEST_ASSERT_FALSE(calibrationWith(ev::ValueSource::Provisional).isFullyMeasured());
@@ -298,6 +314,7 @@ void test_fault_state_defaults_to_no_fault(void) {
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_only_measured_values_count_as_measured);
+    RUN_TEST(test_a_non_placeholder_citation_must_name_something);
     RUN_TEST(test_calibration_is_fully_measured_only_when_every_value_is_measured);
     RUN_TEST(test_safety_limits_are_fully_established_only_when_every_limit_is_measured);
     RUN_TEST(test_battery_voltage_is_required_only_when_the_circuit_exists);

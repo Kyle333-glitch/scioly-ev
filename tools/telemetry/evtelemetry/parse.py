@@ -5,7 +5,7 @@ The firmware writes one line per record: ``EVS<v>,...`` for a control tick and
 lines into :class:`Sample` and :class:`Event` values, and refuses anything that
 does not match the frozen schema.
 
-Three rules shape the design, and all three exist so a reader cannot be misled
+Four rules shape the design, and all four exist so a reader cannot be misled
 by a log it does not understand:
 
 * **Telemetry must parse, or the parse fails.** A line whose prefix is the
@@ -19,15 +19,31 @@ by a log it does not understand:
 * **Non-telemetry is not an error.** A captured serial stream also contains
   operator responses (``OK``, ``STATUS``, ...), the staged ``BOOT,...`` line and
   whatever else the port saw. Those lines are counted as ignored, because a log
-  is not required to be pure telemetry.
-* **Time is unwrapped, per lane.** ``t_ms`` is a raw ``millis()`` reading, so it
-  wraps every ~49.7 days, and the firmware's own arithmetic treats elapsed time
-  as an unsigned difference. Records are unwrapped using exactly that arithmetic
-  so a duration computed here cannot disagree with the firmware because of a
-  wrap. The two record kinds are unwrapped independently: the event lane drains
-  before the sample lane, so an event can legitimately appear *before* an older
-  sample in the byte stream, and a single shared counter would turn that legal
-  interleaving into a bogus timestamp jump.
+  is not required to be pure telemetry. Header lines that declare the capture's
+  own provenance (``# SYNTHETIC ...``) are read for that declaration and are
+  otherwise ignored like any other non-telemetry line.
+* **A capture can contain several *sessions*, and every record says which one it
+  belongs to.** The firmware writes a ``Boot`` event once per boot
+  (``VehicleRuntime::begin()``); a second ``Boot`` in one capture is a reboot,
+  and its ``millis()`` reading restarts. Records before the first boot are
+  session 0 (a capture that began mid-session), and each ``Boot`` opens the next
+  session, which the ``Boot`` record itself belongs to. A backwards timestamp
+  *within* one session is a uint32 wrap; a backwards timestamp across a session
+  boundary is a restart, and it is never reconstructed as 49.7 days of elapsed
+  time. Each record carries its ``session_index`` so a consumer can refuse to
+  compare two sessions against each other.
+* **Time is unwrapped, per lane and per session.** ``t_ms`` is a raw
+  ``millis()`` reading, so it wraps every ~49.7 days, and the firmware's own
+  arithmetic treats elapsed time as an unsigned difference. Records are
+  unwrapped using exactly that arithmetic so a duration computed here cannot
+  disagree with the firmware because of a wrap. The two record kinds are
+  unwrapped independently: the event lane drains before the sample lane, so an
+  event can legitimately appear *before* an older sample in the byte stream, and
+  a single shared counter would turn that legal interleaving into a bogus
+  timestamp jump. ``t_abs_ms`` is therefore a *per-lane, per-session* timeline:
+  durations within one lane and one session are exact, and a boundary seen by
+  both lanes is compared by its raw ``t_ms`` within the same session (which is
+  the same clock reading) rather than by two independently anchored timelines.
 """
 
 from __future__ import annotations
@@ -50,12 +66,19 @@ __all__ = [
     "Event",
     "Record",
     "LineError",
+    "SessionInfo",
     "Log",
     "parse_line",
     "parse_lines",
     "parse_text",
     "read_log",
 ]
+
+# The word a capture header uses to declare itself a generated fixture rather
+# than a recorded session (``synthetic.SYNTHETIC_MARKER`` mirrors it). It is
+# detected from the capture's own bytes, so renaming or copying a fixture cannot
+# erase its provenance: a name may add a warning, never remove one.
+SYNTHETIC_HEADER_MARKER = "SYNTHETIC"
 
 _UINT_RE = re.compile(r"^[0-9]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -188,6 +211,11 @@ class Sample:
     check: str
     drop_samples: int
     drop_events: int
+    # Which firmware session this record belongs to (0 for a capture that began
+    # mid-session; each `Boot` event opens the next). Two records with different
+    # `session_index` values were written by different boots, and their `t_ms`
+    # readings are not comparable - the clock restarted between them.
+    session_index: int = 0
 
     @property
     def t_abs_s(self) -> float:
@@ -217,6 +245,8 @@ class Event:
     fault: str
     drop_samples: int
     drop_events: int
+    # See `Sample.session_index`.
+    session_index: int = 0
 
     @property
     def t_abs_s(self) -> float:
@@ -224,6 +254,27 @@ class Event:
 
 
 Record = Union[Sample, Event]
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """One firmware session in a capture: the records between boot boundaries.
+
+    ``opened_by_boot`` is true when a ``Boot`` event opened this session, which is
+    what makes a backwards timestamp inside it a *wrap* rather than a restart.
+    ``boot_t_ms`` is that event's raw reading (the firmware writes it at
+    ``millis()`` 0). Session 0 is a capture that began mid-session; it has no
+    boot record and is reported as such rather than being treated as a session
+    with an unknown start.
+    """
+
+    index: int
+    opened_by_boot: bool
+    boot_t_ms: Optional[int]
+    sample_count: int
+    event_count: int
+    first_t_abs_ms: Optional[int]
+    last_t_abs_ms: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -552,6 +603,24 @@ class Log:
     errors: list[LineError] = field(default_factory=list)
     total_lines: int = 0
     sha256: Optional[str] = None
+    # The capture's own provenance declaration, from its ``#`` header lines
+    # (e.g. ``SYNTHETIC``), or ``None`` when it declared nothing. It travels with
+    # the parsed records so no report can drop it by looking only at a filename.
+    declared_provenance: Optional[str] = None
+    # Every backwards step observed inside one lane of one session, as
+    # ``{"line_number", "lane", "session_index", "from_ms", "to_ms", "delta_ms"}``.
+    # A backwards step within a session is the only wrap this tool reconstructs;
+    # the observation is kept so a report can state that it happened rather than
+    # leaving a 49.7-day jump implicit.
+    wrap_observations: list[dict] = field(default_factory=list)
+
+    @property
+    def session_count(self) -> int:
+        return len(self.sessions)
+
+    @property
+    def sessions(self) -> list[SessionInfo]:
+        return _summarize_sessions(self.samples, self.events)
 
     @property
     def records(self) -> list[Record]:
@@ -589,6 +658,108 @@ def _unwrap(previous_ms: Optional[int], previous_abs: int, t_ms: int) -> int:
     return previous_abs + delta
 
 
+# The event name that opens a session (`TelemetryEventCode::Boot`).
+_BOOT_EVENT = "Boot"
+
+
+def _declared_provenance(raw: str) -> Optional[str]:
+    """The provenance a capture header declares, if any.
+
+    Reads the ``#`` header lines the fixtures carry (``synthetic.py`` writes
+    ``# SYNTHETIC ...``). The marker is detected from the capture's own bytes, so
+    a fixture that is copied, renamed or exported keeps saying it is synthetic.
+    """
+    text = raw.lstrip()
+    if not text.startswith("#"):
+        return None
+    body = text[1:].strip()
+    token = body.split(",", 1)[0].split(" ", 1)[0].strip().upper()
+    return token or None
+
+
+# How close to the top of the uint32 range a reading has to be for a rollover to
+# the bottom to be read as a *wrap* rather than something else. `millis()` counts
+# milliseconds, so 120 s is a wide margin around the ~49.7-day boundary: the
+# firmware's own control cadence is tens of milliseconds and a capture is seconds
+# to minutes long, so a reading this near the top followed by one this near the
+# bottom is a rollover.
+_WRAP_WINDOW_MS = 120_000
+
+# A backwards step smaller than this is the firmware reading `millis()` again
+# between the moment it stamped one record and the next: the two stamps are not
+# ordered, but no clock restarted.
+_REORDER_WINDOW_MS = 1_000
+
+
+def classify_backwards_step(previous_ms: Optional[int], t_ms: int) -> Optional[dict]:
+    """Classifies a step whose raw reading is behind the previous one, or ``None``.
+
+    Three different things produce a backwards raw reading, and only two of them
+    can be reconstructed from the readings alone:
+
+    * ``reordered`` - the step is a few milliseconds back. The firmware reads the
+      clock again before it writes a record, so consecutive records can carry
+      readings taken a moment apart, in either order. The interval between them is
+      noise, not a clock event.
+    * ``wrap`` - the readings sit either side of the top of the uint32 range (the
+      previous one near the top, the next one near the bottom). This is the
+      rollover a long-running board eventually produces, and its elapsed time is
+      the unsigned difference.
+    * ``restart_suspected`` - anything else: a large backwards step nowhere near
+      the rollover point. A clock that restarted (a reset whose ``Boot`` line was
+      not captured) looks exactly like this, and so does a corrupt reading. It can
+      **not** be told apart here, so it is named and reported rather than being
+      reconstructed as ~49.7 days of elapsed time - which is what treating every
+      backwards reading as a wrap used to do.
+    """
+    if previous_ms is None or t_ms >= previous_ms:
+        return None
+    unsigned = (t_ms - previous_ms) % _UINT32_SPAN
+    raw_back = previous_ms - t_ms
+    if raw_back < _REORDER_WINDOW_MS:
+        kind = "reordered"
+    elif previous_ms > _UINT32_SPAN - _WRAP_WINDOW_MS and t_ms < _WRAP_WINDOW_MS:
+        kind = "wrap"
+    else:
+        kind = "restart_suspected"
+    return {
+        "kind": kind,
+        "from_ms": previous_ms,
+        "to_ms": t_ms,
+        "unsigned_delta_ms": unsigned,
+        "raw_backwards_ms": raw_back,
+    }
+
+
+def _summarize_sessions(samples: list[Sample], events: list[Event]) -> list[SessionInfo]:
+    """Groups already-unwrapped records into their firmware sessions."""
+    boot_ms: dict[int, Optional[int]] = {}
+    for event in events:
+        if event.event == _BOOT_EVENT and event.session_index not in boot_ms:
+            boot_ms[event.session_index] = event.t_ms
+
+    buckets: dict[int, list[Union[Sample, Event]]] = {}
+    for record in (*samples, *events):
+        buckets.setdefault(record.session_index, []).append(record)
+
+    sessions: list[SessionInfo] = []
+    for index in sorted(buckets):
+        records = buckets[index]
+        stamps = [record.t_abs_ms for record in records]
+        sessions.append(
+            SessionInfo(
+                index=index,
+                opened_by_boot=index in boot_ms,
+                boot_t_ms=boot_ms.get(index),
+                sample_count=sum(1 for record in records if isinstance(record, Sample)),
+                event_count=sum(1 for record in records if isinstance(record, Event)),
+                first_t_abs_ms=min(stamps) if stamps else None,
+                last_t_abs_ms=max(stamps) if stamps else None,
+            )
+        )
+    return sessions
+
+
 def parse_lines(
     lines: Iterable[str],
     *,
@@ -602,12 +773,20 @@ def parse_lines(
     failure is recorded in ``Log.errors`` and parsing continues, which is for
     surveying a damaged capture - never for producing a metrics report that
     would read as if the log were complete.
+
+    ``Boot`` events open sessions. A capture written by one firmware run has one
+    session; a capture that spans a reset has more, and each record's
+    ``session_index`` says which one it belongs to so a consumer can refuse to
+    compare across the restart instead of reading it as 49.7 days.
     """
     log = Log(source=source or "<stream>")
     sample_previous_ms: Optional[int] = None
     sample_previous_abs = 0
     event_previous_ms: Optional[int] = None
     event_previous_abs = 0
+    session_index = 0
+    session_records = 0
+    provenance: Optional[str] = None
 
     for index, raw in enumerate(lines, start=1):
         log.total_lines = index
@@ -620,26 +799,67 @@ def parse_lines(
             continue
 
         if record is None:
+            declared = _declared_provenance(raw)
+            if declared is not None and provenance is None:
+                provenance = declared
             log.ignored_lines.append(index)
             continue
 
         if isinstance(record, Sample):
+            previous_ms = sample_previous_ms
+            step = classify_backwards_step(previous_ms, record.t_ms)
+            if step is not None:
+                log.wrap_observations.append(
+                    {
+                        "line_number": index,
+                        "lane": "sample",
+                        "session_index": session_index,
+                        **step,
+                    }
+                )
             record = dataclasses.replace(
                 record,
-                t_abs_ms=_unwrap(sample_previous_ms, sample_previous_abs, record.t_ms),
+                t_abs_ms=_unwrap(previous_ms, sample_previous_abs, record.t_ms),
+                session_index=session_index,
             )
             sample_previous_ms = record.t_ms
             sample_previous_abs = record.t_abs_ms
             log.samples.append(record)
+            session_records += 1
         else:
+            # The Boot event opens a session and belongs to it: the records after
+            # it are the new boot's, so both lanes' unwrap chains restart here. A
+            # capture whose first record is the Boot event is session 0; a Boot
+            # seen after any record of the current session opens the next one.
+            if record.event == _BOOT_EVENT:
+                if session_records:
+                    session_index += 1
+                sample_previous_ms = None
+                sample_previous_abs = 0
+                event_previous_ms = None
+                event_previous_abs = 0
+            previous_ms = event_previous_ms
+            step = classify_backwards_step(previous_ms, record.t_ms)
+            if step is not None:
+                log.wrap_observations.append(
+                    {
+                        "line_number": index,
+                        "lane": "event",
+                        "session_index": session_index,
+                        **step,
+                    }
+                )
             record = dataclasses.replace(
                 record,
-                t_abs_ms=_unwrap(event_previous_ms, event_previous_abs, record.t_ms),
+                t_abs_ms=_unwrap(previous_ms, event_previous_abs, record.t_ms),
+                session_index=session_index,
             )
             event_previous_ms = record.t_ms
             event_previous_abs = record.t_abs_ms
             log.events.append(record)
+            session_records += 1
 
+    log.declared_provenance = provenance
     return log
 
 

@@ -351,17 +351,39 @@ void test_announcement_refusals_carry_the_gate_that_refused(void) {
 // the kinematic picture behind the announcement - not something the operator can
 // reconstruct from the typed configuration and the limits by eye. It is reported,
 // not obeyed: the run's delay is its execution plan's (S7).
+//
+// It also carries the fate of the run's **execution plan** (audit P12 / OBS-FWD):
+// the named status and, only when there is one, the forward execution target. The
+// two plan vocabularies are deliberately separate fields - `plan=` is the timing
+// estimate's status and `exec=` is the execution plan's - so neither can be read
+// as the other.
 void test_announce_ack_carries_the_run_plan(void) {
     char buffer[ev::kSerialLineBufferBytes];
     ev::AnnounceVerdict verdict;
     verdict.ok = true;
     verdict.plan = ev::RunTimingPlan(0.5000, 2.0000, 10.0000, 0.2000, 12.2000, 2.8000, true,
                                      ev::RunTimingPlanStatus::Planned);
+    ev::ExecutionPlanEcho echo;
+    echo.status = ev::RunExecutionPlanStatus::Planned;
+    echo.forwardStopMpPositionM = 6.1500;
 
-    TEST_ASSERT_TRUE(ev::formatAnnounceAck(verdict, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_TRUE(ev::formatAnnounceAck(verdict, echo, buffer, ev::kSerialLineCapacity) > 0U);
     TEST_ASSERT_EQUAL_STRING(
         "OK,cmd=announce,plan=Planned,cruise_mps=0.5000,delay_s=2.0000,total_s=12.2000,"
-        "margin_s=2.8000",
+        "margin_s=2.8000,exec=Planned,fwd_stop_m=6.1500",
+        buffer);
+
+    // A refused execution plan still says which refusal it was, and its forward
+    // stop is the absent marker - never a zero that would read as a landmark at
+    // the Start Point.
+    ev::ExecutionPlanEcho refusedEcho;
+    refusedEcho.status = ev::RunExecutionPlanStatus::MissingForwardExecutionTarget;
+    refusedEcho.forwardStopMpPositionM = 0.0;
+    TEST_ASSERT_TRUE(ev::formatAnnounceAck(verdict, refusedEcho, buffer, ev::kSerialLineCapacity) >
+                     0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "OK,cmd=announce,plan=Planned,cruise_mps=0.5000,delay_s=2.0000,total_s=12.2000,"
+        "margin_s=2.8000,exec=MissingForwardExecutionTarget,fwd_stop_m=-",
         buffer);
 
     // The estimate the gate accepts for the fixture configuration is built by the
@@ -641,17 +663,34 @@ void test_worst_case_responses_match_the_declared_bounds(void) {
         ev::formatChecksLine(allChecksPassing(), buffer, ev::kSerialLineCapacity);
     TEST_ASSERT_TRUE(checksLength > 0U);
 
-    // The announce confirmation: the widest plan status name, so the refusal path
-    // and the acceptance path are bounded by the same estimate. The widest form
-    // carries negative values, which is the widest a fixed-point field can be.
+    // The announce confirmation: the widest timing-plan status name and four
+    // negative 13-character values (the widest a fixed-point field can be), then
+    // the execution section's two renderings. They are **exclusive** - a refused
+    // execution plan writes the widest status name and the 1-character absent
+    // marker for the target, while `Planned` writes its 7-character name and the
+    // 13-character value - so the declared bound is the wider of the two, and both
+    // are rendered here so a later field cannot widen one of them silently.
     ev::AnnounceVerdict wideAnnounce;
     wideAnnounce.plan = ev::RunTimingPlan(-9999999.9999, -9999999.9999, -9999999.9999,
                                           -9999999.9999, -9999999.9999, -9999999.9999, false,
                                           ev::RunTimingPlanStatus::PlanExceedsMaxRunDuration);
-    const uint16_t announceAckLength =
-        ev::formatAnnounceAck(wideAnnounce, buffer, ev::kSerialLineCapacity);
-    TEST_ASSERT_EQUAL_UINT32(ev::kOperatorAnnounceAckWorstCaseChars, announceAckLength);
-    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), announceAckLength);
+    ev::ExecutionPlanEcho wideEcho;
+    wideEcho.status = ev::RunExecutionPlanStatus::MissingBottleInteractionCalibration;
+    wideEcho.forwardStopMpPositionM = -9999999.9999;
+    const uint16_t widestNameLength =
+        ev::formatAnnounceAck(wideAnnounce, wideEcho, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_EQUAL_UINT32(ev::kOperatorAnnounceAckWorstCaseChars, widestNameLength);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), widestNameLength);
+
+    wideEcho.status = ev::RunExecutionPlanStatus::Planned;
+    const uint16_t widestValueLength =
+        ev::formatAnnounceAck(wideAnnounce, wideEcho, buffer, ev::kSerialLineCapacity);
+    TEST_ASSERT_TRUE(widestValueLength > 0U);
+    TEST_ASSERT_TRUE(widestValueLength <= ev::kOperatorAnnounceAckWorstCaseChars);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(strlen(buffer)), widestValueLength);
+    // The number is echoed, so the acceptance path is not just shorter by
+    // accident of the absent marker: it really does carry the forward stop.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, "fwd_stop_m=-9999999.9999"));
 
     // The widest check report is the one whose first failure is the longest check
     // name, so every check before it passes and every check from it on fails.
@@ -822,6 +861,10 @@ int main(int, char**) {
     RUN_TEST(test_check_report_names_every_check);
     RUN_TEST(test_checks_failure_attribution_is_named_and_masked);
     RUN_TEST(test_announcement_refusals_carry_the_gate_that_refused);
+    // S13R I-2 / P9: this case existed but was never registered, so Unity never
+    // ran it and the suite counted it nowhere. It pins the plan-bearing announce
+    // acknowledgement shape (extended for P12 with the execution-plan echo).
+    RUN_TEST(test_announce_ack_carries_the_run_plan);
     RUN_TEST(test_status_line_pins_the_control_state);
     RUN_TEST(test_status_line_reports_an_empty_vehicle);
     RUN_TEST(test_telemetry_responses_report_the_realized_state);

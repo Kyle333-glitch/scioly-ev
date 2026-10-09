@@ -7438,3 +7438,109 @@ block E. The two pre-existing orphaned tests
 P9. Two observations are recorded rather than silently decided: a refused arm is not
 counted in the refusal diagnostic counter, and the `BENCH,drive` line gained an
 additive field (`BENCH` is ignored by the analyzer, so no tooling change is needed).
+## D52 / S15 - 2026-10-08 - Measurement and analysis integrity: one endpoint, one run, one record per line
+
+S15 (`POST-S13-REPAIR-ROADMAP.md` stage B) repairs the analysis-integrity findings
+T1-T8 and the assigned micro items P8 (the serial-framing seam it owns), P9, P10,
+P11, P12 and P13. Each is a demonstrated-defect fix under the freeze rule
+(`docs/PRE_HARDWARE_FREEZE.md` section 6): reproduced against the pre-repair
+revision, repaired, and pinned by focused regressions. **No hardware action**: no
+upload, no serial port opened, no arming, no motor command, no measurement. All
+twelve `VERIFIED_STATE.md` hardware rows remain UNVERIFIED and no calibration value
+moved.
+
+### The serial framing defect (M2/B5) - the largest repair here
+**Before**: one buffer held both the line being formatted and the line being sent,
+so `stage(urgent)` overwrote a partially emitted telemetry record; the host read a
+telemetry prefix and an operator reply as one malformed record with no terminator
+between them ("64 bytes of EVS3 then `OK,cmd=disarm` concatenated without CRLF"),
+the same priority could destroy an earlier reply, and an over-capacity line was
+staged with no bound check. **After**: the decision is a pure module,
+`ev::LineFramer` (`lib/evcore/src/SerialLineFraming.h`), and
+`src/SerialTransport.h` is a thin adapter over the board's port. Two line slots:
+the formatter composes the next line in the slot that is not transmitting; an
+urgent response staged while a line is in flight waits for that line's terminator;
+a second urgent replaces only the line still waiting (counted, nothing emitted); a
+telemetry line is refused and counted while either slot is busy; an over-capacity
+line is refused and counted (`oversizeLinesRefused`). Every write is gated on
+`availableForWrite()` and a short or zero write resumes where it stopped -
+`Serial.write` is never assumed to send every byte. Static cost only: +577 bytes of
+`.bss` per image (the single buffer *was* the defect); no allocation, no unbounded
+buffer, no wait, and the emergency path (the supply cut) is unchanged.
+
+### The analyzer (T1-T7)
+- **T1/M7**: `Boot` opens a session and belongs to it; every record carries its
+  `session_index`; backwards readings are classified as `wrap`, `reordered` or
+  `restart_suspected` instead of all being read as 49.7 days; metrics analyze the
+  last run of the last session with samples, report what was excluded
+  (`mixed_sessions`/`mixed_runs`), compute the window per session, and refuse the
+  elapsed duration for an unlabelled restart; cross-lane phase comparison uses the
+  raw `t_ms` within one session. The audit reproducer (1000 ms, Boot 0, 0/20 ms)
+  no longer produces a 4 294 967 s capture.
+- **T2/M8**: the endpoint is the position at the **verified final stop**
+  (`end_position_source`), with the last sample, the after-stop travel and the
+  sampling window reported separately and never substituted for it; the believed
+  target uses the sign of the leg the run stopped on (`MotionPlan::remainingDistanceTo`),
+  and completion/abort is explicit.
+- **T3/M9**: measurement headers are normalized *and used*, duplicate columns and
+  wrong-width rows are refused, numbers must be finite and inside their column's
+  domain, failures are documented CLI errors with exit 2 and no partial report, and
+  JSON is written strictly finite by rename (`allow_nan=False`).
+- **T4/M10**: every run id's output directory is preflighted for collisions
+  (punctuation folding **and** case-insensitive filesystem behaviour) before
+  anything is written; every input is validated before the first report; the
+  manifest is published atomically.
+- **T5/M11**: the capture's own `# SYNTHETIC` declaration travels through the parse
+  into metrics, the report, the plots and the manifest; a name may add a warning,
+  never remove one.
+- **T6/L2**: `synth` refuses to replace a differing existing fixture without
+  `--force` (checked for all fixtures before any write).
+- **T7/L3**: a rerun reconciles its run directory (no stale `parse_errors.txt`,
+  no stale plots); phase durations are transition-bounded, with the observed sample
+  span reported separately and the still-in-effect final phase marked censored.
+- **T8/L1**: `citesEvidence()` requires a non-null **and non-empty** citation.
+
+### Runtime and test items
+- **P9**: both orphans are registered (native baseline is 643 after S14; final
+  count **658**).
+- **P10**: `EncoderInput::resetAndReestablishReference()` performs the decoder
+  reset and the reference sample as one PRIMASK-preserving critical section, and
+  `reestablishReference()` itself reads both pins and updates the decoder with the
+  interrupt masked; the mask spans a handful of instructions and is restored at
+  once. The stationary precondition is unchanged; the wider reset barrier is S18's.
+- **P11**: `applyReset()` invalidates the runtime-held estimate/odometry caches
+  (current and last-valid velocity estimates, odometry estimate and stamp,
+  position-usable), so no stop verification can pair a fresh zero-speed claim with
+  the previous run's speed fact. The direction-safety barriers are untouched.
+- **P12/OBS-FWD**: `OK,cmd=announce` now carries `exec=<plan status>` and
+  `fwd_stop_m=<metres|->`, and the `AnnounceAccepted` event carries the same status
+  as its `detail` - the commanded forward stop now exists in the durable evidence
+  instead of only in a live `plan` query. The ACK's derived worst case is re-derived
+  as 192 (the execution section's two renderings are exclusive) and pinned by a host
+  test that renders both.
+- **P13**: one end-to-end scenario crosses the uint32 `millis()` wrap through the
+  real chain.
+
+### Validation (final content; the whole list re-run after the last edit; nothing uploaded)
+- `pio test -e native` -> **658/658** in **36** suites, exit 0 (643 + 15 new, all registered).
+- `pio run -e nano_r4` -> SUCCESS, 0 warnings, RAM 7364/32768, Flash 75232/262144.
+- `pio run -e bench` -> SUCCESS, 0 warnings, RAM 7564/32768, Flash 82740/262144.
+- `pio run -e bench-watchdog` -> SUCCESS, 0 warnings, RAM 7556/32768, Flash 82080/262144.
+- `python -m unittest discover -s tools/telemetry/tests -t tools/telemetry` -> **142/142 OK** (119 at S14).
+- `git diff --check` -> clean, exit 0.
+- Real-source probe `.agent-work/reviews/s15-2026-10-08/` (the **actual**
+  `src/SerialTransport.h` against a mock USB-CDC sink, same 11-check program both
+  ways): pristine `git archive HEAD` extract -> **4 of 11 checks fail, exit 1**;
+  repaired tree -> **0 of 11 fail, exit 0**.
+
+Resource deltas against S14: native **+15 cases**; RAM **+592 / +592 / +592**
+(the framer's second line slot); Flash **+692 / +1040 / +1044**.
+
+### Deliberately unchanged
+- The telemetry wire schema (**still v3**, `EVS3`/`EVE3`), every sample and event
+  field, the `PLAN` line, the help table, the bench image's behavior, all
+  calibration values and `Sourced` provenances, and every `VERIFIED_STATE.md` row.
+- The direction-safety barriers, the reversal permission rules, the taper/short-stop
+  semantics, the encoder-loss response, the configuration cross-checks and the
+  timing model: S18's, not this stage's.
+- `AGENTS.md` (no invariant changed).

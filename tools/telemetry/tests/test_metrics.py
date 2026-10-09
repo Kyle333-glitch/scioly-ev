@@ -15,6 +15,8 @@ from tests.support import metrics_for, sample_path, spec
 
 from evtelemetry import metrics as metrics_module
 from evtelemetry import schema, synthetic
+from evtelemetry.metrics import compute_metrics
+from evtelemetry.parse import Log, parse_text
 
 
 class NominalRunTest(unittest.TestCase):
@@ -48,6 +50,13 @@ class NominalRunTest(unittest.TestCase):
         )
 
     def test_phase_durations_track_the_generator_legs(self) -> None:
+        """Transition-bounded durations, so they equal the legs exactly.
+
+        A phase's duration is measured from the first sample of the phase to the
+        first sample of the *next* one - the reading at which the change is first
+        observable - not from the last same-phase sample, which is one cadence
+        early and would report a complete phase one interval short.
+        """
         durations = self.metrics["phases"]["durations_s"]
         for leg in self.spec.legs:
             # `FinalBrake` and `Done` are the two legs the fixture's final-stop
@@ -58,10 +67,34 @@ class NominalRunTest(unittest.TestCase):
             if leg.phase in ("FinalBrake", "Done"):
                 continue
             with self.subTest(phase=leg.phase):
-                expected = leg.duration_ms / 1000.0
-                # The last tick of a leg is the first of the next, so a segment is
-                # one cadence shorter than the leg.
-                self.assertAlmostEqual(durations[leg.phase], expected - 0.02, places=6)
+                self.assertAlmostEqual(
+                    durations[leg.phase], leg.duration_ms / 1000.0, places=6
+                )
+
+    def test_the_phase_still_in_effect_at_the_end_is_marked_censored(self) -> None:
+        """A span is not a dwell: the final phase is bounded by nothing.
+
+        The capture ends while `Done` is still in effect, so its duration is
+        unknown and is reported as `None` with the phase listed as censored, while
+        its observed span (a lower bound) is still available.
+        """
+        phases = self.metrics["phases"]
+        self.assertEqual(phases["censored_phases"], ["Done"])
+        final_segment = phases["segments"][-1]
+        self.assertEqual(final_segment["phase"], "Done")
+        self.assertTrue(final_segment["censored"])
+        self.assertIsNone(final_segment["duration_s"])
+        self.assertIsNotNone(final_segment["observed_span_s"])
+        # Every bounded phase keeps a bounded duration, and the observed span of a
+        # bounded phase is never longer than its duration.
+        for phase in phases["order"]:
+            if phase == "Done":
+                continue
+            with self.subTest(phase=phase):
+                self.assertIsNotNone(phases["durations_s"][phase])
+                self.assertLessEqual(
+                    phases["observed_span_s"][phase], phases["durations_s"][phase]
+                )
 
     def test_the_internal_run_time_is_the_fixtures_own_timeline(self) -> None:
         """The run's own clock, and the rule's confirmation interval outside it."""
@@ -91,23 +124,84 @@ class NominalRunTest(unittest.TestCase):
     def test_braking_and_reversal_timing_are_state_boundaries(self) -> None:
         timing = self.metrics["phase_timing"]
         self.assertTrue(timing["reversal_observed"])
-        # ForwardDecel runs 1200 ms, BrakeZeroSpeed 400 ms.
+        # ForwardDecel runs 1200 ms, BrakeZeroSpeed 400 ms. The dwell is the
+        # transition-bounded duration (BrakeZeroSpeed's first sample to Reverse's
+        # first sample), so it is the whole leg, not one cadence less.
         self.assertAlmostEqual(timing["forward_decel_to_brake_zero_s"], 1.2, places=6)
-        self.assertAlmostEqual(timing["brake_zero_dwell_s"], 0.38, places=6)
+        self.assertAlmostEqual(timing["brake_zero_dwell_s"], 0.4, places=6)
         self.assertAlmostEqual(timing["brake_zero_to_reverse_s"], 0.4, places=6)
         self.assertAlmostEqual(timing["forward_decel_to_reverse_s"], 1.6, places=6)
         # The note must survive: these are not stopping distances.
         self.assertIn("not stopping distances", timing["note"])
 
-    def test_position_metrics_are_labelled_as_believed(self) -> None:
+    def test_the_endpoint_is_the_verified_stop_and_says_so(self) -> None:
+        """The endpoint is the verified final stop, never just the last sample.
+
+        Before S15 the endpoint was the last usable position anywhere in the
+        capture, while the run's time was taken from the verified stop - so a
+        vehicle handled after the run reported a position it never stopped at.
+        """
         position = self.metrics["position"]
         self.assertEqual(position["first_m"], 0.0)
         self.assertIsNotNone(position["end_position_m"])
-        self.assertIsNotNone(position["believed_target_m"])
-        self.assertEqual(position["believed_target_m"], self.spec.target_m)
-        self.assertIn("firmware's run-axis estimate", position["note"])
+        self.assertEqual(position["end_position_source"], "verified_final_stop")
+        self.assertIsNone(position["end_position_unavailable_reason"])
+        self.assertEqual(position["verified_stop_m"], position["end_position_m"])
+        self.assertEqual(position["verified_stop_leg"], "reverse")
         # The run reverses, so the believed end position is below the maximum.
         self.assertLess(position["end_position_m"], position["max_m"])
+        # The stop is confirmed by a sample, so the endpoint is known only to within
+        # the distance travelled between that sample and the previous one. The
+        # window is reported, and here the vehicle had already settled, so it is 0.
+        self.assertEqual(position["end_position_sampling_window_ms"], self.spec.cadence_ms)
+        self.assertEqual(position["end_position_sampling_window_m"], 0.0)
+        # Nothing moved the vehicle after the stop in this fixture.
+        self.assertEqual(position["after_stop_travel_m"], 0.0)
+        self.assertEqual(position["last_m"], position["end_position_m"])
+
+    def test_the_reverse_leg_target_is_reconstructed_with_the_reverse_sign(self) -> None:
+        """A reverse-leg stop's target is `position - remaining`, not `+`.
+
+        The firmware's remaining distance on a reverse leg is `position - target`
+        (`MotionPlan::remainingDistanceTo`). Adding it - the forward-leg
+        definition - puts the believed target on the far side of the run, which is
+        the defect M8 reported; the fixture carries the firmware's own per-leg
+        signs, so the reconstruction has to use the leg the run actually stopped
+        on.
+        """
+        position = self.metrics["position"]
+        self.assertEqual(position["verified_stop_leg"], "reverse")
+        self.assertEqual(position["believed_target_m"], self.spec.reverse_target_m)
+        self.assertEqual(
+            position["believed_target_source"],
+            "reconstructed_from_verified_stop_reverse_leg",
+        )
+        # The forward definition would have produced the reverse leg's number with
+        # the wrong sign; the two must not agree here, or this test proves nothing.
+        forward_shape = position["verified_stop_m"] + position["verified_stop_remaining_m"]
+        self.assertNotAlmostEqual(forward_shape, position["believed_target_m"], places=3)
+        self.assertIn("firmware's run-axis estimate", position["note"])
+
+    def test_a_reverse_leg_stop_keeps_the_forward_target_visible(self) -> None:
+        """The forward execution target and the reverse target are both reported.
+
+        The fixture's forward legs drive to `target_m` and its reverse legs come
+        back to `reverse_target_m`; the sample lane's own `rem_m` shows both, so
+        the analyzer can pin each leg against the fixture's declared value.
+        """
+        self.assertNotEqual(self.spec.reverse_target_m, self.spec.target_m)
+        self.assertEqual(self.metrics["position"]["believed_target_m"], self.spec.reverse_target_m)
+
+    def test_endpoints_section_reports_the_same_endpoint_and_its_completion(self) -> None:
+        endpoints = self.metrics["endpoints"]
+        self.assertTrue(endpoints["stop_verified"])
+        self.assertEqual(endpoints["completion"], "done")
+        self.assertEqual(endpoints["believed_end_position_source"], "verified_final_stop")
+        self.assertEqual(
+            endpoints["believed_end_position_m"],
+            self.metrics["position"]["end_position_m"],
+        )
+        self.assertEqual(endpoints["verified_stop_leg"], "reverse")
 
     def test_velocity_and_effort_are_present(self) -> None:
         velocity = self.metrics["velocity"]
@@ -227,10 +321,14 @@ class ReproducibilityTest(unittest.TestCase):
         # or on the section that holds it. A boolean is a flag, not a measurement,
         # and carries no unit of its own.
         for key in metrics["window"]:
-            if "duration" in key:
+            if "duration" in key and not key.endswith("_reason"):
                 self.assertTrue(key.endswith("_s"), key)
         for key, value in metrics["run_window"].items():
             if key == "note" or key.endswith("_t_abs_ms") or isinstance(value, bool):
+                continue
+            # `completion` is a named outcome (done/fault/incomplete), not a
+            # measurement, so it carries no unit of its own.
+            if key == "completion":
                 continue
             self.assertTrue(key.endswith("_ms") or key.endswith("_s"), key)
         for key in metrics["control_dt"]:
@@ -242,9 +340,193 @@ class ReproducibilityTest(unittest.TestCase):
                 continue
             self.assertTrue(key.endswith("_s"), key)
         for key in metrics["position"]:
-            if key in ("usable_sample_count", "unusable_sample_count", "note"):
+            if key in (
+                "usable_sample_count",
+                "unusable_sample_count",
+                "note",
+                # Clock readings, a flag, the leg, and the named source/reason of
+                # the endpoint - each carries its own unit or none, by design.
+                "verified_stop_t_abs_ms",
+                "verified_stop_leg",
+                "end_position_source",
+                "end_position_unavailable_reason",
+                "believed_target_source",
+            ):
                 continue
-            self.assertTrue(key.endswith("_m"), key)
+            # A distance is metres; the sampling window's clock interval is ms.
+            self.assertTrue(key.endswith("_m") or key.endswith("_ms"), key)
+
+
+def _restamp(lines: list[str], updates: dict[str, str]) -> list[str]:
+    """Rewrites ``key=value`` fields in telemetry lines, keeping field order."""
+    out: list[str] = []
+    for line in lines:
+        tokens = line.split(",")
+        parts = [tokens[0]]
+        for token in tokens[1:]:
+            key, _, _value = token.partition("=")
+            parts.append(f"{key}={updates[key]}" if key in updates else token)
+        out.append(",".join(parts))
+    return out
+
+
+def _samples(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith(schema.SAMPLE_PREFIX)]
+
+
+_BOOT_LINE = (
+    f"{schema.EVENT_PREFIX},ver={schema.SCHEMA_VERSION},t_ms=0,phase=Idle,armed=0,"
+    "event=Boot,detail=-,fault=None,drop_s=0,drop_e=0"
+)
+
+
+class CaptureBoundaryTest(unittest.TestCase):
+    """T1/M7: a capture can hold several boots and several runs.
+
+    The old analyzer reconstructed every backwards timestamp as a uint32 wrap and
+    had no notion of a session, so a capture holding a reset became a 49.7-day
+    log with one run's timeline glued to another run's position. These cases pin
+    the three different things a backwards reading can be, and the refusal that
+    keeps an unlabelled restart from being reported as elapsed time.
+    """
+
+    def setUp(self) -> None:
+        self.spec = spec("SYNTHETIC-A")
+        self.lines = synthetic.generate_lines(self.spec)
+
+    def _parse(self, lines: list[str]) -> Log:
+        return parse_text("\n".join(lines) + "\n", source="<test>")
+
+    def test_a_boot_opens_a_new_session_instead_of_a_49_day_jump(self) -> None:
+        head = self.lines[:40]
+        # The tail is the same generator's first ticks, written again from a
+        # restarted clock: the Boot line says so, and it opens the new session.
+        restarted = [
+            _restamp([line], {"t_ms": str(index * 20)})[0]
+            for index, line in enumerate(_samples(self.lines)[:6], start=1)
+        ]
+        log = self._parse([*head, _BOOT_LINE, *restarted])
+        self.assertEqual(log.session_count, 2)
+        self.assertTrue(all(session.opened_by_boot for session in log.sessions))
+        self.assertEqual(log.sessions[1].sample_count, 6)
+        self.assertEqual(log.sessions[1].boot_t_ms, 0)
+
+        metrics = compute_metrics(log, "SYNTHETIC-A")
+        selection = metrics["capture"]["selection"]
+        self.assertTrue(selection["mixed_sessions"])
+        self.assertEqual(selection["selected_session_index"], 1)
+        self.assertEqual(metrics["counts"]["samples"], 6)
+        self.assertEqual(
+            selection["excluded_sample_count"], log.sessions[0].sample_count
+        )
+        self.assertGreater(selection["excluded_sample_count"], 0)
+        # The restarted clock is analyzed on its own: no ~49.7-day duration.
+        self.assertLess(metrics["window"]["log_duration_s"], 1.0)
+        self.assertEqual(metrics["capture"]["clock_wrap_count"], 0)
+
+    def test_a_wrap_inside_one_session_is_reconstructed(self) -> None:
+        top = 1 << 32
+        # The first three readings sit just under the top of the uint32 range and
+        # the rest just above the bottom: one rollover, 21 ms of elapsed time.
+        stamps = [top - 40, top - 20, top - 1, 20, 40, 60]
+        lines = [
+            _restamp([line], {"t_ms": str(stamps[index])})[0]
+            for index, line in enumerate(_samples(self.lines)[3:9])
+        ]
+        log = self._parse(lines)
+        metrics = compute_metrics(log, "SYNTHETIC-A")
+        capture = metrics["capture"]
+        self.assertEqual(capture["clock_wrap_count"], 1)
+        self.assertEqual(capture["clock_wraps"][0]["kind"], "wrap")
+        self.assertEqual(capture["clock_wraps"][0]["unsigned_delta_ms"], 21)
+        self.assertEqual(capture["reordered_reading_count"], 0)
+        self.assertEqual(capture["restart_suspected_count"], 0)
+        self.assertIsNone(metrics["window"]["duration_unavailable_reason"])
+        self.assertEqual(metrics["adjacent_sample_spacing"]["max_ms"], 21)
+        self.assertEqual(metrics["window"]["log_duration_s"], 0.1)
+
+    def test_a_few_milliseconds_backwards_is_a_reordered_reading_not_a_wrap(self) -> None:
+        stamps = [1000, 1020, 1040, 1036, 1060, 1080]
+        lines = [
+            _restamp([line], {"t_ms": str(stamps[index])})[0]
+            for index, line in enumerate(_samples(self.lines)[3:9])
+        ]
+        metrics = compute_metrics(self._parse(lines), "SYNTHETIC-A")
+        capture = metrics["capture"]
+        self.assertEqual(capture["reordered_reading_count"], 1)
+        self.assertEqual(capture["clock_wrap_count"], 0)
+        self.assertEqual(capture["restart_suspected_count"], 0)
+        # The interval is still reconstructed as the unsigned difference, which is
+        # what the firmware's own arithmetic does.
+        self.assertIsNotNone(metrics["window"]["log_duration_s"])
+
+    def test_an_unlabelled_restart_refuses_an_elapsed_duration(self) -> None:
+        """A big backwards step away from the rollover is not a wrap.
+
+        This is the T1 reproducer's shape - samples, then a clock that restarted -
+        with the ``Boot`` line missing from the capture. Nothing local can tell it
+        from a corrupt reading, so the tool must not turn it into 49.7 days of
+        elapsed time: the step is named, and the duration is refused with a reason.
+        """
+        stamps = [20000, 20020, 20040, 20, 40, 60]
+        lines = [
+            _restamp([line], {"t_ms": str(stamps[index])})[0]
+            for index, line in enumerate(_samples(self.lines)[3:9])
+        ]
+        metrics = compute_metrics(self._parse(lines), "SYNTHETIC-A")
+        capture = metrics["capture"]
+        self.assertEqual(capture["restart_suspected_count"], 1)
+        self.assertEqual(capture["restart_suspected_steps"][0]["kind"], "restart_suspected")
+        self.assertEqual(capture["clock_wrap_count"], 0)
+        self.assertIsNone(metrics["window"]["log_duration_s"])
+        self.assertIn(
+            "restart", metrics["window"]["duration_unavailable_reason"] or ""
+        )
+
+    def test_a_second_run_in_one_session_is_selected_not_mixed(self) -> None:
+        """A session that re-armed holds two runs; the last one is analyzed."""
+        first_run = self.lines
+        # A completed second run, appended to the same session: a fresh actuation
+        # reading and the run timeline that goes with it.
+        tail = _samples(self.lines)[-6:]
+        second_run = [
+            _restamp(
+                [line],
+                {
+                    "t_ms": str(30000 + index * 20),
+                    "run_start_ms": "30000",
+                    "dwell_start_ms": "33000",
+                    "stop_verified_ms": "36000",
+                },
+            )[0]
+            for index, line in enumerate(tail)
+        ]
+        metrics = compute_metrics(
+            self._parse([*first_run, *second_run]), "SYNTHETIC-A"
+        )
+        selection = metrics["capture"]["selection"]
+        self.assertEqual(selection["runs_in_session"], 2)
+        self.assertTrue(selection["mixed_runs"])
+        self.assertFalse(selection["mixed_sessions"])
+        self.assertEqual(selection["selected_run_start_ms"], 30000)
+        # Only the second run's samples are analyzed, and its own stop is the
+        # endpoint - not the first run's position with the second run's time.
+        self.assertEqual(metrics["counts"]["samples"], len(second_run))
+        self.assertEqual(metrics["run_window"]["run_start_ms"], 30000)
+        self.assertEqual(metrics["position"]["end_position_source"], "verified_final_stop")
+
+    def test_a_fixture_keeps_its_declared_provenance(self) -> None:
+        """The header says SYNTHETIC, whatever the file is called."""
+        log = self._parse(self.lines)
+        self.assertEqual(log.declared_provenance, synthetic.SYNTHETIC_MARKER)
+        metrics = compute_metrics(log, "BENCH-1")
+        self.assertEqual(
+            metrics["capture"]["provenance_declared"], synthetic.SYNTHETIC_MARKER
+        )
+
+    def test_a_capture_with_no_declaration_declares_nothing(self) -> None:
+        log = self._parse(_samples(self.lines)[:4])
+        self.assertIsNone(log.declared_provenance)
 
 
 class FixtureDriftTest(unittest.TestCase):

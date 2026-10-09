@@ -72,8 +72,17 @@ struct TickSnapshot {
 void begin();
 
 // Re-takes the reference sample after a decoder reset, without touching the
-// interrupt attachment. Call it with the vehicle stationary.
+// interrupt attachment. The two pin reads and the decoder update run with the
+// encoder interrupt masked, so the reference is one instant. Call it with the
+// vehicle stationary.
 void reestablishReference();
+
+// The coherent new-run decoder boundary: resets the decoder and re-takes the
+// reference sample as one interrupt-masked critical section
+// (`QuadratureDecoder::reset()` plus the reference read). Call it with the
+// vehicle stationary - the same precondition `begin()` documents - and after
+// the reset sequence that owns the rest of the chain.
+void resetAndReestablishReference();
 
 // The coherent tick snapshot described above.
 TickSnapshot snapshotTicks();

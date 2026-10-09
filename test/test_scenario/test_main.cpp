@@ -1702,6 +1702,55 @@ void test_an_uneven_clock_does_not_disturb_the_run(void) {
     expectTraceInvariants(harness);
 }
 
+// S13R run-1 M-1 / P13: the clock discipline is unit-pinned per module, but no
+// end-to-end scenario drove a run across the real uint32 wrap. This case starts
+// the scripted clock 4096 ms below the wrap - the nominal run costs 6.6-8.6 s, so
+// the crossing happens mid-travel - and asserts that a wrap is a wrap and not a
+// reboot: every `dtMs` is still the control period (unsigned subtraction), no
+// fault appears, the run stays armed through the crossing, and the run reaches
+// its verified Done exactly as it does from an unwrapped clock.
+void test_a_run_that_crosses_the_timestamp_wrap_is_undisturbed(void) {
+    ScenarioHarness harness(fixtures());
+    harness.primeClock(0xFFFFF000U);  // 4096 ms before the wrap
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    uint32_t previousMs = harness.nowMs();
+    bool crossedWrap = false;
+    bool armedThroughWrap = true;
+    for (uint32_t cycle = 0U; cycle < 3000U && harness.phase() != ev::RunPhase::Done; ++cycle) {
+        const CycleRecord& record = harness.step(driver.next(harness));
+
+        // The wrap itself: the raw reading went backwards, and the elapsed
+        // arithmetic must still be the control period.
+        if (record.nowMs < previousMs) {
+            crossedWrap = true;
+        }
+        previousMs = record.nowMs;
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(static_cast<uint32_t>(fixtures().controlPeriodMs),
+                                         record.dtMs, "the wrap produced a bogus interval");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::FaultCode::None),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "the wrap faulted the run");
+        if (crossedWrap) {
+            // A wrap is not a reboot: the authority is not reset and the run is
+            // not re-armed by the clock; it is the same armed run across the
+            // crossing.
+            armedThroughWrap = armedThroughWrap && record.authorityArmed;
+        }
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(crossedWrap, "the run finished before crossing the wrap");
+    TEST_ASSERT_TRUE_MESSAGE(armedThroughWrap, "the wrap disarmed or re-armed the run");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::RunPhase::Done),
+                                  static_cast<int>(harness.phase()),
+                                  "the run did not finish across the wrap");
+    TEST_ASSERT_TRUE(harness.stopVerified());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                          static_cast<int>(harness.faultCode()));
+    expectTraceInvariants(harness);
+}
+
 void test_a_rewound_clock_stops_the_run_and_the_chain_recovers(void) {
     ScenarioHarness harness(fixtures());
     announceAndArm(harness);
@@ -2184,6 +2233,7 @@ int main(int, char**) {
     RUN_TEST(test_a_disarm_in_every_reversal_phase_stops_the_run);
     RUN_TEST(test_a_stalled_clock_is_not_speed_evidence_and_spends_no_phase_time);
     RUN_TEST(test_an_uneven_clock_does_not_disturb_the_run);
+    RUN_TEST(test_a_run_that_crosses_the_timestamp_wrap_is_undisturbed);
     RUN_TEST(test_a_rewound_clock_stops_the_run_and_the_chain_recovers);
     RUN_TEST(test_the_production_decoder_decides_what_a_raw_sample_counts);
     RUN_TEST(test_the_run_axis_numbers_are_independent_of_the_harnesss_own_fields);

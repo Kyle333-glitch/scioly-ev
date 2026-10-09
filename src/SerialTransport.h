@@ -5,9 +5,10 @@
 #include <cstdint>
 
 #include <BoundedText.h>
+#include <SerialLineFraming.h>
 
 // ---------------------------------------------------------------------------
-// The serial transport - staged lines, and nothing that blocks
+// The serial transport - the adapter over the pure line framer
 // ---------------------------------------------------------------------------
 //
 // Why this module exists at all, rather than `Serial.print` at each call site
@@ -23,38 +24,41 @@
 //
 // What it does instead
 //
+//   * **The framing is a pure module.** `ev::LineFramer`
+//     (`lib/evcore/src/SerialLineFraming.h`) owns the two line slots and the
+//     bounded urgent policy; this adapter supplies the port and nothing else. The
+//     split exists because the M2/B5 defect lived in the framing decision - what
+//     may replace what, and what must finish as the record it was staged as - and
+//     a decision that lives in a pure module is one the host suite can pin.
 //   * **A line is staged, then pumped.** A caller formats one complete line into
-//     the transport's own buffer (`workingBuffer()`) and stages it. `pump()`
-//     sends only as many bytes as the port can accept right now, and the rest go
-//     out on later passes. No call can wait.
-//   * **The buffer is the staging area.** One copy of `kSerialLineBufferBytes`
-//     holds the line being formatted and the line being sent, because they are
-//     the same line: nothing is copied twice, and the firmware's serial RAM cost
-//     is one buffer.
-//   * **The terminator belongs to the transport**, not to the formatters
+//     the framer's working buffer and stages it. `pump()` sends only as many
+//     bytes as the port can accept right now, and the rest go out on later
+//     passes. No call can wait.
+//   * **Two slots, one active and one waiting.** The formatter composes the next
+//     line in the slot that is *not* being transmitted, so an urgent response can
+//     never overwrite a partially emitted telemetry line. An urgent response
+//     staged while a line is in flight waits in the second slot and goes out
+//     after the active line's terminator; a second urgent response replaces the
+//     *waiting* line (which has emitted nothing) and the displaced line is
+//     counted. The full policy and its counters are documented on
+//     `ev::LineFramer`.
+//   * **The terminator belongs to the framer**, not to the formatters
 //     (`TelemetryFormat.h`, `OperatorResponse.h` both document that), and it is
 //     sent as two more gated bytes rather than as part of the line.
-//   * **Two priorities, deliberately unequal.** An operator response is urgent:
-//     staging one *replaces* a staged telemetry line, because a human who typed a
-//     command is reading the answer and a dropped log row is a lost diagnostic,
-//     not a lost command. A telemetry line is not urgent, and the drain refuses
-//     to stage one while the port is busy at all (see the vehicle layer), so a
-//     record is never popped out of the queue only to be thrown away here.
+//   * **Every write is gated on the port's own free-space report**, and a short
+//     or zero write resumes from where it stopped: `Serial.write` is never
+//     assumed to accept everything it was offered.
 //
-// What it does not do
-//
-//   * It does not parse, format or interpret anything: it moves bytes.
-//   * It does not decide what to drop or how often to sample. Those are the
-//     queue's and the session's decisions (`TelemetryQueue.h`).
-//   * It does not touch the watchdog, the control tick or any vehicle state. It
-//     is low-priority work by construction, and the loop calls it after the
-//     checkpoint.
-//
-// The one piece of knowledge about the board that this module encodes is the
-// *size* of the endpoint buffer: 256 bytes on this variant
+// The one piece of knowledge about the board that this module still encodes is
+// the *size* of the endpoint buffer: 256 bytes on this variant
 // (`variants/NANOR4/tusb_config.h`, `CFG_TUD_CDC_TX_BUFSIZE`). Lines here are
 // longer than that, which is precisely why `pump()` is allowed to stop in the
 // middle of a line.
+//
+// Memory: the framer holds two `ev::kSerialLineBufferBytes` slots, because one
+// line in flight plus one waiting line is the whole bounded urgent policy. That
+// is a deliberate, static cost (+577 bytes of `.bss` on this variant, from 577
+// to 1154), not dynamic allocation: the former single buffer *was* the defect.
 
 namespace evhw {
 namespace serialTransport {
@@ -64,6 +68,15 @@ namespace serialTransport {
 // sends more waits for the next pass rather than holding the loop.
 constexpr uint8_t kReadBytesPerPass = 96U;
 
+// The board's own write port, in the shape `ev::LineFramer::pump()` expects. It
+// is the only place in the firmware that calls `Serial.write`, so the
+// "never assume a write accepted everything" rule has one home.
+struct SerialWritePort {
+    int availableForWrite() { return Serial.availableForWrite(); }
+
+    size_t write(const uint8_t* bytes, size_t count) { return Serial.write(bytes, count); }
+};
+
 class LineTransport {
 public:
     // Opens the port and forgets any staged line. On this board the baud rate is
@@ -71,98 +84,37 @@ public:
     // every Arduino sketch does.
     void begin(unsigned long baud) {
         Serial.begin(baud);
-        staged_ = false;
-        bodyLength_ = 0U;
-        sent_ = 0U;
-        terminatorSent_ = 0U;
+        framer_.begin();
     }
 
     // The buffer a caller formats one line into. Capacity is
     // `ev::kSerialLineBufferBytes` bytes; the longest line any formatter produces
     // is `ev::kSerialLineCapacity` characters plus its terminator.
-    char* workingBuffer() { return staging_; }
-    static constexpr uint16_t bufferBytes() { return ev::kSerialLineBufferBytes; }
+    char* workingBuffer() { return framer_.workingBuffer(); }
+    static constexpr uint16_t bufferBytes() { return ev::LineFramer::bufferBytes(); }
 
     // Publishes the line currently in `workingBuffer()`. `length` excludes the
-    // terminator, which the transport adds.
+    // terminator, which the framer adds.
     //
-    // `urgent` is the priority described above: a response replaces a staged
-    // telemetry line (and the abandoned line is counted), while a telemetry line
-    // is refused rather than allowed to replace anything. A refusal returns false
-    // and the caller decides what the loss means.
-    bool stage(uint16_t length, bool urgent) {
-        if (staged_) {
-            if (!urgent) {
-                ++telemetryLinesRefused_;
-                return false;
-            }
-            ++linesAbandoned_;
-        }
-        bodyLength_ = length;
-        sent_ = 0U;
-        terminatorSent_ = 0U;
-        staged_ = true;
-        ++linesStaged_;
-        return true;
-    }
+    // `urgent` is the priority described above: a response staged while a line is
+    // in flight waits for it (and replaces only a line that is itself still
+    // waiting), while a telemetry line is refused rather than allowed to displace
+    // anything. A refusal returns false and the caller decides what the loss
+    // means.
+    bool stage(uint16_t length, bool urgent) { return framer_.stage(length, urgent); }
 
     // True while a line is staged, whether or not it has begun to move.
-    bool busy() const { return staged_; }
+    bool busy() const { return framer_.busy(); }
 
-    // Bytes of the staged line that have not left the port yet, terminator
+    // Bytes of the staged lines that have not left the port yet, terminators
     // included. Zero when idle.
-    uint16_t pendingBytes() const {
-        if (!staged_) {
-            return 0U;
-        }
-        return static_cast<uint16_t>(bodyLength_ - sent_ + (2U - terminatorSent_));
-    }
+    uint16_t pendingBytes() const { return framer_.pendingBytes(); }
 
     // Sends what fits right now. Returns true when nothing is staged any more.
-    //
     // Every write is gated on the port's own free-space report, so no call can
-    // wait for the host; the loop between the gates is bounded by the staged line
-    // and the endpoint size. A port that is not connected returns zero from
-    // `write()` and the line simply stays staged.
-    bool pump() {
-        if (!staged_) {
-            return true;
-        }
-
-        while (sent_ < bodyLength_) {
-            const int room = Serial.availableForWrite();
-            if (room <= 0) {
-                return false;
-            }
-            uint16_t chunk = static_cast<uint16_t>(bodyLength_ - sent_);
-            if (chunk > static_cast<uint16_t>(room)) {
-                chunk = static_cast<uint16_t>(room);
-            }
-            const size_t written =
-                Serial.write(reinterpret_cast<const uint8_t*>(staging_ + sent_), chunk);
-            if (written == 0U) {
-                return false;
-            }
-            sent_ = static_cast<uint16_t>(sent_ + written);
-        }
-
-        static const char kTerminator[] = "\r\n";
-        while (terminatorSent_ < 2U) {
-            if (Serial.availableForWrite() <= 0) {
-                return false;
-            }
-            const size_t written = Serial.write(
-                reinterpret_cast<const uint8_t*>(&kTerminator[terminatorSent_]), 1U);
-            if (written == 0U) {
-                return false;
-            }
-            ++terminatorSent_;
-        }
-
-        staged_ = false;
-        ++linesSent_;
-        return true;
-    }
+    // wait for the host; a port that is not connected returns zero from `write()`
+    // and the line simply stays staged.
+    bool pump() { return framer_.pump(port_); }
 
     // One received byte, or -1 when nothing is waiting. Non-blocking by
     // definition: it is `Serial.read()`.
@@ -171,26 +123,20 @@ public:
         return value < 0 ? static_cast<int16_t>(-1) : static_cast<int16_t>(value);
     }
 
-    // Lines completed (terminator sent), lines staged, and the two ways a line
-    // can fail to go out: abandoned by a response, or refused because a line was
-    // already in flight. The last two are evidence, not errors: they are what a
-    // session that outran its host looks like from the firmware's side.
-    uint32_t linesSent() const { return linesSent_; }
-    uint32_t linesStaged() const { return linesStaged_; }
-    uint32_t linesAbandoned() const { return linesAbandoned_; }
-    uint32_t telemetryLinesRefused() const { return telemetryLinesRefused_; }
+    // Lines completed (terminator sent), lines staged, and the ways a line can
+    // fail to go out: displaced from the waiting slot before a byte moved,
+    // refused because a line was already in flight, or refused for being wider
+    // than the buffer. They are evidence, not errors: they are what a session
+    // that outran its host looks like from the firmware's side.
+    uint32_t linesSent() const { return framer_.linesSent(); }
+    uint32_t linesStaged() const { return framer_.linesStaged(); }
+    uint32_t linesAbandoned() const { return framer_.linesAbandoned(); }
+    uint32_t telemetryLinesRefused() const { return framer_.telemetryLinesRefused(); }
+    uint32_t oversizeLinesRefused() const { return framer_.oversizeLinesRefused(); }
 
 private:
-    char staging_[ev::kSerialLineBufferBytes];
-    uint16_t bodyLength_ = 0U;
-    uint16_t sent_ = 0U;
-    uint8_t terminatorSent_ = 0U;
-    bool staged_ = false;
-
-    uint32_t linesSent_ = 0U;
-    uint32_t linesStaged_ = 0U;
-    uint32_t linesAbandoned_ = 0U;
-    uint32_t telemetryLinesRefused_ = 0U;
+    ev::LineFramer framer_{};
+    SerialWritePort port_{};
 };
 
 // The host's control-line state: DTR and RTS, the two signals a USB CDC host
@@ -244,7 +190,7 @@ inline HostLineState hostLineState() {
 }
 
 // The one instance. It has static storage because the main loop is its only
-// caller and the buffer is too large for a stack frame, and because the ISR has
+// caller and the buffers are too large for a stack frame, and because the ISR has
 // nothing to do with it either way.
 inline LineTransport& port() {
     static LineTransport instance;

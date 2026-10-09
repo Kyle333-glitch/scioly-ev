@@ -41,6 +41,7 @@ from . import schema
 __all__ = [
     "SYNTHETIC_MARKER",
     "SyntheticSpec",
+    "SyntheticWriteError",
     "SPECS",
     "FinalStopTimeline",
     "final_stop_timeline",
@@ -66,6 +67,11 @@ NFault_NOT_INSTALLED = "NotInstalled"
 # fault still discards an unverified candidate, exactly as the firmware does.
 SYNTHETIC_NEAR_ZERO_MPS = 0.02
 SYNTHETIC_COMPLETE_STOP_MS = 3000
+
+# The phases that only exist once the run has reversed. `Done` is in the list
+# because the fixture's final-stop model rewrites the verified `FinalBrake` tick to
+# `Done`, so the last leg of the run is a reverse leg as well.
+REVERSE_LEG_PHASES: tuple[str, ...] = ("Reverse", "FinalApproach", "FinalBrake", "Done")
 
 # One header line per entry. Each is a single line on purpose: `generate_lines()`
 # returns lines, and an entry containing an embedded newline would make the
@@ -110,8 +116,18 @@ class SyntheticSpec:
     seed: int
     cadence_ms: int = 20
     geometry_scale: float = 1.0
-    # The forward target, in metres of the synthetic "believed" position.
+    # The forward target, in metres of the synthetic "believed" position: the stop
+    # the forward half of the run is driving to. The fixture's driven velocity is
+    # prescribed rather than target-driven, so its forward legs come to rest a
+    # little short of this, the way a real run that missed its stop does.
     target_m: float = 6.0
+    # The Target Point the reversal drives back to, in metres. On a reverse leg the
+    # firmware's remaining distance is `position - target`
+    # (`MotionPlan::remainingDistanceTo`), not `target - position`, so the fixture
+    # carries both targets and signs its `rem_m` per leg. A fixture that wrote the
+    # forward shape on the reverse leg would let an analyzer that adds the wrong way
+    # round look right.
+    reverse_target_m: float = 2.5
     # A burst of omitted samples beginning at this tick index, and how many.
     drop_burst_start_index: int = -1
     drop_burst_count: int = 0
@@ -123,7 +139,13 @@ class SyntheticSpec:
 
     @property
     def legs(self) -> tuple[PhaseLeg, ...]:
-        """The phase timeline. Scaled lengths keep the legs self-consistent."""
+        """The phase timeline. Scaled lengths keep the legs self-consistent.
+
+        The kinematics are a fiction, so the reverse legs bring the modelled
+        position back to roughly `reverse_target_m` rather than exactly to it; the
+        heading of each leg (forward past `target_m` on the way out, back toward
+        `reverse_target_m` on the way in) is what the `remaining_m` sign depends on.
+        """
         return (
             PhaseLeg("Idle", 200, 0.0, 0.0),
             PhaseLeg("ParameterValid", 120, 0.0, 0.0),
@@ -366,7 +388,14 @@ def _build_ticks(spec: SyntheticSpec) -> list[_Tick]:
                 velocity_mps=velocity_mps,
                 velocity_ok=ready,
                 velocity_cmd_mps=velocity_cmd,
-                remaining_m=spec.target_m - position_m,
+                # Per leg, with the firmware's own sign for each direction: the
+                # forward leg counts down to `target_m`, the reverse leg counts
+                # down to `reverse_target_m` as `position - target`.
+                remaining_m=(
+                    position_m - spec.reverse_target_m
+                    if phase in REVERSE_LEG_PHASES
+                    else spec.target_m - position_m
+                ),
                 motor=motor,
                 effort_permille=effort,
                 battery_counts=max(0, min(65535, int(round(battery)))),
@@ -504,6 +533,10 @@ def _operator_events(spec: SyntheticSpec) -> list[tuple[int, str, str, str, bool
     return events
 
 
+class SyntheticWriteError(ValueError):
+    """A fixture file exists with different content and ``force`` was not given."""
+
+
 def final_stop_timeline(spec: SyntheticSpec) -> Optional[FinalStopTimeline]:
     """The fixture's own run timeline, read back from the ticks it generates.
 
@@ -625,18 +658,42 @@ def generate_text(spec: SyntheticSpec) -> str:
 
 
 def write_samples(out_dir: str, *, force: bool = False) -> list[str]:
-    """Writes every shipped synthetic fixture. Returns the paths written."""
+    """Writes every shipped synthetic fixture. Returns the paths written.
+
+    A file that already exists with *different* content is never replaced without
+    ``force``: the fixtures are committed, and a local edit (or a capture someone
+    saved under a fixture's name) is somebody's data, not a stale copy. The check
+    runs over every fixture *before* anything is written, so a refusal leaves the
+    directory exactly as it was rather than half-updated.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    written: list[str] = []
+    plans: list[tuple[str, Optional[str]]] = []
+    conflicts: list[str] = []
     for spec in SPECS:
         path = os.path.join(out_dir, f"{spec.run_id.lower().replace('-', '_')}.csv")
         text = generate_text(spec)
-        if os.path.exists(path) and not force:
+        existing: Optional[str] = None
+        if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as handle:
-                if handle.read() == text:
-                    written.append(path)
-                    continue
-        with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
+                existing = handle.read()
+        if existing is not None and existing != text:
+            if not force:
+                conflicts.append(path)
+                continue
+        plans.append((path, None if existing == text else text))
+
+    if conflicts:
+        raise SyntheticWriteError(
+            "refusing to replace existing fixture file(s) whose content differs: "
+            + ", ".join(conflicts)
+            + "; pass --force to rewrite them (they may hold data someone saved under "
+            "a fixture's name)"
+        )
+
+    written: list[str] = []
+    for path, text in plans:
+        if text is not None:
+            with open(path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
         written.append(path)
     return written

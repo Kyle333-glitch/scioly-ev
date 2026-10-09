@@ -53,6 +53,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -114,6 +115,52 @@ _REQUIRED_COLUMN = "run_id"
 _TRUE_SPELLINGS = frozenset({"yes", "y", "true", "t", "1"})
 _FALSE_SPELLINGS = frozenset({"no", "n", "false", "f", "0"})
 
+# The domain each numeric column is a measurement *of*. A value outside it is a
+# corrupt input, not a data point: a negative elapsed time or a non-positive pack
+# voltage is not a reading of anything, and letting one through turns an input
+# error into a statistic that looks like a measurement. `measured_end_position_m`
+# is deliberately unbounded above and below - in a run that reverses, resting
+# behind the start line is a real physical outcome, and inventing a floor would
+# discard a real measurement.
+_MEASUREMENT_DOMAINS: dict[str, tuple[float, bool]] = {
+    "measured_run_time_s": (0.0, False),
+    "pack_voltage_v": (0.0, True),
+    "target_distance_m": (0.0, True),
+}
+
+def _finite_number(
+    text: str,
+    *,
+    column: str,
+    row_number: int,
+    source: str,
+) -> float:
+    """A finite number, or a named error.
+
+    ``float()`` admits ``nan``, ``inf`` and ``1e309``; each of those would travel
+    into a statistic and then into a report as a non-finite value, so they are
+    refused here where the input line can still be named.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise MeasurementError(
+            f"{source}:{row_number}: column '{column}' is not a number: {text!r}"
+        ) from None
+    if not math.isfinite(value):
+        raise MeasurementError(
+            f"{source}:{row_number}: column '{column}' is not a finite number: {text!r}"
+        )
+    domain = _MEASUREMENT_DOMAINS.get(column)
+    if domain is not None:
+        minimum, exclusive = domain
+        if value < minimum or (exclusive and value == minimum):
+            raise MeasurementError(
+                f"{source}:{row_number}: column '{column}' is outside its domain "
+                f"(must be {'>' if exclusive else '>='} {minimum:g}): {text!r}"
+            )
+    return value
+
 
 class MeasurementError(ValueError):
     """The measurement file is not the file this tool can read."""
@@ -153,12 +200,7 @@ def _parse_number(
     text = text.strip()
     if text == "":
         return None
-    try:
-        return float(text)
-    except ValueError:
-        raise MeasurementError(
-            f"{source}:{row_number}: column '{column}' is not a number: {text!r}"
-        ) from None
+    return _finite_number(text, column=column, row_number=row_number, source=source)
 
 
 def _parse_bool(
@@ -185,44 +227,81 @@ def _text(value: Optional[str]) -> str:
 def load_measurements(path: str) -> MeasurementTable:
     """Reads the measurement CSV.
 
-    Fails clearly on a header that is missing ``run_id``, missing every numeric
-    measurement column, or carrying a column this tool does not define - a
-    mistyped column would otherwise be silently ignored and read as "not
-    measured", which is the same failure mode as losing a record.
+    Fails clearly on a file this tool cannot read faithfully. Every one of these
+    is a case where the alternative is a number that looks like a measurement:
+
+    * a header that is missing ``run_id``, missing every numeric measurement
+      column, or carrying a column this tool does not define (a mistyped column
+      would otherwise be silently ignored and read as "not measured");
+    * a header with the same column name twice (the second one would silently
+      replace the first, so which column is read depends on the file's order);
+    * a header whose names carry whitespace (` measured_run_time_s`) - the
+      surrounding whitespace is normalized away and the *normalized* names are
+      the mapping the rows are read through, so a padded header loads like a clean
+      one instead of loading as "not measured";
+    * a row whose cell count is not the header's (a short row would otherwise
+      leave the missing cells ``None``, which reads as "not recorded");
+    * a numeric cell that is not finite, or is outside the domain of the column
+      it is written under.
     """
     with open(path, "rb") as handle:
         raw_bytes = handle.read()
     raw = raw_bytes.decode("utf-8", errors="replace")
     sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
-    # Comment lines are allowed so the file can explain itself.
-    body = "".join(
-        line for line in raw.splitlines(keepends=True) if not line.lstrip().startswith("#")
-    )
-    reader = csv.DictReader(io.StringIO(body))
-    if reader.fieldnames is None:
-        raise MeasurementError(f"{path}: the file has no header row")
-
-    fieldnames = [name.strip() for name in reader.fieldnames]
-    unknown = [name for name in fieldnames if name not in MEASUREMENT_COLUMNS]
-    if unknown:
-        raise MeasurementError(
-            f"{path}: unknown column(s) {', '.join(unknown)}; "
-            f"allowed columns are {', '.join(MEASUREMENT_COLUMNS)}"
-        )
-    if _REQUIRED_COLUMN not in fieldnames:
-        raise MeasurementError(
-            f"{path}: the header must contain a '{_REQUIRED_COLUMN}' column"
-        )
-    if not any(name in fieldnames for name in MEASUREMENT_NUMERIC_COLUMNS):
-        raise MeasurementError(
-            f"{path}: the header must contain at least one of "
-            f"{', '.join(MEASUREMENT_NUMERIC_COLUMNS)}"
-        )
-
+    # Comment lines are allowed so the file can explain itself. They are dropped
+    # after the CSV reader has split the file, not before, so a quoted value that
+    # contains a newline still reads as one cell.
+    reader = csv.reader(io.StringIO(raw))
+    fieldnames: Optional[list[str]] = None
     rows: dict[str, Measurement] = {}
-    for row_number, row in enumerate(reader, start=2):
-        run_id = (row.get(_REQUIRED_COLUMN) or "").strip()
+
+    for cells in reader:
+        if not cells or all(cell.strip() == "" for cell in cells):
+            continue
+        if cells[0].lstrip().startswith("#"):
+            continue
+        row_number = reader.line_num
+
+        if fieldnames is None:
+            fieldnames = [name.strip() for name in cells]
+            seen: list[str] = []
+            duplicates: list[str] = []
+            for name in fieldnames:
+                if name in seen and name not in duplicates:
+                    duplicates.append(name)
+                seen.append(name)
+            if duplicates:
+                raise MeasurementError(
+                    f"{path}:{row_number}: duplicate column(s) "
+                    f"{', '.join(duplicates)} in the header"
+                )
+            unknown = [name for name in fieldnames if name not in MEASUREMENT_COLUMNS]
+            if unknown:
+                raise MeasurementError(
+                    f"{path}:{row_number}: unknown column(s) {', '.join(unknown)}; "
+                    f"allowed columns are {', '.join(MEASUREMENT_COLUMNS)}"
+                )
+            if _REQUIRED_COLUMN not in fieldnames:
+                raise MeasurementError(
+                    f"{path}:{row_number}: the header must contain a "
+                    f"'{_REQUIRED_COLUMN}' column"
+                )
+            if not any(name in fieldnames for name in MEASUREMENT_NUMERIC_COLUMNS):
+                raise MeasurementError(
+                    f"{path}:{row_number}: the header must contain at least one of "
+                    f"{', '.join(MEASUREMENT_NUMERIC_COLUMNS)}"
+                )
+            continue
+
+        if len(cells) != len(fieldnames):
+            raise MeasurementError(
+                f"{path}:{row_number}: the row has {len(cells)} cell(s) and the "
+                f"header has {len(fieldnames)}; every row must carry every column"
+            )
+
+        values = dict(zip(fieldnames, cells))
+        run_id = (values.get(_REQUIRED_COLUMN) or "").strip()
         if run_id == "":
             raise MeasurementError(f"{path}:{row_number}: '{_REQUIRED_COLUMN}' is empty")
         if run_id in rows:
@@ -230,45 +309,48 @@ def load_measurements(path: str) -> MeasurementTable:
         rows[run_id] = Measurement(
             run_id=run_id,
             measured_end_position_m=_parse_number(
-                row.get("measured_end_position_m") or "",
+                values.get("measured_end_position_m") or "",
                 column="measured_end_position_m",
                 row_number=row_number,
                 source=path,
             ),
             measured_run_time_s=_parse_number(
-                row.get("measured_run_time_s") or "",
+                values.get("measured_run_time_s") or "",
                 column="measured_run_time_s",
                 row_number=row_number,
                 source=path,
             ),
             pack_voltage_v=_parse_number(
-                row.get("pack_voltage_v") or "",
+                values.get("pack_voltage_v") or "",
                 column="pack_voltage_v",
                 row_number=row_number,
                 source=path,
             ),
             recharged=_parse_bool(
-                row.get("recharged") or "",
+                values.get("recharged") or "",
                 column="recharged",
                 row_number=row_number,
                 source=path,
             ),
             accepted=_parse_bool(
-                row.get("accepted") or "",
+                values.get("accepted") or "",
                 column="accepted",
                 row_number=row_number,
                 source=path,
             ),
-            exclusion_reason=_text(row.get("exclusion_reason")),
+            exclusion_reason=_text(values.get("exclusion_reason")),
             target_distance_m=_parse_number(
-                row.get("target_distance_m") or "",
+                values.get("target_distance_m") or "",
                 column="target_distance_m",
                 row_number=row_number,
                 source=path,
             ),
-            tournament_level=_text(row.get("tournament_level")) or None,
-            notes=_text(row.get("notes")),
+            tournament_level=_text(values.get("tournament_level")) or None,
+            notes=_text(values.get("notes")),
         )
+
+    if fieldnames is None:
+        raise MeasurementError(f"{path}: the file has no header row")
 
     return MeasurementTable(source=path, sha256=sha256, rows=rows)
 
@@ -279,6 +361,34 @@ def _delta(measured: Optional[float], believed: Optional[float]) -> Optional[flo
     return round(measured - believed, 6)
 
 
+def _capture_comparability(metrics: dict[str, Any]) -> Optional[str]:
+    """Why this capture's believed endpoint must not be compared, or ``None``.
+
+    Two conditions refuse the comparison outright rather than coloring it:
+
+    * the capture holds more than one session or more than one run, so a caller
+      cannot say which run an external measurement was taken on - the analyzer
+      picks the last run, but the *pairing* is not the tool's to assert;
+    * the selected run recorded no verified final stop, so there is no endpoint to
+      compare - the last sample is not a stop position, and comparing a tape
+      measure against it would invent an endpoint the firmware never verified.
+    """
+    selection = metrics["capture"]["selection"]
+    if selection["mixed_sessions"] or selection["mixed_runs"]:
+        return (
+            "the capture holds more than one run ("
+            f"sessions={selection['session_count']}, "
+            f"runs={selection['runs_in_session']}); an external measurement cannot "
+            "be attributed to the analyzed run"
+        )
+    if metrics["position"]["end_position_source"] != "verified_final_stop":
+        return (
+            "the analyzed run recorded no verified final stop ("
+            f"{metrics['position']['end_position_unavailable_reason']})"
+        )
+    return None
+
+
 def compare_endpoints(
     metrics_by_run: Sequence[dict[str, Any]],
     measurements: MeasurementTable,
@@ -287,9 +397,17 @@ def compare_endpoints(
 
     A blank cell yields a ``None`` delta rather than a zero one, so "not
     measured" can never read as "measured exactly right".
+
+    A delta is computed only when the capture can be attributed to one run and
+    that run recorded a verified final stop (``_capture_comparability``). A
+    capture that cannot be attributed - one holding several runs, or one whose run
+    never verified a stop - keeps the believed numbers visible and reports *why*
+    the comparison was refused, because a delta against the last sample in the
+    file is exactly the confusion this module exists to avoid.
     """
     rows: list[dict[str, Any]] = []
     matched: set[str] = set()
+    refusals: list[dict[str, str]] = []
 
     for metrics in metrics_by_run:
         run_id = metrics["run_id"]
@@ -304,6 +422,10 @@ def compare_endpoints(
             measured_time = None
             notes = ""
 
+        refusal = _capture_comparability(metrics)
+        if refusal is not None:
+            refusals.append({"run_id": run_id, "reason": refusal})
+
         believed_end_position = metrics["position"]["end_position_m"]
         # The firmware's internal Run Time: actuation to the start of the verified
         # final-stop dwell, so the rule's Complete Stop interval is not counted. It
@@ -317,14 +439,46 @@ def compare_endpoints(
             {
                 "run_id": run_id,
                 "has_measurement": measurement is not None,
+                "comparable": refusal is None,
+                "comparison_refused_reason": refusal,
                 "measured_end_position_m": measured_end_position,
                 "believed_end_position_m": believed_end_position,
-                "end_position_delta_m": _delta(measured_end_position, believed_end_position),
+                # `end_position_source` is what makes `believed_end_position_m`
+                # readable: the verified final stop, or the last usable sample when
+                # there was no verified stop.
+                "believed_end_position_source": metrics["position"][
+                    "end_position_source"
+                ],
+                "believed_end_position_sampling_window_m": metrics["position"][
+                    "end_position_sampling_window_m"
+                ],
+                "believed_stop_verified": metrics["run_window"][
+                    "final_stop_dwell_verified"
+                ],
+                "completion": metrics["run_window"]["completion"],
+                "capture_session_index": metrics["capture"]["selection"][
+                    "selected_session_index"
+                ],
+                "capture_mixed_sessions": metrics["capture"]["selection"][
+                    "mixed_sessions"
+                ],
+                "capture_mixed_runs": metrics["capture"]["selection"][
+                    "mixed_runs"
+                ],
+                "capture_provenance_declared": metrics["capture"][
+                    "provenance_declared"
+                ],
+                "end_position_delta_m": _delta(measured_end_position, believed_end_position)
+                if refusal is None
+                else None,
                 "net_travel_m": metrics["position"]["net_travel_m"],
                 "measured_run_time_s": measured_time,
                 "believed_run_time_s": believed_time,
-                "run_time_delta_s": _delta(measured_time, believed_time),
+                "run_time_delta_s": _delta(measured_time, believed_time)
+                if refusal is None
+                else None,
                 "believed_target_m": metrics["position"]["believed_target_m"],
+                "believed_target_source": metrics["position"]["believed_target_source"],
                 # The context columns travel with the row so an accepted or
                 # excluded run is never separated from the reason.
                 "target_distance_m": measurement.target_distance_m
@@ -359,4 +513,5 @@ def compare_endpoints(
         "runs_without_a_measurement": [
             row["run_id"] for row in rows if not row["has_measurement"]
         ],
+        "refused_comparisons": refusals,
     }

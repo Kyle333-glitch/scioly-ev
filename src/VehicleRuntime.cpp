@@ -788,8 +788,14 @@ void VehicleRuntime::handleCommandLine(const char* line, uint16_t length, uint32
 
 void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t nowMs) {
     const uint16_t capacity = ev::kSerialLineCapacity;
-    char* buffer = serialTransport::port().workingBuffer();
 
+    // The shared line buffer is fetched *inside* the cases that format a line,
+    // never here. Fetching it is now a stateful act - it retires a staged reply
+    // that had not started moving, because the caller is about to overwrite it
+    // (`ev::LineFramer::workingBuffer()`, and the M2 repair in S15) - so a
+    // command that formats nothing (`help`, which only arms the static-line
+    // cursor) must not touch it. Reaching for the buffer before the switch would
+    // have discarded a waiting answer for a command that produced none.
     switch (request.id) {
         case ev::OperatorCommandId::None:
             // Unreachable: `admissibilityOf()` refuses a request that carries no
@@ -803,15 +809,18 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             return;
 
         case ev::OperatorCommandId::Status:
-            respondLine(ev::formatStatusLine(statusView(), buffer, capacity));
+            respondLine(ev::formatStatusLine(statusView(), serialTransport::port().workingBuffer(),
+                                            capacity));
             return;
 
         case ev::OperatorCommandId::Version:
-            respondLine(ev::formatVersionLine(vehicleConfig::kFirmwareId, buffer, capacity));
+            respondLine(ev::formatVersionLine(vehicleConfig::kFirmwareId,
+                                              serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::Checks:
-            respondLine(ev::formatChecksLine(configurationChecks_, buffer, capacity));
+            respondLine(ev::formatChecksLine(configurationChecks_,
+                                             serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::Boot:
@@ -829,7 +838,8 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
         case ev::OperatorCommandId::ConfigCheck:
             // Both read the held configuration through the single rule-validation
             // entry point, so the answer cannot depend on which was typed.
-            respondLine(ev::formatConfigEcho(heldConfig_, heldVerdict(), buffer, capacity));
+            respondLine(ev::formatConfigEcho(heldConfig_, heldVerdict(),
+                                             serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::Plan:
@@ -837,7 +847,8 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             // It reads the plan and renders it; it adopts nothing, clears nothing
             // and changes no phase, so it is admissible in every state - including
             // during a run - and cannot gate the control path.
-            respondLine(ev::formatPlanLine(planView(), buffer, capacity));
+            respondLine(ev::formatPlanLine(planView(), serialTransport::port().workingBuffer(),
+                                           capacity));
             return;
 
         case ev::OperatorCommandId::ConfigSet:
@@ -847,7 +858,8 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
         case ev::OperatorCommandId::ConfigClear:
             heldConfig_ = ev::RunConfigFields{};
             pushOperatorEvent(ev::TelemetryEventCode::ConfigCleared, ev::kTelemetryMissingField);
-            respondLine(ev::formatOperatorAck(ev::OperatorCommandId::ConfigClear, buffer, capacity));
+            respondLine(ev::formatOperatorAck(ev::OperatorCommandId::ConfigClear,
+                                              serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::Announce:
@@ -867,7 +879,8 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             // itself is reported by the detector on that same tick: the operator
             // path does not duplicate what a sample can show.
             authority_.disarm();
-            respondLine(ev::formatOperatorAck(ev::OperatorCommandId::Disarm, buffer, capacity));
+            respondLine(ev::formatOperatorAck(ev::OperatorCommandId::Disarm,
+                                              serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::Reset:
@@ -878,17 +891,18 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             telemetrySession_.enable();
             pushOperatorEvent(ev::TelemetryEventCode::TelemetryEnabled, ev::kTelemetryMissingField);
             respondLine(ev::formatTelemetryAck(ev::OperatorCommandId::TelemetryOn, telemetryView(),
-                                               buffer, capacity));
+                                               serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::TelemetryOff:
             telemetrySession_.disable();
             respondLine(ev::formatTelemetryAck(ev::OperatorCommandId::TelemetryOff, telemetryView(),
-                                               buffer, capacity));
+                                               serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::TelemetryStatus:
-            respondLine(ev::formatTelemetryState(telemetryView(), buffer, capacity));
+            respondLine(ev::formatTelemetryState(telemetryView(),
+                                                 serialTransport::port().workingBuffer(), capacity));
             return;
 
         case ev::OperatorCommandId::TelemetryRate:
@@ -1016,8 +1030,21 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     // behaviour, and the state of this vehicle today.
     executionPlan_.adopt(executionPlan);
     legForward_ = true;
-    pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted, ev::kTelemetryMissingField);
-    respondLine(ev::formatAnnounceAck(verdict, serialTransport::port().workingBuffer(),
+    // The plan's fate is no longer silent on the evidence lanes (audit P12 /
+    // OBS-FWD): the `AnnounceAccepted` event carries the plan's named status as
+    // its detail, so the event lane says whether this run has a forward execution
+    // target and, if not, which refusal explains it; the acknowledgement carries
+    // the same status plus the admitted forward stop in metres when there is one.
+    // Both are facts about the plan just adopted - nothing here fabricates a stop
+    // when the plan refused, and the `plan` query remains the live view.
+    pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted,
+                      ev::runExecutionPlanStatusName(executionPlan.status));
+    ev::ExecutionPlanEcho planEcho;
+    planEcho.status = executionPlan.status;
+    if (executionPlan.valid) {
+        planEcho.forwardStopMpPositionM = executionPlan.forwardStopMpPositionM;
+    }
+    respondLine(ev::formatAnnounceAck(verdict, planEcho, serialTransport::port().workingBuffer(),
                                      ev::kSerialLineCapacity));
 }
 
@@ -1063,7 +1090,28 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     const ev::MotionChainResetReport report = ev::resetMotionChainForNewRun(
         encoderInput::decoder(), estimator_, velocityController_, profileTarget_, authority_, run_,
         nowMs);
-    encoderInput::reestablishReference();
+    // A coherent decoder boundary: the chain's own `decoder.reset()` runs as part
+    // of the sequence above, and this adapter-owned call then re-does the reset
+    // and the reference sample together, with the interrupt masked (audit M4 /
+    // S13R M-3). Nothing reads the decoder between the two, so the state left
+    // behind is the coherent one: no interrupt can interleave between the reset
+    // and the two pin reads, and no edge seen under a stale reference survives.
+    encoderInput::resetAndReestablishReference();
+
+    // Nothing that measured the previous run may survive the boundary (audit M12
+    // / S13I I-3): the estimator's and decoder's own history is gone above, and
+    // these are the runtime-held copies that described it. Without this, a stop
+    // verification within the stop-evidence age of a reset could pair a fresh
+    // zero-speed claim with the previous run's speed fact - unreachable in a
+    // physical run, but a reset must establish "nothing measured", not a mixture.
+    estimate_ = ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
+    hasEstimate_ = false;
+    lastValidEstimate_ = ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
+    hasLastValidEstimate_ = false;
+    odometryTravel_ = ev::OdometryEstimate{0.0, false, ev::OdometryEstimateStatus::ScaleIsNotMeasured};
+    odometrySampleMs_ = 0U;
+    hasOdometrySample_ = false;
+    positionUsable_ = false;
 
     regulatorEnabled_ = report.controllerEnabled;
     announcedConfigValid_ = false;

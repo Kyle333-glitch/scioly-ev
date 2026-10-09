@@ -45,8 +45,16 @@ struct Sourced {
 
     // True when this value's provenance is complete: a placeholder needs no
     // citation, and anything else has to name where it came from.
+    //
+    // A non-placeholder citation must be a *name*, not merely a non-null pointer
+    // (audit L1): `evidence != nullptr` accepted the empty string, so a promoted
+    // value could claim a citation that says nothing at all and still pass the
+    // check the configuration-build report advertises. The pointer is still not
+    // resolved here - the promotion review owns that - but an empty name is now
+    // a hole the check itself closes.
     constexpr bool citesEvidence() const {
-        return source == ValueSource::Provisional || evidence != nullptr;
+        return source == ValueSource::Provisional ||
+               (evidence != nullptr && evidence[0] != '\0');
     }
 
     T value;

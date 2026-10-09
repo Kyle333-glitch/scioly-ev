@@ -156,7 +156,8 @@ constexpr uint32_t kH1aHoldMaxMs = 30000U;
 // The capacity every readout in this console is composed against.
 //
 // One capacity rather than one per readout, because they all share the
-// transport's single line buffer and one buffer has one length.
+// transport's line slots and every slot has the same length (`ev::LineFramer`,
+// which holds one active and at most one waiting line since S15's M2 repair).
 //
 // **The derived worst case of the widest readout, `healthLine()`, is 534
 // characters** - every `uint32` field at its full ten digits, which the
@@ -179,7 +180,7 @@ constexpr uint32_t kH1aHoldMaxMs = 30000U;
 //     than a loss-prevention one.
 //
 // Note also the shape of the headroom: the non-obvious part is that it is
-// *unbounded* growth, not a fixed gap. Every other consumer of the shared buffer
+// *unbounded* growth, not a fixed gap. Every other consumer of a shared line slot
 // states its worst case against it
 // (`ev::kOperatorResponseWorstCaseChars`, `lib/evcore/src/OperatorResponse.h`);
 // this console used to state none, which is why the widest line in the firmware

@@ -67,7 +67,10 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 //
 //   STATUS  = 357   every control-state field, the widest names, the longest
 //                   configuration rule error name
-//   ANNOUNCE_ACK = 138  the widest plan status name and four 13-character values
+//   ANNOUNCE_ACK = 192  the widest timing-plan status name, four 13-character
+//                   values, and the wider of the execution section's two
+//                   renderings (widest status name, or the target's value; the
+//                   two are exclusive, so the wider one bounds both)
 //   CONFIG  = 170   the widest level name, three 13-character typed values, the
 //                   derived Bottle Start Point (one of three rule values), and
 //                   the longest rule error name
@@ -87,10 +90,20 @@ constexpr uint16_t kOperatorStatusLineWorstCaseChars = 357U;
 constexpr uint16_t kOperatorConfigEchoWorstCaseChars = 170U;
 constexpr uint16_t kOperatorChecksLineWorstCaseChars = 445U;
 constexpr uint16_t kOperatorTelemetryLineWorstCaseChars = 88U;
-// The announce confirmation is the longest plan echo: the widest plan status name
-// (`PlanExceedsMaxRunDuration`), four 13-character fixed-point values, and the
-// prefix and field names around them.
-constexpr uint16_t kOperatorAnnounceAckWorstCaseChars = 138U;
+// The announce confirmation is the longest plan echo. Derived field by field,
+// with the execution section's two renderings kept apart because they are
+// exclusive: `fwd_stop_m` is a 13-character value only while the execution plan
+// is `Planned`, whose name is 7 characters, and every wider status name
+// (`MissingBottleInteractionCalibration`, 35) renders the 1-character absent
+// marker instead. So the section's worst case is the *wider* of its two
+// renderings, not the sum of their widest halves.
+//
+//   `OK,cmd=announce` 15 + `,plan=` 6 + 25 (the widest timing status name,
+//   `PlanExceedsMaxRunDuration`) + `,cruise_mps=` 12 + 13 + `,delay_s=` 9 + 13 +
+//   `,total_s=` 9 + 13 + `,margin_s=` 10 + 13 = 138 + `,exec=` 6 +
+//   max(`MissingBottleInteractionCalibration` 35 + `,fwd_stop_m=` 12 + `-` 1,
+//       `Planned` 7 + `,fwd_stop_m=` 12 + 13) = 138 + 6 + 48 = 192.
+constexpr uint16_t kOperatorAnnounceAckWorstCaseChars = 192U;
 // The plan report. Derived field by field, because it is a fixed-schema line whose
 // bound a later field addition has to break visibly rather than silently:
 //
@@ -155,6 +168,23 @@ struct OperatorTelemetryView {
     uint32_t strideTicks = 1U;
     uint16_t controlCadenceHz = 0U;
     TelemetryDrops drops{};
+};
+
+// What an announcement confirmation says about the run's **execution plan**: the
+// run's single forward execution target and the named status it was adopted
+// under. Gathered by the vehicle layer from the immutable plan it adopted; this
+// value cannot change a plan, and it invents nothing - a refused plan reports its
+// refusal name and the formatter writes the absent marker for the target rather
+// than a zero that would read as a landmark at the Start Point.
+//
+// Why the confirmation carries it at all (audit P12 / OBS-FWD): before this, the
+// commanded forward stop existed only in the live `plan` query. A captured
+// session - the only durable evidence a calibration programme has - then forced
+// every analyst to reconstruct the shaped target from announce parameters. The
+// status is what says whether there was one; the number is what it was.
+struct ExecutionPlanEcho {
+    RunExecutionPlanStatus status = RunExecutionPlanStatus::NotPlanned;
+    double forwardStopMpPositionM = 0.0;
 };
 
 // The run layer's plan, as `plan` reports it: the announced run's execution
@@ -279,20 +309,27 @@ inline uint16_t formatAnnounceRefusal(const AnnounceVerdict& verdict, char* buff
     return finishBoundedLine(text, buffer);
 }
 
-// `OK,cmd=announce,plan=<status>,cruise_mps=<v>,delay_s=<v>,total_s=<v>,margin_s=<v>`
-// - the confirmation that the run was announced, with the **diagnostic** timing
-// estimate the vehicle layer built for it (`planRunTiming()`). The estimate is
-// echoed rather than only stored because it is the kinematic picture behind the
-// announcement - what the announced Target Time, the announced geometry and the
-// configured limits imply - and an operator who cannot see it cannot judge an
-// announcement. It is deliberately **not** a claim about what the run will do:
-// while the timing model is unvalidated (S7) the run's cruise is the configured
-// one, its deliberate delay is its execution plan's `initialDelayS` (0), and
-// `plan=<status>` may therefore refuse while the run is accepted. `total_s` is
-// the estimate's whole time (travel + the reversal stop's reserve + the delay)
-// and `margin_s` is what the announced time has left over.
-inline uint16_t formatAnnounceAck(const AnnounceVerdict& verdict, char* buffer,
-                                  uint16_t capacity) {
+// `OK,cmd=announce,plan=<timing status>,cruise_mps=<v>,delay_s=<v>,total_s=<v>,
+// margin_s=<v>,exec=<execution status>,fwd_stop_m=<v|->` - the confirmation that
+// the run was announced, with the **diagnostic** timing estimate the vehicle
+// layer built for it (`planRunTiming()`) and the fate of its execution plan. The
+// estimate is echoed rather than only stored because it is the kinematic picture
+// behind the announcement - what the announced Target Time, the announced
+// geometry and the configured limits imply - and an operator who cannot see it
+// cannot judge an announcement. It is deliberately **not** a claim about what the
+// run will do: while the timing model is unvalidated (S7) the run's cruise is the
+// configured one, its deliberate delay is its execution plan's `initialDelayS`
+// (0), and `plan=<status>` may therefore refuse while the run is accepted.
+// `total_s` is the estimate's whole time (travel + the reversal stop's reserve +
+// the delay) and `margin_s` is what the announced time has left over.
+//
+// `exec` and `fwd_stop_m` describe the **execution plan** - the run's forward
+// stop and why there is one or is not (audit P12) - and are distinct from
+// `plan=`, which is the timing estimate's status. `fwd_stop_m` is the absent
+// marker unless the execution plan is `Planned`: a refusal has no forward stop,
+// and a zero would read as a target at the Start Point.
+inline uint16_t formatAnnounceAck(const AnnounceVerdict& verdict, const ExecutionPlanEcho& planEcho,
+                                  char* buffer, uint16_t capacity) {
     BoundedText text(buffer, capacity);
     text.appendText(kOperatorOkPrefix);
     text.field("cmd").appendText(operatorCommandName(OperatorCommandId::Announce));
@@ -301,6 +338,13 @@ inline uint16_t formatAnnounceAck(const AnnounceVerdict& verdict, char* buffer,
     text.field("delay_s").appendFixed(verdict.plan.plannedDelayS, kTelemetryFieldDecimals);
     text.field("total_s").appendFixed(verdict.plan.intendedTotalS, kTelemetryFieldDecimals);
     text.field("margin_s").appendFixed(verdict.plan.marginS, kTelemetryFieldDecimals);
+    text.field("exec").appendText(runExecutionPlanStatusName(planEcho.status));
+    if (planEcho.status == RunExecutionPlanStatus::Planned) {
+        text.field("fwd_stop_m")
+            .appendFixed(planEcho.forwardStopMpPositionM, kTelemetryFieldDecimals);
+    } else {
+        text.field("fwd_stop_m").appendText(kTelemetryMissingField);
+    }
     return finishBoundedLine(text, buffer);
 }
 

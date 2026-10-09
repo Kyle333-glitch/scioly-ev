@@ -174,6 +174,177 @@ class AnalyzeTest(unittest.TestCase):
         self.assertIn("no conversion documented", summary)
 
 
+def _restamp(line: str, updates: dict[str, str]) -> str:
+    tokens = line.split(",")
+    parts = [tokens[0]]
+    for token in tokens[1:]:
+        key, _, _value = token.partition("=")
+        parts.append(f"{key}={updates[key]}" if key in updates else token)
+    return ",".join(parts)
+
+
+def _reboot_capture() -> list[str]:
+    """Fixture A's first lines, then a labelled restart with a fresh clock."""
+    lines = synthetic.generate_lines(spec("SYNTHETIC-A"))
+    head = lines[:40]
+    samples = [line for line in lines if line.startswith(schema.SAMPLE_PREFIX)][:6]
+    restarted = [
+        _restamp(line, {"t_ms": str(index * 20)})
+        for index, line in enumerate(samples, start=1)
+    ]
+    boot = (
+        f"{schema.EVENT_PREFIX},ver={schema.SCHEMA_VERSION},t_ms=0,phase=Idle,armed=0,"
+        "event=Boot,detail=-,fault=None,drop_s=0,drop_e=0"
+    )
+    return [*head, boot, *restarted]
+
+
+class IntegrityTest(unittest.TestCase):
+    """T4/T5/T6/T7: outputs are attributable, collision-free and reconciled.
+
+    These are the cases where a report tree could quietly describe something
+    other than the log it names: two inputs sharing a directory, a fixture whose
+    name no longer says it is one, a previous analysis's artifacts left beside a
+    new one, and a local file replaced by a fixture writer.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.out = os.path.join(self.tmp, "report")
+
+    def _write(self, lines: list[str], name: str) -> str:
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+        return path
+
+    def test_two_run_ids_that_would_share_a_directory_are_refused(self) -> None:
+        """`audit/A` and `audit?A` both normalize to `runs/audit_A`.
+
+        Without the preflight the second report replaces the first while the
+        manifest lists both - two R's worth of evidence in one directory.
+        """
+        code, _, err = run_cli(
+            [
+                "analyze",
+                sample_path("synthetic_a.csv"),
+                sample_path("synthetic_a.csv"),
+                "--out",
+                self.out,
+                "--run-id",
+                "audit/A",
+                "--run-id",
+                "audit?A",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("audit/A", err)
+        self.assertIn("audit?A", err)
+        # Nothing was written: the collision is found before the first report.
+        self.assertFalse(os.path.exists(os.path.join(self.out, "runs")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "manifest.json")))
+
+    def test_run_ids_differing_only_in_case_are_refused(self) -> None:
+        code, _, err = run_cli(
+            [
+                "analyze",
+                sample_path("synthetic_a.csv"),
+                sample_path("synthetic_b.csv"),
+                "--out",
+                self.out,
+                "--run-id",
+                "Bench-1",
+                "--run-id",
+                "bench-1",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not one-to-one", err)
+
+    def test_a_fixture_keeps_its_provenance_when_the_name_says_nothing(self) -> None:
+        """Renaming a capture cannot erase the header that declares it."""
+        neutral = os.path.join(self.tmp, "BENCH-1.csv")
+        with open(sample_path("synthetic_a.csv"), "r", encoding="utf-8") as handle:
+            text = handle.read()
+        with open(neutral, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+
+        code, out, err = run_cli(
+            ["analyze", neutral, "--out", self.out, "--run-id", "BENCH-1"]
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("SYNTHETIC FIXTURE", out)
+        summary = read(os.path.join(self.out, "runs", "BENCH-1", "summary.txt"))
+        self.assertIn("declared in the capture header", summary)
+        manifest = json.loads(read(os.path.join(self.out, "manifest.json")))
+        entry = manifest["inputs"][0]
+        self.assertEqual(entry["provenance_declared"], synthetic.SYNTHETIC_MARKER)
+        self.assertTrue(entry["synthetic"])
+
+    def test_a_clean_rerun_removes_the_stale_parse_errors_and_plots(self) -> None:
+        """A rerun publishes its own artifact set and nothing from the last one."""
+        lines = synthetic.generate_lines(spec("SYNTHETIC-A"))
+        damaged = list(lines)
+        index = next(i for i, line in enumerate(damaged) if line.startswith("EVS3"))
+        damaged.insert(index, "EVS3,ver=3,t_ms=garbage")
+        damaged_path = self._write(damaged, "damaged.csv")
+        clean_path = self._write(lines, "clean.csv")
+        run_dir = os.path.join(self.out, "runs", "capture")
+
+        code, _, err = run_cli(
+            [
+                "analyze",
+                damaged_path,
+                "--out",
+                self.out,
+                "--run-id",
+                "capture",
+                "--continue-on-error",
+            ]
+        )
+        self.assertEqual(code, 0, err)
+        errors_path = os.path.join(run_dir, "parse_errors.txt")
+        plot_path = os.path.join(run_dir, "plots", "position.svg")
+        self.assertTrue(os.path.isfile(errors_path))
+        self.assertTrue(os.path.isfile(plot_path))
+
+        # The same run id over the clean capture: the partial-log trace and the
+        # plots must not survive as if they described these bytes.
+        code, _, err = run_cli(["analyze", clean_path, "--out", self.out, "--run-id", "capture"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(errors_path))
+        self.assertTrue(os.path.isfile(plot_path))
+
+        code, _, err = run_cli(
+            ["analyze", clean_path, "--out", self.out, "--run-id", "capture", "--no-plots"]
+        )
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(plot_path))
+        metrics = json.loads(read(os.path.join(run_dir, "metrics.json")))
+        self.assertEqual(metrics["counts"]["parse_errors"], 0)
+
+    def test_a_differing_fixture_is_not_replaced_without_force(self) -> None:
+        samples = os.path.join(self.tmp, "samples")
+        code, _, err = run_cli(["synth", "--out", samples])
+        self.assertEqual(code, 0, err)
+        fixture = os.path.join(samples, "synthetic_a.csv")
+        local = "# a capture someone saved under a fixture's name\n"
+        with open(fixture, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(local)
+
+        code, _, err = run_cli(["synth", "--out", samples])
+        self.assertEqual(code, 2)
+        self.assertIn("refusing to replace", err)
+        self.assertEqual(read(fixture), local)
+        # The other fixtures were not touched either: the check runs first.
+        self.assertTrue(os.path.isfile(os.path.join(samples, "synthetic_b.csv")))
+
+        code, _, err = run_cli(["synth", "--out", samples, "--force"])
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(read(fixture), local)
+
+
 class CorruptInputTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
@@ -316,6 +487,117 @@ class EndpointComparisonTest(unittest.TestCase):
         code, out, _ = run_cli(["analyze", "unused.csv", "--print-measurement-template"])
         self.assertEqual(code, 0)
         self.assertIn("measured_end_position_m", out)
+
+    def test_a_padded_header_loads_with_the_normalized_names(self) -> None:
+        """Whitespace in the header must not turn a column into "not measured"."""
+        path = self._measurements(
+            "run_id, measured_end_position_m , measured_run_time_s\n"
+            "synthetic_a,2.500,23.0\n"
+        )
+        code, _, err = run_cli(
+            ["analyze", sample_path("synthetic_a.csv"), "--out", self.out, "--measurements", path]
+        )
+        self.assertEqual(code, 0, err)
+        row = json.loads(read(os.path.join(self.out, "endpoints.json")))["runs"][0]
+        self.assertAlmostEqual(row["measured_end_position_m"], 2.5)
+        self.assertAlmostEqual(row["measured_run_time_s"], 23.0)
+        self.assertIsNotNone(row["end_position_delta_m"])
+
+    def test_a_duplicate_column_is_refused(self) -> None:
+        path = self._measurements(
+            "run_id,measured_end_position_m,measured_end_position_m\nsynthetic_a,2.5,7.5\n"
+        )
+        code, _, err = run_cli(
+            ["analyze", sample_path("synthetic_a.csv"), "--out", self.out, "--measurements", path]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("duplicate column", err)
+        self.assertIn("measured_end_position_m", err)
+
+    def test_a_row_with_the_wrong_cell_count_is_refused(self) -> None:
+        path = self._measurements("run_id,measured_end_position_m\nsynthetic_a\n")
+        code, _, err = run_cli(
+            ["analyze", sample_path("synthetic_a.csv"), "--out", self.out, "--measurements", path]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cell(s)", err)
+
+    def test_a_non_finite_measurement_is_refused(self) -> None:
+        for text in ("nan", "inf", "1e309"):
+            with self.subTest(value=text):
+                path = self._measurements(
+                    f"run_id,measured_end_position_m\nsynthetic_a,{text}\n"
+                )
+                code, _, err = run_cli(
+                    [
+                        "analyze",
+                        sample_path("synthetic_a.csv"),
+                        "--out",
+                        self.out,
+                        "--measurements",
+                        path,
+                    ]
+                )
+                self.assertEqual(code, 2)
+                self.assertIn("finite", err)
+                self.assertFalse(
+                    os.path.exists(os.path.join(self.out, "endpoints.json"))
+                )
+
+    def test_a_domain_invalid_measurement_is_refused(self) -> None:
+        path = self._measurements(
+            "run_id,measured_end_position_m,measured_run_time_s\nsynthetic_a,2.5,-3.0\n"
+        )
+        code, _, err = run_cli(
+            ["analyze", sample_path("synthetic_a.csv"), "--out", self.out, "--measurements", path]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("outside its domain", err)
+
+    def test_an_unverified_stop_is_not_compared(self) -> None:
+        """A faulted run has no stop position, so a delta is not computed."""
+        path = self._measurements(
+            "run_id,measured_end_position_m,notes\nsynthetic_c,3.0,tape measure\n"
+        )
+        code, _, err = run_cli(
+            ["analyze", sample_path("synthetic_c.csv"), "--out", self.out, "--measurements", path]
+        )
+        self.assertEqual(code, 0, err)
+        comparison = json.loads(read(os.path.join(self.out, "endpoints.json")))
+        row = comparison["runs"][0]
+        self.assertFalse(row["comparable"])
+        self.assertIsNone(row["end_position_delta_m"])
+        self.assertIsNone(row["run_time_delta_s"])
+        self.assertIn("no verified final stop", row["comparison_refused_reason"])
+        self.assertEqual(
+            row["believed_end_position_source"], "latest_usable_sample"
+        )
+        self.assertEqual(comparison["refused_comparisons"][0]["run_id"], "synthetic_c")
+        text = read(os.path.join(self.out, "endpoints.txt"))
+        self.assertIn("comparisons refused", text)
+        self.assertIn("no verified final stop", text)
+
+    def test_a_capture_holding_two_runs_is_not_compared(self) -> None:
+        """An external measurement cannot be attributed to one of two runs."""
+        capture = self._write(_reboot_capture(), "reboot.csv")
+        path = self._measurements(
+            "run_id,measured_end_position_m,notes\nBENCH-9,2.5,tape measure\n"
+        )
+        code, _, err = run_cli(
+            ["analyze", capture, "--out", self.out, "--run-id", "BENCH-9", "--measurements", path]
+        )
+        self.assertEqual(code, 0, err)
+        row = json.loads(read(os.path.join(self.out, "endpoints.json")))["runs"][0]
+        self.assertFalse(row["comparable"])
+        self.assertTrue(row["capture_mixed_sessions"])
+        self.assertIn("attributed", row["comparison_refused_reason"])
+        self.assertIsNone(row["end_position_delta_m"])
+
+    def _write(self, lines: list[str], name: str) -> str:
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+        return path
 
 
 class EvidenceGuardTest(unittest.TestCase):

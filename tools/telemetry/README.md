@@ -120,8 +120,32 @@ Metrics cover, per run:
 
 - **state transitions**: every event in the stream, plus the phase boundaries
   derived from the sample train, with the disagreements between the two;
-- **position**: believed run-axis position, min/max, net travel, end position,
-  remaining distance, believed target;
+- **position**: believed run-axis position, min/max, net travel, remaining
+  distance, and the **believed endpoint**, which is the position at the run's
+  *verified final stop* (`end_position_source: verified_final_stop`) - not the last
+  sample in the file, which may be a vehicle being handled after the run. When the
+  run never verified a stop, the last usable sample is reported as exactly that
+  (`end_position_source: latest_usable_sample`) with the reason, and the two are
+  never substituted for one another. `last_m` is the last usable tick,
+  `after_stop_travel_m` is how far the estimate moved after the stop, and
+  `end_position_sampling_window_m`/`_ms` bound how far it could have moved between
+  the two samples around the confirming one. `believed_target_m` is reconstructed
+  with the sign of the leg the run stopped on - `position + remaining` forward,
+  `position - remaining` in reverse (`MotionPlan::remainingDistanceTo`), recorded in
+  `believed_target_source`;
+- **capture**: how the input was segmented - the sessions (one per firmware boot,
+  opened by a `Boot` event), the runs inside the analyzed one (a run is identified
+  by its actuation reading), which session/run was analyzed, what was excluded, and
+  `mixed_sessions`/`mixed_runs`. Backwards raw timestamps are classified, not
+  assumed to be wraps: `clock_wrap_count` (a rollover), `reordered_reading_count`
+  (a few milliseconds of re-ordering between two stamps) and
+  `restart_suspected_count` (neither - a reset whose `Boot` line was not captured, in
+  which case the elapsed duration is refused rather than reported as ~49.7 days);
+- **phase durations** are *transition-bounded* (the first sample of the phase to the
+  first sample of the next one), so a complete phase is not one interval short. A
+  phase still in effect at the end of the capture has no bound: its duration is
+  `None`, it is listed in `censored_phases`, and only its observed sample span is
+  reported;
 - **velocity**: measured and commanded ranges and means, and the tracking error;
 - **motor effort**: overall and per motor mode, in permille of full scale;
 - **raw inputs**: `batt_counts` and `curr_counts` **as raw ADC counts** - no
@@ -210,12 +234,31 @@ The rules:
   something surprising or the tool did.
 - **Anything else is ignored, not an error.** Operator responses (`OK`, `STATUS`,
   `ERR`, ...), the staged `BOOT,...` line, comment lines and monitor noise are
-  counted as ignored lines.
+  counted as ignored lines. A `#` header line that declares provenance
+  (`# SYNTHETIC ...`) is read for that declaration, which then travels with the
+  parsed records: a fixture copied or renamed to a neutral file name still reports
+  as synthetic, and a name may add that warning but never remove one.
 - **Time is unwrapped per lane**, using the same unsigned arithmetic the firmware
   uses, so a `millis()` wrap cannot produce a wrong duration and the legal
-  event-before-sample interleaving cannot produce a bogus timestamp jump.
+  event-before-sample interleaving cannot produce a bogus timestamp jump. Each lane
+  is unwrapped on its own timeline, so cross-lane comparisons use the raw `t_ms`
+  reading within one session.
+- **A capture can hold several boots and several runs, and they are never mixed.**
+  A `Boot` event opens a session; within a session, a changed actuation reading
+  marks a new run. The analyzer describes the last run of the last session with
+  samples, reports everything it excluded, and sets `mixed_sessions`/`mixed_runs`.
+  An endpoint comparison is refused (with its reason, in `endpoints.json`/`.txt`)
+  when the capture cannot be attributed to one run, or when that run recorded no
+  verified final stop.
 - **`ovf` parses to "no value"**, not to infinity, so a bug in a record cannot
   enter a mean as a huge measurement.
+- **A hand-measurement file is read literally or refused.** Header names are
+  whitespace-normalized before the rows are read through them, duplicate columns
+  are refused, a row whose cell count is not the header's is refused, and a numeric
+  cell must be finite and inside its column's domain (`measured_run_time_s`
+  non-negative, `pack_voltage_v` and `target_distance_m` positive). Every such
+  failure is a documented `error:` line with the file and row, an exit code of 2, and
+  no partial report - not a traceback and not a silent "not measured".
 
 ## Reproducibility
 
@@ -233,9 +276,23 @@ python -m unittest discover -s tools/telemetry/tests -t tools/telemetry
 ```
 
 The suite covers the parser's failure modes, the metrics against the synthetic
-generator, the schema mirror against the firmware headers, and the end-to-end
-workflow including reproducibility and the guard that keeps this tool away from
-`VERIFIED_STATE.md`.
+generator, the schema mirror against the firmware headers, the session/run
+segmentation and verified-stop semantics, the measurement-file validation, the
+output-integrity cases (run-id collisions, stale artifacts, provenance, `synth`
+without `--force`), and the end-to-end workflow including reproducibility and the
+guard that keeps this tool away from `VERIFIED_STATE.md`.
+
+## Output ownership
+
+A run directory holds only the artifacts the current analysis wrote: a rerun
+reconciles the directory (a clean rerun removes the previous `parse_errors.txt`, and
+`--no-plots` removes the previous plots) so a directory never mixes two analyses.
+Every run id is checked for output-path collisions before anything is written -
+including case-only differences and the characters that normalize to `_` - because a
+report tree generated on one machine is read on another. JSON is written by rename
+and refuses non-finite numbers, so a reader never sees a half-written file and no
+report contains `NaN`/`Infinity`. `synth` never replaces an existing fixture whose
+content differs unless `--force` is given.
 
 ## Layout
 

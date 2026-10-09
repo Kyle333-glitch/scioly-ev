@@ -708,5 +708,9 @@ int main(int, char**) {
     RUN_TEST(test_the_packet_limit_must_span_the_stop_dwell);
     RUN_TEST(test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop);
     RUN_TEST(test_the_open_interval_reports_its_own_start);
+    // S13R I-2 / P9: this case existed but was never registered, so Unity never
+    // ran it and the suite counted it nowhere. It pins the cited-`RuleDerived`
+    // dwell provenance the final stop's Complete Stop interval depends on.
+    RUN_TEST(test_a_cited_rule_dwell_gates_a_stop_and_an_uncited_one_does_not);
     return UNITY_END();
 }

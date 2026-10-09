@@ -38,7 +38,7 @@ void begin() {
     pinMode(kEncoderA, INPUT_PULLUP);
     pinMode(kEncoderB, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(kEncoderA), encoderIsr, CHANGE);
-    reestablishReference();
+    resetAndReestablishReference();
 }
 
 void reestablishReference() {
@@ -46,7 +46,30 @@ void reestablishReference() {
     // will see next, and it never counts (QuadratureDecoder.h). Reading the pins
     // here rather than assuming both are low keeps this honest even if the idle
     // levels turn out to be the opposite of what the plan guesses.
+    //
+    // The two pin reads and the decoder update are one observation, so they run
+    // with the encoder interrupt masked (audit M4 / S13R M-3): an edge between
+    // the reads or between a read and the update would otherwise make the
+    // reference a mixture of two instants. The mask is PRIMASK-preserving and
+    // spans a handful of instructions - it is not held across anything else.
+    const uint32_t primask = saveAndDisableInterrupts();
     g_decoder.update(digitalRead(kEncoderA) == HIGH, digitalRead(kEncoderB) == HIGH);
+    restoreInterrupts(primask);
+}
+
+void resetAndReestablishReference() {
+    // The coherent new-run boundary for the ISR-shared decoder: the reset (six
+    // field writes the ISR could interleave with) and the reference sample are
+    // one critical section, so the state an interrupt sees before and after is a
+    // valid one and the reference cannot be crossed by an edge. The caller must
+    // have the drivetrain stationary, exactly as `begin()` requires: an edge that
+    // arrives while interrupts are masked is not lost by the hardware, it is
+    // serviced the moment the mask is restored, and it is then judged against a
+    // reference that belongs to this instant rather than to a torn one.
+    const uint32_t primask = saveAndDisableInterrupts();
+    g_decoder.reset();
+    g_decoder.update(digitalRead(kEncoderA) == HIGH, digitalRead(kEncoderB) == HIGH);
+    restoreInterrupts(primask);
 }
 
 TickSnapshot snapshotTicks() {

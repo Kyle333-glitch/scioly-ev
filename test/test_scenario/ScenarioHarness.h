@@ -624,6 +624,17 @@ public:
     const ScenarioFixtures& fixtures() const { return fixtures_; }
 
     uint32_t nowMs() const { return nowMs_; }
+
+    // Places the scripted clock at a chosen reading before the first step, so a
+    // scenario can be driven across the real `millis()` uint32 wrap (S13R run-1
+    // M-1 / P13). It is the same kind of timestamp every production module is
+    // handed - no module reads a clock - and `lastCycleMs_` moves with it so the
+    // first step's `dtMs` is the control period, not the whole primed reading.
+    void primeClock(uint32_t nowMs) {
+        nowMs_ = nowMs;
+        lastCycleMs_ = nowMs;
+    }
+
     uint32_t cycles() const { return static_cast<uint32_t>(trace_.size()); }
     uint32_t droppedSamples() const { return droppedSamples_; }
 

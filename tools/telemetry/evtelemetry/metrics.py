@@ -96,6 +96,23 @@ def _stats(values: Sequence[float]) -> dict[str, Any]:
 def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
     """Consecutive same-phase samples collapsed into segments.
 
+    Two different numbers come out of a segment, and they are *not* the same
+    fact:
+
+    * ``observed_span_s`` is the span the samples themselves cover - the first
+      same-phase sample to the *last* one. The phase was still in effect when the
+      last one was written, so this span is a lower bound: it is short by however
+      much of the phase the sampling did not cover. A one-sample phase reports
+      ``0.0``, which is a statement about the samples, not about the phase.
+    * ``duration_s`` is the **transition-bounded** duration - the first sample of
+      the phase to the first sample of the *next* phase. A phase change is
+      detected by the next sample that carries the new phase, so that reading is
+      where the change is first observable, and the difference is the phase's
+      duration to the resolution the capture has. The last segment of the
+      capture has no next phase to bound it, so its ``duration_s`` is ``None`` and
+      it is marked ``censored``: reporting its observed span as a dwell would
+      present a truncated number as a complete one.
+
     The first segment starts at the log's first sample, which is a boundary of
     the *log*, not necessarily a phase change: the capture may begin mid-phase.
     """
@@ -113,8 +130,17 @@ def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
                     "sample_count": 1,
                 }
             )
-    for segment in segments:
-        segment["duration_s"] = _round((segment["end_ms"] - segment["start_ms"]) / 1000.0)
+    for index, segment in enumerate(segments):
+        segment["observed_span_s"] = _round(
+            (segment["end_ms"] - segment["start_ms"]) / 1000.0
+        )
+        following = segments[index + 1] if index + 1 < len(segments) else None
+        segment["censored"] = following is None
+        segment["duration_s"] = (
+            _round((following["start_ms"] - segment["start_ms"]) / 1000.0)
+            if following is not None
+            else None
+        )
     return segments
 
 
@@ -122,24 +148,45 @@ def _phase_section(samples: Sequence[Sample]) -> dict[str, Any]:
     segments = _phase_segments(samples)
     order: list[str] = []
     durations: dict[str, float] = {}
+    spans: dict[str, float] = {}
+    censored: dict[str, bool] = {}
     entries: dict[str, int] = {}
     exits: dict[str, int] = {}
     for segment in segments:
         phase = segment["phase"]
-        duration = segment["duration_s"] or 0.0
-        if phase not in durations:
+        if phase not in spans:
             order.append(phase)
             durations[phase] = 0.0
+            spans[phase] = 0.0
+            censored[phase] = False
             entries[phase] = segment["start_ms"]
-        durations[phase] = _round(durations[phase] + duration)
+        if segment["duration_s"] is None:
+            # The phase runs to the end of the capture: nothing bounded it, so it
+            # contributes no bounded duration and the phase is marked censored.
+            censored[phase] = True
+        else:
+            durations[phase] = _round(durations[phase] + segment["duration_s"])
+        spans[phase] = _round(spans[phase] + (segment["observed_span_s"] or 0.0))
         exits[phase] = segment["end_ms"]
     return {
         "order": order,
         "segments": segments,
+        # Transition-bounded durations, in seconds: the first sample of the phase
+        # to the first sample of the next one. `censored_phases` names the phases
+        # whose last segment reached the end of the capture, whose bounded
+        # duration is therefore a lower bound (`observed_span_s` only).
         "durations_s": durations,
+        "observed_span_s": spans,
+        "censored_phases": [phase for phase in order if censored[phase]],
         "first_entry_t_abs_ms": entries,
         "last_exit_t_abs_ms": exits,
         "segment_count": len(segments),
+        "duration_note": (
+            "durations_s is transition-bounded (first sample of the phase to the "
+            "first sample of the next phase); observed_span_s is the span the "
+            "samples covered, which is a lower bound while a phase is still in "
+            "effect at the last sample"
+        ),
     }
 
 
@@ -154,7 +201,14 @@ def _phase_changes_from_samples(samples: Sequence[Sample]) -> list[dict[str, Any
     previous: Optional[str] = None
     for sample in samples:
         if previous is not None and sample.phase != previous:
-            changes.append({"t_abs_ms": sample.t_abs_ms, "phase": sample.phase})
+            changes.append(
+                {
+                    "t_abs_ms": sample.t_abs_ms,
+                    "t_ms": sample.t_ms,
+                    "session_index": sample.session_index,
+                    "phase": sample.phase,
+                }
+            )
         previous = sample.phase
     return changes
 
@@ -166,10 +220,27 @@ def _phase_changes_from_events(events: Sequence[Event]) -> list[dict[str, Any]]:
     directly comparable with the sample-derived list above.
     """
     return [
-        {"t_abs_ms": event.t_abs_ms, "phase": event.detail}
+        {
+            "t_abs_ms": event.t_abs_ms,
+            "t_ms": event.t_ms,
+            "session_index": event.session_index,
+            "phase": event.detail,
+        }
         for event in events
         if event.event == "PhaseChange"
     ]
+
+
+def _phase_change_key(change: dict[str, Any]) -> tuple[int, int, str]:
+    """The identity of a boundary as both lanes can agree on it.
+
+    The raw ``t_ms`` reading is used, not the unwrapped ``t_abs_ms``: each lane is
+    unwrapped on its own timeline, so two lanes' ``t_abs_ms`` values are only
+    comparable when both lanes happen to be anchored at the same reading. Within
+    one session the raw reading is the same clock, so it is the one both lanes
+    share.
+    """
+    return (change["session_index"], change["t_ms"], change["phase"])
 
 
 def _phase_timing(phase_section: dict[str, Any]) -> dict[str, Any]:
@@ -258,38 +329,174 @@ def _adjacent_steps(samples: Sequence[Sample]) -> dict[str, Any]:
     }
 
 
-def _position_section(samples: Sequence[Sample]) -> dict[str, Any]:
+# The phases that only occur after the vehicle has reversed. If the run observed
+# any of them, its final stop is a *reverse-leg* stop, where the firmware's
+# remaining distance is `position - target` and not `target - position`
+# (`MotionPlan::remainingDistanceTo`).
+_REVERSE_PHASES = ("Reverse", "FinalApproach", "FinalBrake")
+
+
+def _observed_phases(samples: Sequence[Sample], events: Sequence[Event]) -> set[str]:
+    """Every phase the run is known to have entered, from both lanes.
+
+    Both lanes are used because either can be the one that survived a drop: the
+    sample train shows the phase in `phase`, and a `PhaseChange` event names the
+    new phase in `detail`.
+    """
+    phases = {sample.phase for sample in samples}
+    phases.update(event.detail for event in events if event.event == "PhaseChange")
+    return phases
+
+
+def _stopped_leg(phases: set[str]) -> str:
+    """Which leg the final stop belongs to: ``"forward"`` or ``"reverse"``."""
+    return "reverse" if any(phase in phases for phase in _REVERSE_PHASES) else "forward"
+
+
+def _verified_stop_sample(samples: Sequence[Sample]) -> Optional[Sample]:
+    """The first sample at which the run's final stop was verified.
+
+    This is the only sample that represents *where the run stopped*. It exists
+    when the tick carries the run's own timeline and `stop_verified_ok`, which the
+    firmware sets once the Complete Stop dwell has confirmed; a capture that ends
+    while the dwell was still open has no such sample, so its endpoint is not a
+    verified stop and is reported as such.
+    """
+    return next(
+        (
+            sample
+            for sample in samples
+            if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok
+        ),
+        None,
+    )
+
+
+def _position_section(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str, Any]:
     usable = [sample for sample in samples if sample.is_usable_position]
     unusable = [sample for sample in samples if not sample.is_usable_position]
     positions = [float(sample.position_m) for sample in usable]  # type: ignore[arg-type]
 
-    final = usable[-1] if usable else None
-    final_position = float(final.position_m) if final is not None else None  # type: ignore[arg-type]
-    final_remaining = float(final.remaining_m) if final is not None and final.remaining_m is not None else None
-    believed_target = (
-        final_position + final_remaining
-        if final_position is not None and final_remaining is not None
+    latest = usable[-1] if usable else None
+    latest_position = float(latest.position_m) if latest is not None else None  # type: ignore[arg-type]
+    latest_remaining = (
+        float(latest.remaining_m)
+        if latest is not None and latest.remaining_m is not None
         else None
     )
+
+    phases = _observed_phases(samples, events)
+    leg = _stopped_leg(phases)
+    verified = _verified_stop_sample(usable)
+    stop_position = (
+        float(verified.position_m) if verified is not None else None  # type: ignore[arg-type]
+    )
+    stop_remaining = (
+        float(verified.remaining_m)
+        if verified is not None and verified.remaining_m is not None
+        else None
+    )
+
+    # The endpoint is the verified final stop, and nothing else. The last sample in
+    # the file is a different fact: after the stop the vehicle may be handled or
+    # retrieved, which moves it, and a capture that ends mid-run has no stop at all.
+    # Substituting one for the other is how an analysis reported a different
+    # position than the one the run stopped at, so both are reported, separately
+    # named, with the source that produced each.
+    if stop_position is not None:
+        end_position = stop_position
+        end_source: Optional[str] = "verified_final_stop"
+        end_reason: Optional[str] = None
+    elif latest_position is not None:
+        end_position = latest_position
+        end_source = "latest_usable_sample"
+        end_reason = (
+            "no verified final stop was recorded (the run's final-stop dwell never "
+            "verified), so this is the last usable position, not a stop position"
+        )
+    else:
+        end_position = None
+        end_source = None
+        end_reason = "no usable position sample was recorded"
+
+    # Sampling uncertainty: the stop is confirmed by a sample, and the vehicle kept
+    # moving between that sample and the one before it. The endpoint is therefore
+    # only known to within that window, and the window is reported rather than
+    # implied. `None` when the confirming sample is the first usable one.
+    stop_index = usable.index(verified) if verified is not None else None
+    previous_usable = (
+        usable[stop_index - 1] if stop_index is not None and stop_index > 0 else None
+    )
+    sampling_window_ms = (
+        verified.t_abs_ms - previous_usable.t_abs_ms
+        if verified is not None and previous_usable is not None
+        else None
+    )
+    sampling_window_m = (
+        abs(float(verified.position_m) - float(previous_usable.position_m))  # type: ignore[arg-type]
+        if verified is not None
+        and previous_usable is not None
+        and verified.position_m is not None
+        and previous_usable.position_m is not None
+        else None
+    )
+
+    # Leg-correct reconstruction of the target the run believed it was driving to.
+    # On the forward leg the firmware's remaining is `target - position`; on the
+    # reverse leg it is `position - target`, so the same `+` on both legs turns a
+    # reverse-leg stop into a target on the far side of the run. When the leg is
+    # reverse and the log's remaining is forward-shaped, the reconstruction is
+    # arithmetically wrong and says so through `believed_target_source` being
+    # absent while the numbers remain visible in the payload.
+    believed_target: Optional[float] = None
+    believed_target_source: Optional[str] = None
+    if stop_position is not None and stop_remaining is not None:
+        believed_target = (
+            stop_position - stop_remaining if leg == "reverse" else stop_position + stop_remaining
+        )
+        believed_target_source = f"reconstructed_from_verified_stop_{leg}_leg"
 
     return {
         "usable_sample_count": len(usable),
         "unusable_sample_count": len(unusable),
         "first_m": _round(positions[0]) if positions else None,
-        "last_m": _round(positions[-1]) if positions else None,
+        # The last usable tick, whatever happened afterwards. Equal to
+        # `end_position_m` only when no sample followed the verified stop.
+        "last_m": _round(latest_position),
         "min_m": _round(min(positions)) if positions else None,
         "max_m": _round(max(positions)) if positions else None,
-        # Displacement from the Start Point at the last usable tick. This is the
+        "verified_stop_m": _round(stop_position),
+        "verified_stop_t_abs_ms": verified.t_abs_ms if verified is not None else None,
+        "verified_stop_leg": leg if verified is not None else None,
+        "verified_stop_remaining_m": _round(stop_remaining),
+        # Displacement from the Start Point at the verified final stop. This is the
         # quantity a tape measure from the start line compares against, which is
         # why `endpoints` uses it and not `net_travel_m`.
-        "end_position_m": _round(final_position),
-        # Net displacement across the log: a forward excursion plus a reversal
-        # cancels here, so it is a different number from `end_position_m` in any
-        # run that reverses - which the synthetic nominal runs do.
+        "end_position_m": _round(end_position),
+        "end_position_source": end_source,
+        "end_position_unavailable_reason": end_reason,
+        "end_position_sampling_window_ms": sampling_window_ms,
+        "end_position_sampling_window_m": _round(sampling_window_m),
+        # How far the position estimate moved after the verified stop (handling,
+        # retrieval, or a fault): the difference between the two, kept so a report
+        # can state it instead of silently reporting one as the other.
+        "after_stop_travel_m": (
+            _round(latest_position - stop_position)
+            if latest_position is not None and stop_position is not None
+            else None
+        ),
+        # Net displacement across the analysed session: a forward excursion plus a
+        # reversal cancels here, so it is a different number from `end_position_m`
+        # in any run that reverses - which the synthetic nominal runs do.
         "net_travel_m": _round(positions[-1] - positions[0]) if positions else None,
-        "final_remaining_m": _round(final_remaining),
+        "final_remaining_m": _round(latest_remaining),
         "believed_target_m": _round(believed_target),
-        "note": "position is the firmware's run-axis estimate, metres from the Start Point",
+        "believed_target_source": believed_target_source,
+        "note": (
+            "position is the firmware's run-axis estimate, metres from the Start "
+            "Point; `end_position_m` is the verified final stop, `last_m` is the "
+            "last usable tick"
+        ),
     }
 
 
@@ -521,6 +728,18 @@ def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str,
         "final_stop_dwell_start_ms": dwell_start_ms,
         "stop_verified_ms": stop_verified_ms,
         "final_stop_dwell_verified": verified is not None,
+        # How the run ended, from its own last phase: a run that reached Done (the
+        # only phase that exists after a verified final stop), a run a fault ended,
+        # or a capture that stopped before either - an incomplete run is reported as
+        # incomplete rather than being measured as if it had finished.
+        "completion": (
+            "done"
+            if done is not None and not any(sample.phase == "Fault" for sample in samples)
+            else "fault"
+            if fault is not None
+            else "incomplete"
+        ),
+        "stop_confirmed_t_abs_ms": verified.t_abs_ms if verified is not None else None,
         "internal_run_time_s": internal_run_time_s,
         "final_stop_verification_completed_s": final_stop_verification_completed_s,
         "note": (
@@ -534,29 +753,179 @@ def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str,
 
 
 def _endpoint_section(
-    samples: Sequence[Sample], phase_section: dict[str, Any], timing: dict[str, Any]
+    samples: Sequence[Sample],
+    phase_section: dict[str, Any],
+    timing: dict[str, Any],
+    position: dict[str, Any],
+    run_window: dict[str, Any],
 ) -> dict[str, Any]:
-    usable = [sample for sample in samples if sample.is_usable_position]
-    final = usable[-1] if usable else None
+    """The believed endpoint and what kind of stop it came from.
+
+    The believed endpoint is the *verified final stop* whenever the run recorded
+    one (`position.end_position_m`). When it did not, the section reports the last
+    usable sample as exactly that and gives the reason - a capture that ends
+    mid-run has no endpoint, and saying it does would promote the last written
+    bytes into a measurement of where the vehicle came to rest.
+    """
+    source = position["end_position_source"]
     return {
         "final_phase": samples[-1].phase if samples else None,
         "final_fault": samples[-1].fault if samples else None,
         "ended_in_fault": any(sample.phase == "Fault" for sample in samples),
         "reversal_observed": bool(timing["reversal_observed"]),
         "phases_observed": list(phase_section["order"]),
-        "believed_end_position_m": _round(float(final.position_m))  # type: ignore[arg-type]
-        if final is not None
-        else None,
-        "final_remaining_m": _round(float(final.remaining_m))
-        if final is not None and final.remaining_m is not None
-        else None,
-        "note": "believed endpoints are the firmware's own estimates and are not measured positions",
+        "believed_end_position_m": position["end_position_m"],
+        "believed_end_position_source": source,
+        "believed_end_position_unavailable_reason": position[
+            "end_position_unavailable_reason"
+        ],
+        "believed_end_position_sampling_window_ms": position[
+            "end_position_sampling_window_ms"
+        ],
+        "believed_end_position_sampling_window_m": position[
+            "end_position_sampling_window_m"
+        ],
+        "verified_stop_leg": position["verified_stop_leg"],
+        "stop_verified": run_window["final_stop_dwell_verified"],
+        "completion": run_window["completion"],
+        "believed_target_m": position["believed_target_m"],
+        "believed_target_source": position["believed_target_source"],
+        "final_remaining_m": position["final_remaining_m"],
+        "note": (
+            "believed endpoints are the firmware's own estimates and are not measured "
+            "positions; `believed_end_position_source` says whether the endpoint is a "
+            "verified final stop or the last sample, and the sampling window bounds how "
+            "far the estimate could have moved between samples"
+        ),
+    }
+
+
+def _capture_section(log: Log, selection: dict[str, Any]) -> dict[str, Any]:
+    """What the capture as a whole is, beyond the one session being analyzed."""
+    sessions = log.sessions
+    wrapped = [item for item in log.wrap_observations if item["kind"] == "wrap"]
+    reordered = [item for item in log.wrap_observations if item["kind"] == "reordered"]
+    restart_suspected = [
+        item for item in log.wrap_observations if item["kind"] == "restart_suspected"
+    ]
+    return {
+        "provenance_declared": log.declared_provenance,
+        "session_count": len(sessions),
+        "sessions": [
+            {
+                "index": session.index,
+                "opened_by_boot": session.opened_by_boot,
+                "boot_t_ms": session.boot_t_ms,
+                "sample_count": session.sample_count,
+                "event_count": session.event_count,
+                "first_t_abs_ms": session.first_t_abs_ms,
+                "last_t_abs_ms": session.last_t_abs_ms,
+            }
+            for session in sessions
+        ],
+        "selection": selection,
+        # Three named kinds of backwards raw reading, kept apart so neither is read
+        # as the other: a rollover of the uint32 clock (`wrap`), a few milliseconds
+        # of re-ordering between two stamps (`reordered`), and a step that is
+        # neither - which is what a reset without a captured `Boot` line looks like
+        # (`restart_suspected`).
+        "clock_wrap_count": len(wrapped),
+        "clock_wraps": wrapped,
+        "reordered_reading_count": len(reordered),
+        "reordered_readings": reordered[:20],
+        "restart_suspected_count": len(restart_suspected),
+        "restart_suspected_steps": restart_suspected[:20],
+        "note": (
+            "each session is one firmware boot; records from different sessions were "
+            "written by different boots and their `t_ms` readings are not comparable"
+        ),
     }
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _run_starts(samples: Sequence[Sample]) -> list[int]:
+    """The distinct actuation readings in a session, in the order they first appear.
+
+    The run's own timeline reports one actuation reading per run
+    (`run_start_ms`), repeated on every sample after it. A session that re-armed
+    and ran again therefore carries two of them, which is how a run is identified
+    inside one session - the timestamps alone cannot tell two runs apart.
+    """
+    starts: list[int] = []
+    for sample in samples:
+        if sample.run_start_ok and (not starts or starts[-1] != sample.run_start_ms):
+            starts.append(sample.run_start_ms)
+    return starts
+
+
+def _select_run(
+    log: Log,
+) -> tuple[list[Sample], list[Event], list[Event], dict[str, Any]]:
+    """Which session and which run the analyzer describes, and what it left out.
+
+    A capture is analyzed as *one run*. The last session that contains samples is
+    the session; within it, if the actuation reading changed - the run was
+    completed, disarmed and a second run was actuated - the last run is the one
+    analyzed and the earlier run's samples are excluded. A session with one run
+    keeps every sample, including the ticks before actuation, so the pre-run
+    window stays visible.
+
+    ``mixed_sessions`` and ``mixed_runs`` say that the capture holds more than one
+    boot and more than one run. The selection is deterministic either way, but a
+    consumer comparing a capture against an external measurement has to know that
+    the bytes it is reading do not describe one attributable run.
+    """
+    sample_sessions = sorted({sample.session_index for sample in log.samples})
+    event_sessions = sorted({event.session_index for event in log.events})
+    if sample_sessions:
+        selected = sample_sessions[-1]
+    elif event_sessions:
+        selected = event_sessions[-1]
+    else:
+        selected = 0
+
+    samples = [sample for sample in log.samples if sample.session_index == selected]
+    events = [event for event in log.events if event.session_index == selected]
+
+    starts = _run_starts(samples)
+    selected_run_start_ms = starts[-1] if starts else None
+    run_first_index = 0
+    if len(starts) > 1 and selected_run_start_ms is not None:
+        run_first_index = next(
+            index
+            for index, sample in enumerate(samples)
+            if sample.run_start_ok and sample.run_start_ms == selected_run_start_ms
+        )
+    run_samples = samples[run_first_index:]
+    if run_first_index:
+        run_events = [
+            event for event in events if event.t_ms >= run_samples[0].t_ms
+        ]
+    else:
+        run_events = events
+
+    selection = {
+        "rule": "last_run_in_last_session_with_samples",
+        "selected_session_index": selected,
+        "session_count": log.session_count,
+        "sample_session_count": len(sample_sessions),
+        "mixed_sessions": len(sample_sessions) > 1,
+        "runs_in_session": len(starts),
+        "selected_run_start_ms": selected_run_start_ms,
+        "mixed_runs": len(starts) > 1,
+        "excluded_sample_count": len(log.samples) - len(run_samples),
+        "excluded_event_count": len(log.events) - len(events),
+        "note": (
+            "one capture is analyzed as one run: the last run of the last session "
+            "with samples. Records from other sessions or runs are excluded, and "
+            "`mixed_sessions`/`mixed_runs` say whether any exist"
+        ),
+    }
+    return run_samples, run_events, events, selection
 
 
 def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
@@ -566,27 +935,68 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
     clock or the environment, so two runs over the same bytes produce the same
     report.
     """
-    samples = log.samples
-    events = log.events
+    samples, run_events, events, selection = _select_run(log)
+    session_records = sorted([*samples, *events], key=lambda record: record.order)
     phase_section = _phase_section(samples)
     timing = _phase_timing(phase_section)
 
     from_samples = _phase_changes_from_samples(samples)
     from_events = _phase_changes_from_events(events)
-    sample_keys = {(item["t_abs_ms"], item["phase"]) for item in from_samples}
-    event_keys = {(item["t_abs_ms"], item["phase"]) for item in from_events}
+    sample_keys = {_phase_change_key(change) for change in from_samples}
+    event_keys = {_phase_change_key(change) for change in from_events}
     only_samples = sample_keys - event_keys
     only_events = event_keys - sample_keys
     mismatches = [
-        {"t_abs_ms": t_ms, "phase": phase, "only_in": only_in}
-        for t_ms, phase, only_in in sorted(
-            (item for item in ((t, p, "samples") for t, p in only_samples))
+        {
+            "session_index": session_index,
+            "t_ms": t_ms,
+            "phase": phase,
+            "only_in": only_in,
+        }
+        for session_index, t_ms, phase, only_in in sorted(
+            (
+                (change["session_index"], change["t_ms"], change["phase"], "samples")
+                for change in from_samples
+                if _phase_change_key(change) in only_samples
+            )
         )
-        + sorted((item for item in ((t, p, "events") for t, p in only_events)))
+        + sorted(
+            (
+                (change["session_index"], change["t_ms"], change["phase"], "events")
+                for change in from_events
+                if _phase_change_key(change) in only_events
+            )
+        )
     ]
 
-    first = log.first_t_abs_ms
-    last = log.last_t_abs_ms
+    first = min(
+        (record.t_abs_ms for record in session_records),
+        default=None,
+    )
+    last = max(
+        (record.t_abs_ms for record in session_records),
+        default=None,
+    )
+    # A backwards step inside the analyzed session that is neither a rollover nor a
+    # re-ordering is a clock restart the capture did not label. The per-lane
+    # unwrap still reconstructs it as the unsigned difference, so the window's
+    # duration would be ~49.7 days of elapsed time that never happened: it is
+    # reported as unavailable, with the reason, rather than as a number.
+    unsegmented_restart = any(
+        observation["kind"] == "restart_suspected"
+        and observation["session_index"] == selection["selected_session_index"]
+        for observation in log.wrap_observations
+    )
+    window_unavailable_reason = (
+        "a backwards timestamp that is neither a uint32 wrap nor a few-millisecond "
+        "re-ordering appears inside the analyzed session; the capture likely spans a "
+        "clock restart whose Boot line was not recorded, and an elapsed duration "
+        "across it would be reconstructed as about 49.7 days that did not happen"
+        if unsegmented_restart
+        else None
+    )
+    position = _position_section(samples, run_events)
+    run_window = _run_window(samples, run_events)
 
     return {
         "run_id": run_id,
@@ -596,6 +1006,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
             "total_lines": log.total_lines,
         },
         "schema": {"version": schema.SCHEMA_VERSION, "prefixes": [schema.SAMPLE_PREFIX, schema.EVENT_PREFIX]},
+        "capture": _capture_section(log, selection),
         "counts": {
             "samples": len(samples),
             "events": len(events),
@@ -605,11 +1016,20 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         "window": {
             "first_t_abs_ms": first,
             "last_t_abs_ms": last,
-            "log_duration_s": _round((last - first) / 1000.0)
-            if first is not None and last is not None
-            else None,
+            "log_duration_s": (
+                _round((last - first) / 1000.0)
+                if first is not None and last is not None and not unsegmented_restart
+                else None
+            ),
+            "duration_unavailable_reason": window_unavailable_reason,
+            "session_index": selection["selected_session_index"],
+            "note": (
+                "the analyzed session's window; each lane's `t_abs_ms` is anchored "
+                "to that lane's first record, so cross-lane comparisons use the raw "
+                "`t_ms` reading"
+            ),
         },
-        "run_window": _run_window(samples, events),
+        "run_window": run_window,
         # Nested under a unit-carrying key rather than spread flat, so the unit is
         # still in the key path for every leaf (`section 6`).
         "control_dt": {
@@ -620,7 +1040,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
             "note": "the measured interval each tick was given, as the tick itself reported it",
         },
         "adjacent_sample_spacing": _adjacent_steps(samples),
-        "drops": _drops_section(log.records),
+        "drops": _drops_section(session_records),
         "phases": phase_section,
         "transitions": {
             "events": [
@@ -643,14 +1063,10 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
             "phase_changes_only_in_samples_count": len(only_samples),
             "phase_changes_only_in_events_count": len(only_events),
             "phase_changes_only_in_samples": [
-                item
-                for item in from_samples
-                if (item["t_abs_ms"], item["phase"]) in only_samples
+                item for item in from_samples if _phase_change_key(item) in only_samples
             ],
             "phase_changes_only_in_events": [
-                item
-                for item in from_events
-                if (item["t_abs_ms"], item["phase"]) in only_events
+                item for item in from_events if _phase_change_key(item) in only_events
             ],
             "phase_change_mismatch_count": len(mismatches),
             "phase_change_mismatches": mismatches[:50],
@@ -660,7 +1076,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
                 "sample train while the event survives"
             ),
         },
-        "position": _position_section(samples),
+        "position": position,
         "velocity": _velocity_section(samples),
         "effort": _effort_section(samples),
         "raw_inputs": _raw_inputs_section(samples),
@@ -668,5 +1084,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         "authorization": _authorization_section(samples),
         "configuration_checks": _configuration_check_section(samples),
         "phase_timing": timing,
-        "endpoints": _endpoint_section(samples, phase_section, timing),
+        "endpoints": _endpoint_section(
+            samples, phase_section, timing, position, run_window
+        ),
     }

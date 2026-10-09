@@ -17,11 +17,12 @@ not be able to reach the project's evidence record by accident.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from typing import Any, Optional, Sequence
 
-from . import schema, svgplot
+from . import schema, svgplot, synthetic
 from .parse import Event, Log, Sample
 
 __all__ = [
@@ -78,15 +79,87 @@ def _write_text(path: str, text: str) -> None:
         handle.write(text)
 
 
+def _write_text_atomic(path: str, text: str) -> None:
+    """Writes a file by rename, so a reader never sees a half-written one.
+
+    A JSON report is read by other tools; a partially flushed file is a file that
+    parses as something else. The temporary name is fixed (not random) because a
+    leftover from an interrupted run should be recognisable rather than a new
+    mystery file each time, and it is removed if the write fails.
+    """
+    _guard(path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary = path + ".partial"
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+        raise
+
+
 def write_json(path: str, payload: Any) -> None:
-    """JSON with sorted keys and a trailing newline, so a diff is meaningful."""
-    _write_text(path, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    """JSON with sorted keys and a trailing newline, so a diff is meaningful.
+
+    ``allow_nan=False``: `json.dumps` writes the bare tokens ``NaN`` and
+    ``Infinity`` by default, which are not JSON and which read as numbers in a
+    JSON5 parser and as errors in a strict one. A non-finite value reaching this
+    point is a defect upstream, so it fails here rather than producing a file that
+    only some readers accept.
+    """
+    try:
+        text = json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    except ValueError as error:
+        raise ReportError(
+            f"refusing to write non-finite JSON to {os.path.basename(path)}: {error}"
+        ) from None
+    _write_text_atomic(path, text)
 
 
-def is_synthetic(run_id: str, source: Optional[str]) -> bool:
-    """True when a run is a generated fixture rather than a captured session."""
+def is_synthetic(
+    run_id: str,
+    source: Optional[str],
+    declared_provenance: Optional[str] = None,
+) -> bool:
+    """True when a run is a generated fixture rather than a captured session.
+
+    Two things can say so, and either is enough: the capture's own header
+    (``# SYNTHETIC ...``, carried through the parse as ``declared_provenance``),
+    or the run id / file name. A name may **add** a warning and never remove one,
+    so a fixture copied to ``BENCH-1.csv`` still reports as synthetic.
+    """
+    if (declared_provenance or "").strip().upper().startswith(synthetic.SYNTHETIC_MARKER):
+        return True
     haystack = f"{run_id} {source or ''}".lower()
-    return "synthetic" in haystack
+    return synthetic.SYNTHETIC_MARKER.lower() in haystack
+
+
+def _declared_provenance(metrics: dict[str, Any]) -> Optional[str]:
+    capture = metrics.get("capture") or {}
+    return capture.get("provenance_declared")
+
+
+def _provenance_line(metrics: dict[str, Any]) -> Optional[str]:
+    """The provenance warning for a run, with where the claim came from."""
+    declared = _declared_provenance(metrics)
+    by_name = is_synthetic(metrics["run_id"], metrics["source"]["path"])
+    if declared and declared.strip().upper().startswith(synthetic.SYNTHETIC_MARKER):
+        if by_name:
+            return "SYNTHETIC FIXTURE - declared in the capture header, not measured"
+        return (
+            "SYNTHETIC FIXTURE - declared in the capture header, not measured "
+            "(the run id/name does not say so)"
+        )
+    if by_name:
+        return "SYNTHETIC FIXTURE - generated, not measured (no header declaration)"
+    if declared:
+        return f"provenance declared by the capture: {declared}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -134,12 +207,14 @@ def summarize_run(metrics: dict[str, Any]) -> str:
     authz = metrics["authorization"]
     spacing = metrics["adjacent_sample_spacing"]
     transitions = metrics["transitions"]
-    synthetic = is_synthetic(metrics["run_id"], metrics["source"]["path"])
+    capture = metrics["capture"]
+    selection = capture["selection"]
 
     lines: list[str] = []
     lines.append(f"run_id:            {metrics['run_id']}")
-    if synthetic:
-        lines.append("provenance:        SYNTHETIC FIXTURE - generated, not measured")
+    provenance = _provenance_line(metrics)
+    if provenance:
+        lines.append(f"provenance:        {provenance}")
     lines.append(f"source:            {metrics['source']['path']}")
     lines.append(f"sha256:            {metrics['source']['sha256']}")
     lines.append(
@@ -149,6 +224,25 @@ def summarize_run(metrics: dict[str, Any]) -> str:
         f"records:           samples={counts['samples']} events={counts['events']} "
         f"ignored_lines={counts['ignored_lines']} parse_errors={counts['parse_errors']}"
     )
+    lines.append(
+        f"capture:           sessions={capture['session_count']} "
+        f"runs_in_session={selection['runs_in_session']} "
+        f"analyzed_session={selection['selected_session_index']} "
+        f"analyzed_run_start_ms={_fmt_int(selection['selected_run_start_ms'])} "
+        f"excluded_samples={selection['excluded_sample_count']}"
+    )
+    if selection["mixed_sessions"] or selection["mixed_runs"]:
+        lines.append(
+            "                   MIXED CAPTURE: more than one run is present, so this "
+            "report describes the last one and an external measurement cannot be "
+            "attributed to it"
+        )
+    if capture["clock_wrap_count"] or capture["reordered_reading_count"]:
+        lines.append(
+            f"clock:             wraps={capture['clock_wrap_count']} "
+            f"reordered readings={capture['reordered_reading_count']} "
+            "(a wrap is a uint32 rollover; a reordered reading is a few ms backwards)"
+        )
     lines.append(
         f"log window:        {_fmt_int(window['first_t_abs_ms'])} ms .. "
         f"{_fmt_int(window['last_t_abs_ms'])} ms  ({_fmt(window['log_duration_s'])} s)"
@@ -190,8 +284,13 @@ def summarize_run(metrics: dict[str, Any]) -> str:
 
     phase_order = phases["order"]
     if phase_order:
+        # Transition-bounded durations: the phase's first sample to the next
+        # phase's first sample. A phase still in effect at the end of the capture
+        # has no such bound, so it prints its observed span and is marked.
         rendered = " | ".join(
-            f"{phase} {_fmt(phases['durations_s'].get(phase), 3)}s" for phase in phase_order
+            f"{phase} {_fmt(phases['durations_s'].get(phase), 3)}s"
+            + ("(censored)" if phase in phases["censored_phases"] else "")
+            for phase in phase_order
         )
         lines.append(f"phases:            {rendered}")
     else:
@@ -224,11 +323,27 @@ def summarize_run(metrics: dict[str, Any]) -> str:
     lines.append(
         f"position (m):      first {_fmt(position['first_m'])} last {_fmt(position['last_m'])} "
         f"min {_fmt(position['min_m'])} max {_fmt(position['max_m'])}; "
-        f"believed end {_fmt(position['end_position_m'])}; "
         f"net travel {_fmt(position['net_travel_m'])}; "
-        f"believed target {_fmt(position['believed_target_m'])}; "
         f"usable {position['usable_sample_count']}/{counts['samples']}"
     )
+    lines.append(
+        f"believed endpoint: {_fmt(position['end_position_m'])} m "
+        f"({position['end_position_source'] or 'unavailable'}"
+        + (
+            f", {position['verified_stop_leg']} leg"
+            if position["verified_stop_leg"]
+            else ""
+        )
+        + f"; sampling window {_fmt(position['end_position_sampling_window_m'], 4)} m "
+        f"over {_fmt_int(position['end_position_sampling_window_ms'])} ms); "
+        f"after-stop travel {_fmt(position['after_stop_travel_m'])} m; "
+        f"believed target {_fmt(position['believed_target_m'])} m "
+        f"({position['believed_target_source'] or 'unavailable'})"
+    )
+    if position["end_position_unavailable_reason"]:
+        lines.append(
+            f"                   ({position['end_position_unavailable_reason']})"
+        )
     lines.append(
         f"effort (permille): max {_fmt(effort['overall_permille']['max'], 1)} "
         f"mean {_fmt(effort['overall_permille']['mean'], 1)}; "
@@ -296,9 +411,11 @@ def summarize_comparison(metrics_by_run: Sequence[dict[str, Any]]) -> str:
         "run_s is the firmware's internal Run Time: actuation to the start of the verified "
         "final-stop dwell, so the Complete Stop interval is not counted - and a run that "
         "never verified a final stop has none. It is the firmware's own clock, not the "
-        "official Run Time. net_m is the net run-axis displacement across the log, end_m is "
-        "the believed displacement from the Start Point at the last usable tick, and "
-        "target_m is the believed target; all in metres."
+        "official Run Time. net_m is the net run-axis displacement across the analyzed "
+        "run, end_m is the believed displacement from the Start Point **at the verified "
+        "final stop** (blank when the run never verified one - the last sample is not a "
+        "stop position), and target_m is the believed target, reconstructed with the sign "
+        "of the leg the run stopped on; all in metres."
     )
     return "\n".join(lines) + "\n"
 
@@ -313,7 +430,9 @@ def _samples_x(samples: Sequence[Sample]) -> list[float]:
 
 
 def _note_for(metrics: dict[str, Any]) -> str:
-    if is_synthetic(metrics["run_id"], metrics["source"]["path"]):
+    if _provenance_line(metrics) or is_synthetic(
+        metrics["run_id"], metrics["source"]["path"], _declared_provenance(metrics)
+    ):
         return "SYNTHETIC FIXTURE - generated data, not a measurement"
     return f"run {metrics['run_id']} - believed values from the firmware"
 
@@ -469,6 +588,43 @@ def run_plots(metrics: dict[str, Any], log: Log) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+# The per-analysis artifacts this tool owns inside a run directory. Reconciling
+# exactly these means a rerun replaces the set it produces and removes what it no
+# longer produces, without ever touching a file this tool did not write.
+_REPORT_ARTIFACTS: tuple[str, ...] = ("metrics.json", "summary.txt", "parse_errors.txt")
+
+
+def _reconcile(out_dir: str, kept: Sequence[str]) -> list[str]:
+    """Removes this tool's own artifacts that the current run did not write.
+
+    A clean rerun must not leave the previous run's ``parse_errors.txt`` beside a
+    metrics table with no errors, and ``--no-plots`` must not leave the previous
+    plots behind: both would attribute an old result to new bytes. Only the known
+    artifact names are considered, and only their removal is reported - anything
+    else in the directory is left alone.
+    """
+    removed: list[str] = []
+    keep = set(kept)
+    candidates = list(_REPORT_ARTIFACTS)
+    plots_dir = os.path.join(out_dir, "plots")
+    if os.path.isdir(plots_dir):
+        candidates.extend(
+            f"plots/{name}"
+            for name in sorted(os.listdir(plots_dir))
+            if name.endswith(".svg")
+        )
+    for relative in candidates:
+        if relative in keep:
+            continue
+        path = os.path.join(out_dir, *relative.split("/"))
+        if os.path.isfile(path):
+            os.remove(path)
+            removed.append(relative)
+    if os.path.isdir(plots_dir) and not os.listdir(plots_dir):
+        os.rmdir(plots_dir)
+    return removed
+
+
 def run_report(
     out_dir: str,
     metrics: dict[str, Any],
@@ -476,21 +632,31 @@ def run_report(
     *,
     include_plots: bool = True,
 ) -> list[str]:
-    """Writes one run's report directory. Returns the relative paths written."""
+    """Writes one run's report directory. Returns the relative paths written.
+
+    The directory is reconciled against what this analysis produced, so it never
+    holds a mix of two analyses of different bytes.
+    """
     _guard(os.path.join(out_dir, "metrics.json"))
     os.makedirs(out_dir, exist_ok=True)
 
-    written: list[str] = []
-    write_json(os.path.join(out_dir, "metrics.json"), metrics)
-    written.append("metrics.json")
-    _write_text(os.path.join(out_dir, "summary.txt"), summarize_run(metrics))
-    written.append("summary.txt")
-
+    artifacts: dict[str, str] = {"metrics.json": ""}
+    artifacts["summary.txt"] = summarize_run(metrics)
     if include_plots:
-        for relative, svg in run_plots(metrics, log).items():
-            _write_text(os.path.join(out_dir, relative), svg)
-            written.append(relative)
+        artifacts.update(run_plots(metrics, log))
 
+    if log.errors:
+        artifacts["parse_errors.txt"] = _parse_errors_text(log)
+
+    written: list[str] = []
+    for relative, text in artifacts.items():
+        if relative == "metrics.json":
+            write_json(os.path.join(out_dir, relative), metrics)
+        else:
+            _write_text(os.path.join(out_dir, relative), text)
+        written.append(relative)
+
+    _reconcile(out_dir, written)
     return written
 
 
@@ -567,6 +733,12 @@ def write_endpoints_report(out_dir: str, comparison: dict[str, Any]) -> None:
             f"{_fmt(row['pack_voltage_v'], 2):>7} "
             f"{accepted_text:>8} {row['exclusion_reason'][:20]:<20}"
         )
+    refusals = comparison.get("refused_comparisons") or []
+    if refusals:
+        lines.append("")
+        lines.append("comparisons refused (the believed endpoint is not attributable):")
+        for entry in refusals:
+            lines.append(f"  {entry['run_id']}: {entry['reason']}")
     if comparison["measured_rows_without_a_run"]:
         lines.append("")
         lines.append(
@@ -678,15 +850,7 @@ def write_distribution_report(out_dir: str, payload: dict[str, Any]) -> None:
     _write_text(os.path.join(out_dir, "distribution.txt"), summarize_distribution(payload))
 
 
-def write_parse_errors(out_dir: str, log: Log) -> None:
-    """Records the lines a permissive parse could not read.
-
-    Only written when there are any: a truncated or corrupted capture must leave
-    a trace in the report, so nobody reads a partial metrics table as if the log
-    had been complete.
-    """
-    if not log.errors:
-        return
+def _parse_errors_text(log: Log) -> str:
     lines = [
         f"Unreadable lines in {log.source} (parsed with --continue-on-error).",
         "",
@@ -696,4 +860,22 @@ def write_parse_errors(out_dir: str, log: Log) -> None:
     ]
     for error in log.errors:
         lines.append(error.message)
-    _write_text(os.path.join(out_dir, "parse_errors.txt"), "\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
+
+
+def write_parse_errors(out_dir: str, log: Log) -> None:
+    """Records the lines a permissive parse could not read.
+
+    A capture with errors leaves a trace in the report, so nobody reads a partial
+    metrics table as if the log had been complete. A capture with no errors
+    *removes* the trace a previous analysis of the same run left, because a stale
+    ``parse_errors.txt`` beside a clean metrics table is the same misreading in
+    the other direction.
+    """
+    path = os.path.join(out_dir, "parse_errors.txt")
+    if not log.errors:
+        _guard(path)
+        if os.path.isfile(path):
+            os.remove(path)
+        return
+    _write_text(path, _parse_errors_text(log))

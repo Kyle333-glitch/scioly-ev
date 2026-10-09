@@ -29,17 +29,17 @@ from .metrics import compute_metrics
 from .parse import TelemetryFormatError, read_log
 from .report import (
     ReportError,
+    is_synthetic,
     run_report,
     summarize_distribution,
     write_comparison_report,
     write_distribution_report,
     write_endpoints_report,
     write_manifest,
-    write_parse_errors,
     summarize_comparison,
     summarize_run,
 )
-from .synthetic import SPECS, write_samples
+from .synthetic import SPECS, SyntheticWriteError, write_samples
 
 __all__ = ["main", "DEFAULT_REPORT_DIR", "DEFAULT_SAMPLES_DIR", "REPO_ROOT"]
 
@@ -185,13 +185,49 @@ def _run_id_for(path: str, index: int, provided: Sequence[str]) -> str:
     return os.path.splitext(os.path.basename(path))[0]
 
 
+def _safe_run_name(run_id: str) -> str:
+    """The directory name a run id is written under. Not one-to-one."""
+    return _RUN_ID_SAFE.sub("_", run_id).strip("._-") or "run"
+
+
+def _preflight_run_dirs(out_dir: str, run_ids: Sequence[str]) -> list[str]:
+    """One output directory per run id, or a refusal naming the collision.
+
+    Naming is lossy: characters outside ``[A-Za-z0-9._-]`` fold to ``_``, and on
+    Windows a path is case-insensitive and ignores trailing dots and spaces, so
+    distinct inputs can map to one directory - and the later report then silently
+    replaces the earlier one, while the manifest lists both. This is checked for
+    every input *before anything is written*, and the comparison is folded the way
+    a case-insensitive filesystem folds, because a report tree generated on one
+    machine is read on another.
+    """
+    dirs: list[str] = []
+    owners: dict[str, str] = {}
+    for run_id in run_ids:
+        safe = _safe_run_name(run_id)
+        key = safe.casefold().rstrip(" .")
+        previous = owners.get(key)
+        if previous is not None:
+            raise CliError(
+                f"run ids {previous!r} and {run_id!r} would both write into "
+                f"{os.path.join(out_dir, 'runs', safe)!r} (the directory naming is "
+                "not one-to-one); give one of them a distinct --run-id so the two "
+                "reports do not replace each other"
+            )
+        owners[key] = run_id
+        dirs.append(os.path.join(out_dir, "runs", safe))
+    return dirs
+
+
 def _run_dir(out_dir: str, run_id: str) -> str:
-    safe = _RUN_ID_SAFE.sub("_", run_id).strip("._-") or "run"
-    return os.path.join(out_dir, "runs", safe)
+    return os.path.join(out_dir, "runs", _safe_run_name(run_id))
 
 
 def _cmd_synth(args: argparse.Namespace) -> int:
-    written = write_samples(args.out, force=args.force)
+    try:
+        written = write_samples(args.out, force=args.force)
+    except SyntheticWriteError as error:
+        raise CliError(str(error)) from None
     print(f"wrote {len(written)} SYNTHETIC fixture(s) into {args.out}")
     for path in written:
         print(f"  {path}")
@@ -227,10 +263,17 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         sys.stdout.write(MEASUREMENT_TEMPLATE)
         return _EXIT_OK
 
-    metrics_by_run = []
+    # Every input is validated, read and analyzed *before* anything is written.
+    # Two logs are often one capture split in two, and a report tree that contains
+    # run 1 while run 2 failed to parse (with no manifest) is a tree that looks
+    # finished and is not.
+    run_ids = [
+        _run_id_for(path, index, args.run_id) for index, path in enumerate(args.logs)
+    ]
+    run_dirs = _preflight_run_dirs(args.out, run_ids)
 
+    prepared = []
     for index, path in enumerate(args.logs):
-        run_id = _run_id_for(path, index, args.run_id)
         try:
             log = read_log(path, continue_on_error=args.continue_on_error)
         except FileNotFoundError:
@@ -239,13 +282,21 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             raise CliError(f"could not read {path}: {error}") from None
         except TelemetryFormatError as error:
             raise CliError(f"the log is not telemetry this tool understands\n{error}") from None
+        prepared.append((run_ids[index], run_dirs[index], log, compute_metrics(log, run_ids[index])))
 
-        metrics = compute_metrics(log, run_id)
+    table = None
+    if args.measurements:
+        try:
+            table = load_measurements(args.measurements)
+        except FileNotFoundError:
+            raise CliError(f"no such measurement file: {args.measurements}") from None
+        except MeasurementError as error:
+            raise CliError(f"the measurement file could not be read\n{error}") from None
 
-        run_dir = _run_dir(args.out, run_id)
+    metrics_by_run = []
+    for run_id, run_dir, log, metrics in prepared:
         try:
             run_report(run_dir, metrics, log, include_plots=not args.no_plots)
-            write_parse_errors(run_dir, log)
         except ReportError as error:
             raise CliError(str(error)) from None
 
@@ -258,14 +309,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         print(summarize_comparison(metrics_by_run))
         write_comparison_report(args.out, metrics_by_run)
 
-    endpoints_summary = None
-    if args.measurements:
-        try:
-            table = load_measurements(args.measurements)
-        except FileNotFoundError:
-            raise CliError(f"no such measurement file: {args.measurements}") from None
-        except MeasurementError as error:
-            raise CliError(f"the measurement file could not be read\n{error}") from None
+    if table is not None:
         endpoints_summary = compare_endpoints(metrics_by_run, table)
         try:
             write_endpoints_report(args.out, endpoints_summary)
@@ -275,6 +319,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             f"endpoint comparison written to {os.path.join(args.out, 'endpoints.txt')} "
             f"({len(endpoints_summary['runs'])} run(s))"
         )
+        refused = endpoints_summary["refused_comparisons"]
+        for entry in refused:
+            print(f"  no comparison for {entry['run_id']}: {entry['reason']}")
         print("")
 
     write_manifest(
@@ -291,6 +338,25 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                     "samples": metrics["counts"]["samples"],
                     "events": metrics["counts"]["events"],
                     "parse_errors": metrics["counts"]["parse_errors"],
+                    # Provenance and segmentation travel in the manifest too: they
+                    # are what says whether a report may be compared with anything,
+                    # and a manifest that omits them is how a fixture's numbers get
+                    # quoted as a bench result.
+                    "provenance_declared": metrics["capture"]["provenance_declared"],
+                    "synthetic": is_synthetic(
+                        metrics["run_id"],
+                        metrics["source"]["path"],
+                        metrics["capture"]["provenance_declared"],
+                    ),
+                    "sessions": metrics["capture"]["session_count"],
+                    "analyzed_session_index": metrics["capture"]["selection"][
+                        "selected_session_index"
+                    ],
+                    "runs_in_session": metrics["capture"]["selection"]["runs_in_session"],
+                    "mixed_sessions": metrics["capture"]["selection"]["mixed_sessions"],
+                    "mixed_runs": metrics["capture"]["selection"]["mixed_runs"],
+                    "end_position_source": metrics["position"]["end_position_source"],
+                    "stop_verified": metrics["run_window"]["final_stop_dwell_verified"],
                 }
                 for metrics in metrics_by_run
             ],

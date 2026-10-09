@@ -177,11 +177,25 @@ Telemetry is a **consumer** of the control loop, never a participant in it.
   costs a transition, which is why the lanes are separate and why events drain
   first.
 - **Nothing in the transport may block.** Serial output goes through
-  `src/SerialTransport.h`, which stages one line and writes only what the port
-  reports room for. On this target `Serial` is USB-CDC and its `write()` waits for
-  the host, so a bare `Serial.print()` of a record would hand the control loop's
-  schedule to whoever is - or is not - reading the port. No formatter, and no other
-  module, may write to it.
+  `src/SerialTransport.h`, the thin adapter over `ev::LineFramer`
+  (`lib/evcore/src/SerialLineFraming.h`), which stages one line and writes only
+  what the port reports room for - and resumes from wherever a short or zero write
+  stopped, because `Serial.write` may accept less than it was offered. On this
+  target `Serial` is USB-CDC and its `write()` waits for the host, so a bare
+  `Serial.print()` of a record would hand the control loop's schedule to whoever is
+  - or is not - reading the port. No formatter, and no other module, may write to
+  it.
+- **Two line slots, so a reply can never join a record mid-flight (S15).** The
+  framer holds two `ev::kSerialLineBufferBytes` slots: the formatter composes the
+  next line in the slot that is *not* being transmitted, and an urgent operator
+  response staged while a line is in flight waits for that line's terminator
+  instead of overwriting the bytes still to leave. A second urgent response
+  replaces the one still *waiting* (which has emitted nothing) and the displaced
+  line is counted; a telemetry line is refused and counted while either slot is
+  busy. An over-capacity line is refused and counted rather than staged. The two
+  slots are the whole policy and are static memory (+577 bytes of `.bss` on this
+  variant): the single shared buffer *was* the M2/B5 defect, in which a reply was
+  appended to a partially emitted telemetry record with no terminator between them.
 - **Never inside an interrupt, and never in the tick's timing budget.** The encoder
   ISR calls the pure decoder and nothing else; serial work happens in the loop,
   after the watchdog checkpoint.
@@ -1097,18 +1111,34 @@ the operator's, and `disarm` is the command for that.
   `PLAN`, `TELEMETRY`, `VERSION`), the `key=value` field order, the refusal and
   arm-refusal text, the `config set` acknowledgement, and the help table. Like a
   telemetry record (section 9), a response is **all or nothing**: it fits the line
-  buffer or it is dropped and counted, never emitted truncated. Its worst case is
-  bounded and statically checked against the line capacity
-  (`kOperatorResponseWorstCaseChars`).
+  buffer or it is dropped and counted, never emitted truncated. Each family's
+  worst case is bounded and statically checked against the line capacity: `STATUS`
+  357, the announce acknowledgement **192**, `CONFIG` 170, `CHECK` 445,
+  `TELEMETRY` 88, `PLAN` 340 - the largest of them is
+  `kOperatorResponseWorstCaseChars`. A host test formats a response built from the
+  longest name of every table it uses and pins each number, so a field added to a
+  response breaks the test rather than the buffer assumption.
+- **The announcement carries the run's execution target (S15, audit P12).**
+  `OK,cmd=announce` ends with `exec=<RunExecutionPlanStatus>` and
+  `fwd_stop_m=<metres|->`: the named fate of the **execution plan** the
+  announcement just adopted, and the single forward stop it admitted, or the
+  absent marker when the plan refused. `plan=` remains the *timing* estimate's
+  separate diagnostic status. The `AnnounceAccepted` telemetry event carries the
+  same execution-plan status as its `detail`, so a captured session says whether
+  the run had a forward target and why not, without a live `plan` query - the
+  commanded forward stop used to exist in no persisted output at all.
 - **The transport is the board layer's, it is non-blocking, and the operator's
-  answer outranks the log.** `src/SerialTransport.h` stages one line and writes
-  only what the port reports room for (section 9), so nothing in the operator path
-  may block. `serviceSerial()` runs in the loop's low-priority section, after the
-  watchdog checkpoint, in a fixed order: move staged bytes out, read received
-  bytes, apply and answer at most **one** command, then drain the telemetry queue.
-  A staged operator response therefore displaces staged telemetry rather than
-  waiting behind it, and a pass that is out of room simply keeps the response
-  staged for the next one.
+  answer outranks the log without outranking a record already on the wire.**
+  `src/SerialTransport.h` stages one line and writes only what the port reports
+  room for (section 9), so nothing in the operator path may block. `serviceSerial()`
+  runs in the loop's low-priority section, after the watchdog checkpoint, in a
+  fixed order: move staged bytes out, read received bytes, apply and answer at
+  most **one** command, then drain the telemetry queue. An operator response
+  staged while a line is in flight takes the framer's second slot and goes out
+  after that line's terminator; a telemetry line that would have to displace
+  either one is refused and counted instead (`telemetryLinesRefused`), and a second
+  urgent response replaces only the line still waiting (`linesAbandoned`). A pass
+  that is out of room keeps whatever is staged for the next one.
 - **The operator interface changes nothing the control path can see.** No stage of
   the control tick reads the parser, the policy, the session or the transport, and
   no phase transition or arming decision waits on a host. A host that is absent,
