@@ -231,6 +231,14 @@ inline bool effortCeilingsAgree(const Sourced<uint16_t>& controllerMaxEffortPerm
 // and it is a configuration-build check, not a runtime clamp.
 inline bool polarityAgrees(const Sourced<MotionDirection>& profilePositiveCommandDirection,
                            const Sourced<MotorMode>& controllerPositiveEffortMode) {
+    // An unknown profile direction is not a polarity at all: without this guard
+    // the mapping below would fold it into Reverse and let it agree with a
+    // reverse effort (S18A/P5). A non-driving controller mode agrees with
+    // nothing; `poweredDirectionOf()` already maps one to `None`, which can
+    // never equal a known profile direction.
+    if (!isKnownMotionDirection(profilePositiveCommandDirection.value)) {
+        return false;
+    }
     const PoweredDirection profileDirection =
         profilePositiveCommandDirection.value == MotionDirection::Forward
             ? PoweredDirection::Forward
@@ -259,7 +267,35 @@ inline bool polarityAgrees(const Sourced<MotionDirection>& profilePositiveComman
 // only, and it is a configuration-build check, not a runtime clamp.
 inline bool tickPolarityAgrees(const Sourced<MotionDirection>& positiveTicksDirection,
                                const Sourced<MotionDirection>& profilePositiveCommandDirection) {
+    // Unknown encodings agree with nothing (S18A/P5): equality alone already
+    // refuses a one-sided unknown, and this makes the refusal explicit rather
+    // than accidental.
+    if (!isKnownMotionDirection(positiveTicksDirection.value) ||
+        !isKnownMotionDirection(profilePositiveCommandDirection.value)) {
+        return false;
+    }
     return positiveTicksDirection.value == profilePositiveCommandDirection.value;
+}
+
+// The two travel legs' encodings of the one global polarity fact must agree:
+// the positive-command direction is a property of the vehicle, not of the leg
+// being travelled, so the forward and reverse `MotionProfileLimits` must name
+// the same physical direction (S18A/P5). Without this, each leg validates on
+// its own while the legs disagree, and a contradictory reverse leg passes every
+// per-module check yet shapes reverse travel the regulator drives forward.
+//
+// The comparison is over the physical directions the two values name, and
+// unknown encodings agree with nothing. Provenance is validated per leg by
+// `validateMotionProfileLimits()`; this is the cross-leg semantic agreement
+// only, and it is a configuration-build check, not a runtime clamp.
+inline bool directionalCommandPolarityAgrees(
+    const Sourced<MotionDirection>& forwardPositiveCommandDirection,
+    const Sourced<MotionDirection>& reversePositiveCommandDirection) {
+    if (!isKnownMotionDirection(forwardPositiveCommandDirection.value) ||
+        !isKnownMotionDirection(reversePositiveCommandDirection.value)) {
+        return false;
+    }
+    return forwardPositiveCommandDirection.value == reversePositiveCommandDirection.value;
 }
 
 // Pin the provenance contract: a safety ceiling with an unstated source is a

@@ -67,9 +67,11 @@ constexpr const char* kFirmwareId = "ev-nano-r4-p7b";
 constexpr uint32_t kMaxSampleAgeMs = 60U;
 
 // How old the window-derived speed in the stop-verification packet may be. The
-// packet pairs it with the current cycle's zero-speed claim, so this limit must
-// span the longer of the two stop dwells; `stopEvidenceLimitSpansDwell()` is what
-// refuses a limit that does not.
+// packet pairs it with the current cycle's zero-speed claim - which appears
+// only after the estimator's no-edge interval - so this limit must span the
+// claim lead plus the longer of the two stop dwells;
+// `stopEvidenceSpansClaimAndDwell()` is what refuses a limit that does not
+// (S18A/P5).
 //
 // This is a cadence-and-staleness policy value, so it is a plain constant rather
 // than a `Sourced` measurement - but it is also a guess, and it is the *longest*
@@ -769,16 +771,28 @@ inline ConfigurationBuildChecks configurationBuildChecks(bool announcedConfigVal
         ev::polarityAgrees(profile.forward.positiveCommandDirection, controller.positiveEffortMode);
     checks.tickPolarityAgrees = ev::tickPolarityAgrees(positiveTicksDirection(),
                                                        profile.forward.positiveCommandDirection);
-    checks.stopEvidenceSpansReversalStop =
-        ev::stopEvidenceLimitSpansDwell(kStopEvidenceMaxAgeMs, reversal.verification);
-    checks.stopEvidenceSpansFinalStop =
-        ev::stopEvidenceLimitSpansDwell(kStopEvidenceMaxAgeMs, phase.stopVerification);
+    // The packet pairs the current claim - which appears only after the
+    // estimator's own no-edge interval - with the retained window-derived
+    // speed, so the limit must span the claim lead plus the dwell, not the
+    // dwell alone (S18A/P5).
+    checks.stopEvidenceSpansReversalStop = ev::stopEvidenceSpansClaimAndDwell(
+        kStopEvidenceMaxAgeMs, kEstimatorNoEdgeTimeoutMs, reversal.verification);
+    checks.stopEvidenceSpansFinalStop = ev::stopEvidenceSpansClaimAndDwell(
+        kStopEvidenceMaxAgeMs, kEstimatorNoEdgeTimeoutMs, phase.stopVerification);
     checks.safetyLimitsValid =
         ev::validateSafetyLimits(limits, plannedBatteryVoltageCapability()).ok;
     checks.controllerConfigValid = ev::validateVelocityControllerConfig(controller).ok;
-    checks.estimatorConfigValid = ev::validateVelocityEstimatorConfig(estimatorConfig()).ok;
+    // The estimator window must both precede the no-edge claim (checked inside
+    // `validateVelocityEstimatorConfig()`) and be coverable by the retained
+    // history at the control cadence (S18A/P5).
+    checks.estimatorConfigValid =
+        ev::validateVelocityEstimatorConfig(estimatorConfig()).ok &&
+        ev::estimatorWindowCoverableAtCadence(kEstimatorWindowMs, kControlPeriodMs);
     checks.profileLimitsValid = ev::validateMotionProfileLimits(profile.forward).ok &&
-                                ev::validateMotionProfileLimits(profile.reverse).ok;
+                                ev::validateMotionProfileLimits(profile.reverse).ok &&
+                                ev::directionalCommandPolarityAgrees(
+                                    profile.forward.positiveCommandDirection,
+                                    profile.reverse.positiveCommandDirection);
     checks.phaseConfigValid = ev::validateRunPhaseConfig(phase).ok;
     checks.reversalConfigValid = ev::validateReversalConfig(reversal).ok;
     checks.runPolicyUsable = run.configUsable();

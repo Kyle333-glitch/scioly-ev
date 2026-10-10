@@ -132,9 +132,14 @@ struct DriverFaultConfigValidation {
 // True when the polarity has been measured and names a polarity. A measured
 // `Unverified` is refused: "measured that it is unmeasured" is a contradiction,
 // and accepting it would let a promotion to Measured stand in for a measurement
-// that never happened.
+// that never happened. A cast-in unknown value is refused explicitly rather
+// than accepted by "not Unverified" (S18A/P5).
 inline bool driverFaultPolarityVerified(const Sourced<DriverFaultPolarity>& polarity) {
-    return polarity.isMeasured() && polarity.value != DriverFaultPolarity::Unverified;
+    if (!polarity.isMeasured()) {
+        return false;
+    }
+    return polarity.value == DriverFaultPolarity::ActiveLow ||
+           polarity.value == DriverFaultPolarity::ActiveHigh;
 }
 
 // Single entry point for this module's configuration validation, and it is

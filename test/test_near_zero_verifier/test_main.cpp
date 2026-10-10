@@ -284,6 +284,35 @@ void test_the_packet_limit_must_span_the_stop_dwell(void) {
         200U, ev::NearZeroConfig(measured(0.05), measured(0.1), measuredGap(250U))));
 }
 
+void test_the_packet_limit_must_span_the_claim_lead_plus_the_dwell(void) {
+    // S18A/P5: the claim appears only after the estimator's no-edge interval,
+    // and the paired speed keeps aging through the dwell. A limit that spans
+    // the dwell alone (200 ms here) but not the 100 ms lead cannot let the
+    // pair coincide, so it is refused.
+    const ev::NearZeroConfig dwell200(measured(0.05), measured(0.2), measuredGap(250U));
+    TEST_ASSERT_TRUE(ev::stopEvidenceSpansClaimAndDwell(300U, 100U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(299U, 100U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(200U, 100U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(0U, 100U, dwell200));
+
+    // With no claim lead the check degrades to the dwell span, boundary for
+    // boundary with the older check above.
+    TEST_ASSERT_TRUE(ev::stopEvidenceSpansClaimAndDwell(200U, 0U, dwell200));
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(199U, 0U, dwell200));
+
+    // An unusable configuration has nothing to span.
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(
+        1000U, 100U,
+        ev::NearZeroConfig(measured(0.05), provisional(0.2), measuredGap(250U))));
+
+    // The fixture policy the scenarios use: a 0.1 s dwell, a 100 ms claim
+    // lead, and a 200 ms limit - exactly spanning.
+    TEST_ASSERT_TRUE(ev::stopEvidenceSpansClaimAndDwell(
+        200U, 100U, ev::NearZeroConfig(measured(0.05), measured(0.1), measuredGap(250U))));
+    TEST_ASSERT_FALSE(ev::stopEvidenceSpansClaimAndDwell(
+        199U, 100U, ev::NearZeroConfig(measured(0.05), measured(0.1), measuredGap(250U))));
+}
+
 void test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop(void) {
     // The estimator never reports the claim and a number together, so the packet
     // is the only way the verifier's three facts hold at once. This drives the
@@ -706,6 +735,7 @@ int main(int, char**) {
     RUN_TEST(test_an_absent_answer_contributes_nothing_to_the_packet);
     RUN_TEST(test_a_window_derived_zero_is_only_a_speed_fact_not_a_stop);
     RUN_TEST(test_the_packet_limit_must_span_the_stop_dwell);
+    RUN_TEST(test_the_packet_limit_must_span_the_claim_lead_plus_the_dwell);
     RUN_TEST(test_a_composed_packet_from_a_real_estimator_can_earn_a_verified_stop);
     RUN_TEST(test_the_open_interval_reports_its_own_start);
     // S13R I-2 / P9: this case existed but was never registered, so Unity never

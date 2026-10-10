@@ -86,9 +86,11 @@
 //      reported;
 //   6. the configuration-build checks run before arming and an incomplete
 //      configuration cannot arm: effort ceilings, the two polarity agreements
-//      (`ev::polarityAgrees()`, `ev::tickPolarityAgrees()`), the stop-evidence
-//      limit spanning both stop dwells (`ev::stopEvidenceLimitSpansDwell()`) and
-//      every per-module validation;
+//      (`ev::polarityAgrees()`, `ev::tickPolarityAgrees()`,
+//      `ev::directionalCommandPolarityAgrees()`), the stop-evidence limit
+//      spanning the claim lead plus both stop dwells
+//      (`ev::stopEvidenceSpansClaimAndDwell()`), the estimator window covered
+//      at the control cadence, and every per-module validation;
 //   7. a travel request is only presented as a *powered* request once the shaped
 //      target actually points along the leg the run asked for
 //      (`ev::targetVelocityPointsAlongLeg()`). The profile deliberately ramps a
@@ -111,7 +113,7 @@
 //   harness calls the owner rather than re-deriving it:
 //
 //     ev::composeStopEvidence()              NearZeroVerifier.h
-//     ev::stopEvidenceLimitSpansDwell()      NearZeroVerifier.h
+//     ev::stopEvidenceSpansClaimAndDwell()   NearZeroVerifier.h
 //     ev::targetVelocityPointsAlongLeg()     MotionProfile.h
 //     ev::runStopEffort()                    CompetitionStateMachine.h
 //     ev::runCommandNamesForwardLeg()        CompetitionStateMachine.h
@@ -120,6 +122,8 @@
 //     ev::buildRunExecutionPlan() / ev::legExecutionTargetM()
 //     ev::deriveBottleEvidence(plan, ...)            RunExecutionPlan.h
 //     ev::tickPolarityAgrees()               SafetyLimits.h
+//     ev::directionalCommandPolarityAgrees() SafetyLimits.h
+//     ev::estimatorWindowCoverableAtCadence() VelocityEstimator.h
 //
 //   A change to any of those decisions changes the scenarios with it, which is
 //   why they are not written down a second time here.
@@ -611,7 +615,8 @@ public:
           estimator_(fixtures.estimator),
           controller_(fixtures.controller),
           profile_(fixtures.profile),
-          run_(fixtures.phase, fixtures.reversal) {
+          run_(fixtures.phase, fixtures.reversal),
+          recoveryStopVerifier_(fixtures.reversal.verification) {
         // A fresh decoder needs one stationary sample before any motion. Both
         // channels low is one legal rest state; the reference sample never
         // counts (QuadratureDecoder.h).
@@ -706,14 +711,23 @@ public:
                ev::tickPolarityAgrees(fixtures_.positiveTicksDirection,
                                       fixtures_.profile.forward.positiveCommandDirection) &&
                // The composed packet serves both stops - the reversal gate's and
-               // the final stop's - so its limit must span both dwells.
-               ev::stopEvidenceLimitSpansDwell(fixtures_.stopEvidenceMaxAgeMs,
-                                               fixtures_.reversal.verification) &&
-               ev::stopEvidenceLimitSpansDwell(fixtures_.stopEvidenceMaxAgeMs,
-                                               fixtures_.phase.stopVerification) &&
+               // the final stop's - so its limit must span the claim lead plus
+               // both dwells, through the same production check the vehicle
+               // layer reads (S18A/P5).
+               ev::stopEvidenceSpansClaimAndDwell(fixtures_.stopEvidenceMaxAgeMs,
+                                                  fixtures_.estimator.noEdgeTimeoutMs,
+                                                  fixtures_.reversal.verification) &&
+               ev::stopEvidenceSpansClaimAndDwell(fixtures_.stopEvidenceMaxAgeMs,
+                                                  fixtures_.estimator.noEdgeTimeoutMs,
+                                                  fixtures_.phase.stopVerification) &&
                ev::validateMotionProfileLimits(fixtures_.profile.forward).ok &&
                ev::validateMotionProfileLimits(fixtures_.profile.reverse).ok &&
+               ev::directionalCommandPolarityAgrees(
+                   fixtures_.profile.forward.positiveCommandDirection,
+                   fixtures_.profile.reverse.positiveCommandDirection) &&
                ev::validateVelocityEstimatorConfig(fixtures_.estimator).ok &&
+               ev::estimatorWindowCoverableAtCadence(fixtures_.estimator.windowMs,
+                                                     fixtures_.controlPeriodMs) &&
                ev::validateRunPhaseConfig(fixtures_.phase).ok &&
                ev::validateReversalConfig(fixtures_.reversal).ok && run_.configUsable() &&
                controller_.configUsable();
@@ -756,6 +770,10 @@ public:
         stopCyclesAtZeroSinceLastDrive_ = 0U;
         verifiedStopSinceLastDrive_ = false;
         droppedSamples_ = 0U;
+        // The recovery verifier restarts with the run: no inherited standstill
+        // may discharge the barrier the shared reset deliberately preserved
+        // (S18A/P2). Live evidence re-establishes it.
+        recoveryStopVerifier_.reset();
         return report;
     }
 
@@ -870,6 +888,14 @@ public:
 
         const ev::RunStatus status = run_.update(nowMs_, inputs);
 
+        // The disarmed stop-recovery verdict, mirroring the production tick:
+        // the same evidence through the reversal gate's own stop definition,
+        // contributing to the zero-speed fact only while disarmed (S18A/P2).
+        const ev::NearZeroVerdict recoveryStop =
+            recoveryStopVerifier_.update(nowMs_, inputs.stopEvidence);
+        const bool disarmedRecoveryVerified =
+            !authority_.isArmed() && recoveryStop.verified;
+
         // The leg comes from the run's own command's leg tag, never from a
         // direction, and never from a caller-held intention: a stale request must
         // not move the geometry the run is working in.
@@ -942,7 +968,7 @@ public:
         // that fact gated this field, no run could ever start moving again from a
         // verified stop.
         state.requiredDataFresh = positionUsable;
-        state.atZeroSpeed = status.stopVerified;
+        state.atZeroSpeed = status.stopVerified || disarmedRecoveryVerified;
         state.nowMs = nowMs_;
         state.detectedFault =
             status.fault != ev::FaultCode::None ? status.fault : inputs.detectedFault;
@@ -995,14 +1021,18 @@ public:
 
         // The audit the reversal property is asserted against: a powered
         // direction change must have been preceded by an authorized non-powered
-        // stop taken while the run reported a verified zero.
+        // stop taken while zero speed was reported. That fact is the
+        // authority's own clearing condition (`noteStop()`), whatever its
+        // source: the run policy's presented verified stop, or the disarmed
+        // recovery verifier's freshly observed standstill (S18A/P2) - both are
+        // verified stops under the same stop definition.
         if (authorized.command.isDriving()) {
             stopCyclesAtZeroSinceLastDrive_ = 0U;
             verifiedStopSinceLastDrive_ = false;
         } else {
             if (state.atZeroSpeed) {
                 ++stopCyclesAtZeroSinceLastDrive_;
-                verifiedStopSinceLastDrive_ = status.stopVerified;
+                verifiedStopSinceLastDrive_ = true;
             }
         }
 
@@ -1168,6 +1198,13 @@ private:
     ev::MotionProfileTarget profileTarget_;
     ev::SafetyAuthority authority_;
     ev::CompetitionStateMachine run_;
+    // The disarmed stop-recovery verifier: the same mirror the production
+    // vehicle layer owns (`src/VehicleRuntime.h`), stepped on the same live
+    // stop evidence every cycle and contributing to `atZeroSpeed` only while
+    // disarmed, so a direction barrier that survived the shared new-run reset
+    // discharges on a freshly observed standstill here exactly as there
+    // (S18A/P2). Reset at the new-run boundary with everything else.
+    ev::NearZeroVerifier recoveryStopVerifier_;
     ActuatorBoundary actuator_;
 
     std::vector<CycleRecord> trace_;

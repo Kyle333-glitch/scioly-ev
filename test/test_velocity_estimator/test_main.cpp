@@ -137,6 +137,37 @@ void test_configuration_validation_rejects_the_zero_values(void) {
     TEST_ASSERT_TRUE(ev::validateVelocityEstimatorConfig(ev::VelocityEstimatorConfig{20U, 100U}).ok);
 }
 
+void test_configuration_validation_requires_the_window_below_the_timeout(void) {
+    // S18A/P5: the claim is checked before window coverage in `update()`, so
+    // at rest a window at or above the no-edge timeout fires the claim before
+    // a window-derived zero can exist - leaving no retainable speed fact for
+    // stop composition. The equality boundary is refused, not rounded.
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::VelocityEstimatorConfigError::WindowNotBelowNoEdgeTimeout),
+        static_cast<int>(
+            ev::validateVelocityEstimatorConfig(ev::VelocityEstimatorConfig{100U, 100U}).error));
+    TEST_ASSERT_FALSE(ev::validateVelocityEstimatorConfig(ev::VelocityEstimatorConfig{100U, 100U}).ok);
+    TEST_ASSERT_FALSE(ev::validateVelocityEstimatorConfig(ev::VelocityEstimatorConfig{200U, 100U}).ok);
+    TEST_ASSERT_TRUE(ev::validateVelocityEstimatorConfig(ev::VelocityEstimatorConfig{99U, 100U}).ok);
+    TEST_ASSERT_TRUE(
+        ev::VelocityEstimator(ev::VelocityEstimatorConfig{20U, 100U}).configValid());
+    TEST_ASSERT_FALSE(
+        ev::VelocityEstimator(ev::VelocityEstimatorConfig{100U, 100U}).configValid());
+}
+
+void test_the_window_must_be_coverable_at_the_control_cadence(void) {
+    // S18A/P5: sixteen retained samples at a 20 ms control period can cover at
+    // most 300 ms. A wider window reports WindowExceedsHistory instead of a
+    // number for as long as the cadence holds, so the combination is refused
+    // at build time rather than left to time out.
+    TEST_ASSERT_TRUE(ev::estimatorWindowCoverableAtCadence(20U, 20U));
+    TEST_ASSERT_TRUE(ev::estimatorWindowCoverableAtCadence(300U, 20U));
+    TEST_ASSERT_FALSE(ev::estimatorWindowCoverableAtCadence(301U, 20U));
+    TEST_ASSERT_FALSE(ev::estimatorWindowCoverableAtCadence(80U, 5U));
+    TEST_ASSERT_TRUE(ev::estimatorWindowCoverableAtCadence(75U, 5U));
+    TEST_ASSERT_FALSE(ev::estimatorWindowCoverableAtCadence(20U, 0U));
+}
+
 void test_an_invalid_configuration_never_produces_a_number(void) {
     const TraceSample trace[] = {{0U, 0}, {10U, 5}, {20U, 10}, {30U, 15}};
     ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{0U, 100U});
@@ -936,6 +967,8 @@ int main(int, char**) {
     UNITY_BEGIN();
 
     RUN_TEST(test_configuration_validation_rejects_the_zero_values);
+    RUN_TEST(test_configuration_validation_requires_the_window_below_the_timeout);
+    RUN_TEST(test_the_window_must_be_coverable_at_the_control_cadence);
     RUN_TEST(test_the_refused_estimate_shape_is_owned_in_one_place);
     RUN_TEST(test_an_invalid_configuration_never_produces_a_number);
     RUN_TEST(test_a_forgotten_configuration_fails_closed);

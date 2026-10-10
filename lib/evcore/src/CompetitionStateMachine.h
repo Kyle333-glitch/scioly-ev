@@ -1126,7 +1126,16 @@ private:
         // asks to travel, and the authority independently refuses if anything
         // about the handoff was not true.
         if (handoffPending_) {
+            // The handoff consumes only a CURRENT permission: the sequencer was
+            // just re-stepped on this tick's evidence above, so anything but a
+            // still-ready verdict means the evidence moved on while the stop
+            // was being presented. Abort the handoff without flipping and stay
+            // in BrakeZeroSpeed: the sequence timeout still bounds the wait,
+            // and the stop can be re-earned (S18A/P1).
             handoffPending_ = false;
+            if (reversal.phase != ReversalPhase::DirectionChangeReady) {
+                return;
+            }
             sequencer_.reset();
             legDirection_ = oppositeOf(legDirection_);
             enterPhase(RunPhase::Reverse, nowMs);

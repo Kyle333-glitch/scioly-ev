@@ -7692,3 +7692,105 @@ than claimed as host-verified. `allPromotedValuesCiteEvidence()`'s new citations
 cannot change its value while every production value is `Provisional`, so M-2 is a
 review-verified correction with no executable regression; exercising it would
 require the promotion S16 is forbidden to make.
+
+## D54 / S18 - 2026-10-08 - Scope gate blocks the combined run-path safety repair
+
+**S18 BLOCKED before production edits; checkpoint NOT ATTEMPTED.** The requested
+pre-edit complexity gate applies: P1/H4 (stale reversal permission), P2/H5 (reset
+direction-history loss), P3/H6 (forward/reverse short-stop), P4/H7 (missing travel
+feedback), P5/M5 (stop-evidence/polarity cross-checks), P7/M16 (disabled diagnostic
+timing approximation) and P8/M13 (remaining lifecycle/liveness/runtime fidelity)
+span distinct safety mechanisms and frozen behavioral contracts. No partial repair
+is presented as PASS. S16 Option D is preserved without reconsideration.
+
+Proposed reviewable sequence: **S18A** current reversal permission, reset recovery
+and stop/sign cross-checks; **S18B** explicit brake-entry and bounded short-stop
+outcomes with output-coupled forward/reverse tests; **S18C** bounded feedback-loss
+response, diagnostic-timing limitations and final actual-source integration closure.
+Each requires its own complete validation and scope review before checkpointing;
+overall S18 cannot PASS until every assigned finding and cumulative review passes.
+The split is a proposal, not an approved roadmap change or an executed next stage.
+
+Current-source host probes reproduce stale permission after +1 m/s and a 2000 ms
+gap, reset/re-arm allowing the opposite direction without stop evidence, the ideal
+target-coupled plant stopping at 6.059898 m before its 6.100000 m target, reverse
+zero target inside the offset, frozen feedback authorizing 50/50 powered travel
+ticks over 1000 ms, and invalid window/timeout and reverse-sign combinations.
+An additional actual `VehicleRuntime` reset-command probe confirms remembered
+Reverse becomes None without stop evidence, while S15 caches clear and S16's plan
+clears. These are defect reproductions, not physical or post-repair safety evidence.
+Original October 6 audit/probes/raw logs are preserved byte-identically.
+
+Baseline revalidation on unchanged firmware: native **664/664 in 36 suites**;
+telemetry **142/142**; clean `nano_r4`, `bench`, `bench-watchdog` builds SUCCESS,
+**0 warnings**, RAM **7364/7564/7556 B**, Flash **76120/83628/82968 B** (zero delta
+from S16); every command exit 0; `git diff --check` clean. Production still cannot
+announce (`PolicyNotUsable`) or arm; physical dependencies remain Provisional,
+absent sensors NotInstalled and empirical timing disabled. No source/test repair,
+hardware operation, upload, push or evidence promotion occurred. Block E remains
+separately eligible only when authorized; block F still requires E's physical
+evidence. Full production runs remain blocked by S18 and physical calibration.
+
+Full ledger, proposed paths/contracts, raw evidence, remaining physical gates and
+validation: `.agent-work/stages/S18.md` and `.agent-work/reviews/s18-2026-10-08/`.
+No commit is authorized by this BLOCKED verdict. Stop pending approval of the split.
+
+## D55 / S18A - 2026-10-10 - Reversal permission, reset-direction safety and stop-evidence coherence repaired
+
+**S18A PASS under the user-approved S18A/S18B/S18C split; checkpoint commit**
+**authorized on full pass only (see below).** S18A covers P1/H4 (stale reversal
+permission), P2/H5 (reset erases the direction barrier) and P5/M5 (invalid
+stop-evidence and reverse-polarity configurations), plus only the P8
+lifecycle/integration regressions those need. S18B (P3 short-stop/liveness) and
+S18C (P4 feedback loss, P7 timing model, remaining P8) are not started and S18
+as a whole stays open. No S16 arming-policy change, no 16-check mask change,
+no timing change, no new sensors, no calibration promotion, no hardware work.
+
+P1: `ReversalSequencer::update()` re-checks the sequence timeout and the live
+stop evidence on every call, including while `DirectionChangeReady`; fresh
+contradictory/unavailable evidence or an expired budget invalidates the
+permission (verifier reset, latch cleared, full dwell to re-earn), and
+`CompetitionStateMachine::advanceReversal()` consumes a pending handoff only
+against the current tick's still-ready verdict, else holds `BrakeZeroSpeed`.
+Historical verification is diagnostic only; opposite-direction power requires
+current, in-budget evidence at consumption. The old latch test was corrected
+with explanation.
+
+P2: `SafetyAuthority::reset()` preserves the remembered powered direction - a
+software reset is not a verified mechanical stop - and only an authorized
+non-powered command taken while zero speed is reported discharges the barrier.
+Both `VehicleRuntime` and the scenario harness step a disarmed stop-recovery
+verifier (the reversal gate's own stop definition) on live evidence each
+tick/cycle, contributing to `atZeroSpeed` only while disarmed through the
+single existing `authorize()` call; it is reset at every new-run boundary and
+never verifies on the shipped Provisional stop definition, so production
+behavior is unchanged. Operator procedure: hold still while disarmed for one
+fresh verification before announce/arm. Power-cycle RAM loss and the resulting
+operator standstill requirement are documented, not sensed. The old
+reset-forgets-direction test was corrected with explanation; completed runs
+self-discharge through their verified final stop, which the unchanged
+second-run test now proves.
+
+P5, all derived from how the consumers operate and wired into the existing 16
+checks: estimator `windowMs < noEdgeTimeoutMs` (the claim is checked before
+window coverage, so a wider window can never yield a window-derived zero at
+rest); the speed-fact age must span the claim lead plus the dwell (new
+`stopEvidenceSpansClaimAndDwell()`, production 3200 ms still spans both stops);
+the window must be coverable by the 16-sample history at the control cadence;
+both travel legs must name the one global positive-command direction (new
+`directionalCommandPolarityAgrees()`); cast-in unknown direction/polarity
+enums are refused (`isKnownMotionDirection()`, unknown command direction,
+explicit driver-fault polarity, hardened agreement functions). Production
+verdicts are unchanged (all fail-closed conjuncts); placeholders stay
+Provisional and no physical adequacy is claimed.
+
+Regression evidence: 21 new Unity tests, all registered (script-audited, zero
+orphans), plus 2 corrected contract tests and a trace-audit correction that
+credits both verified-stop sources the authority itself clears on. Native
+**685/685 in 36 suites** (baseline 664 + 21 reconciled per suite); `nano_r4`,
+`bench`, `bench-watchdog` SUCCESS with **0 warnings** (RAM +64 B for the one
+recovery verifier, Flash +352 B); telemetry **142/142**; `git diff --check`
+clean. S14 bench safety, S15 integrity and S16 Option D behavior preserved;
+encoder-loss response and short-stop policy remain honestly identified as
+S18B/S18C work. Full ledger, per-case lists, resource analysis and remaining
+gates: `.agent-work/stages/S18A.md`. D54 preserved byte-identically above.

@@ -44,6 +44,7 @@ VehicleRuntime::VehicleRuntime()
       estimator_(estimatorConfig_),
       velocityController_(vehicleConfig::controllerConfig()),
       run_(vehicleConfig::runPhaseConfig(), vehicleConfig::reversalConfig()),
+      recoveryStopVerifier_(vehicleConfig::reversalStopVerification()),
       scheduler_(vehicleConfig::kControlPeriodMs),
       lineReader_(commandLine_, ev::kCommandLineCapacity) {}
 
@@ -312,6 +313,20 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
 
     const ev::RunStatus status = run_.update(nowMs, runInputs);
 
+    // The disarmed stop-recovery verdict (S18A/P2): the same stop evidence the
+    // run policy just consumed, through the reversal gate's own stop
+    // definition. It contributes to the zero-speed fact below only while the
+    // authority is disarmed, so a direction barrier that survived a software
+    // reset discharges on a freshly observed standstill - never on the reset,
+    // and never during an armed run, where the run policy owns that fact.
+    // With the shipped Provisional stop verification this never verifies, so
+    // production behavior is unchanged; it is live as soon as the stop
+    // definition is usable.
+    const ev::NearZeroVerdict recoveryStop =
+        recoveryStopVerifier_.update(nowMs, runInputs.stopEvidence);
+    const bool disarmedRecoveryVerified =
+        !authority_.isArmed() && recoveryStop.verified;
+
     // ---------------------------------------------------------------- stage 6
     // The run's request: its own intention (never a held one - this layer
     // re-presents nothing), the leg tag it names, and the shaped target the
@@ -405,7 +420,7 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     safetyState.readiness.calibrationUsable = configurationChecks_.calibrationMeasured;
     safetyState.readiness.limitsUsable = configurationChecks_.safetyLimitsValid;
     safetyState.requiredDataFresh = positionUsable_;
-    safetyState.atZeroSpeed = status.stopVerified;
+    safetyState.atZeroSpeed = status.stopVerified || disarmedRecoveryVerified;
     safetyState.nowMs = nowMs;
     safetyState.detectedFault =
         status.fault != ev::FaultCode::None ? status.fault : cycleFault;
@@ -1123,6 +1138,10 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     hasEstimate_ = false;
     lastValidEstimate_ = ev::refusedVelocityEstimate(ev::VelocityEstimateStatus::WarmingUp);
     hasLastValidEstimate_ = false;
+    // The recovery verifier restarts with the run: a fresh run must not inherit
+    // a previous run's observed standstill, and a fresh barrier must not be
+    // discharged by it either (S18A/P2). Live evidence re-establishes it.
+    recoveryStopVerifier_.reset();
     odometryTravel_ = ev::OdometryEstimate{0.0, false, ev::OdometryEstimateStatus::ScaleIsNotMeasured};
     odometrySampleMs_ = 0U;
     hasOdometrySample_ = false;

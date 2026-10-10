@@ -703,6 +703,7 @@ struct DirectionalMotionProfileLimits {
 enum class MotionProfileLimitsError : uint8_t {
     None = 0,
     ValuesAreNotMeasured,  // cruise not Measured/cited-Derived, or another limit not Measured
+    UnknownPositiveCommandDirection,  // a cast-in value that names no physical direction
     NonFiniteValue,
     NonPositiveLimit,               // cruise, ceiling, accel or decel not > 0
     NegativeBrakeOffset,
@@ -735,6 +736,12 @@ inline MotionProfileLimitsValidation validateMotionProfileLimits(
         !limits.accelLimitMps2.isMeasured() || !limits.decelLimitMps2.isMeasured() ||
         !limits.brakeOffsetM.isMeasured() || !limits.positiveCommandDirection.isMeasured()) {
         return {false, MotionProfileLimitsError::ValuesAreNotMeasured};
+    }
+    // A direction encoding that names no physical direction is malformed, not a
+    // polarity: it must be refused rather than folded into Reverse by the
+    // agreement checks (S18A/P5).
+    if (!isKnownMotionDirection(limits.positiveCommandDirection.value)) {
+        return {false, MotionProfileLimitsError::UnknownPositiveCommandDirection};
     }
     if (!std::isfinite(limits.cruiseVelocityMps.value) ||
         !std::isfinite(limits.velocityCeilingMps.value) ||

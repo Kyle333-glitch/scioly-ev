@@ -31,8 +31,11 @@ namespace ev {
 //   QuadratureDecoder::reset()         no reference, no count
 //   VelocityEstimator::reset()         no samples, no window, no claim, no counters
 //   MotionProfileTarget::resetForNewRun()   target back to exactly zero
-//   SafetyAuthority::reset()           disarmed, no latched fault, no direction
-//                                      memory
+//   SafetyAuthority::reset()           disarmed, no latched fault; the remembered
+//                                      powered direction is PRESERVED, because a
+//                                      software reset is not a verified stop and
+//                                      must not erase the direction barrier
+//                                      (S18A/P2)
 //
 // Three things make the sequence more than a list:
 //
@@ -127,8 +130,12 @@ inline MotionChainResetReport resetMotionChainForNewRun(QuadratureDecoder& decod
     //    state.
     target.resetForNewRun();
 
-    // 5. Reinitialize the safety boundary last: disarmed, no fault of record,
-    //    no remembered powered direction. Arming remains a separate decision.
+    // 5. Reinitialize the safety boundary last: disarmed, no fault of record.
+    //    The remembered powered direction survives on purpose (S18A/P2): the
+    //    drivetrain may still be moving, so the next run's first opposite-
+    //    direction drive stays refused until a fresh verified stop discharges
+    //    it through the authority's zero-speed path. Arming remains a separate
+    //    decision, and a reset never resumes motion by itself.
     authority.reset();
 
     // 6. Start the new regulator state. Refused when the configuration is not

@@ -233,6 +233,33 @@ inline bool stopEvidenceLimitSpansDwell(uint32_t speedMaxAgeMs, const NearZeroCo
     return static_cast<double>(speedMaxAgeMs) + kToleranceMs >= config.dwellS.value * 1000.0;
 }
 
+// True when the packet's speed-fact staleness limit can span the claim lead
+// *and* the stop dwell.
+//
+// `stopEvidenceLimitSpansDwell()` above compares the limit against the dwell
+// alone, which omits the time already consumed before the claim the packet
+// pairs the speed with: the estimator's explicit zero-speed claim appears only
+// after its own no-edge interval of observed non-change, and the window-derived
+// speed it pairs with keeps aging while the dwell accumulates. A limit that
+// spans the dwell but not the lead can never let the pair coincide, so such a
+// configuration is refused rather than left to time out (S18A/P5).
+//
+// This is a configuration-build check, not a runtime clamp: it does not make a
+// stop verifiable, it only refuses a configuration that cannot be. An unusable
+// near-zero configuration is refused too, because there is no dwell to span.
+// The comparison absorbs decimal floating-point representation error only, like
+// the dwell check above.
+inline bool stopEvidenceSpansClaimAndDwell(uint32_t speedMaxAgeMs, uint32_t noEdgeTimeoutMs,
+                                           const NearZeroConfig& config) {
+    if (!validateNearZeroConfig(config).ok) {
+        return false;
+    }
+    constexpr double kToleranceMs = 1e-6;
+    const double requiredMs =
+        static_cast<double>(noEdgeTimeoutMs) + config.dwellS.value * 1000.0;
+    return static_cast<double>(speedMaxAgeMs) + kToleranceMs >= requiredMs;
+}
+
 // Composes the verifier's evidence packet from the two production answers a
 // caller has, so no sequence rebuilds the composition by hand.
 //

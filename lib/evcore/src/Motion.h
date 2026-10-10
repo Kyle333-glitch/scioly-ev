@@ -179,6 +179,18 @@ enum class MotionDirection : uint8_t {
     Reverse = 1,
 };
 
+// True only for the two physical directions above. A cast-in unknown value is
+// not a direction: agreement checks must refuse it rather than fold it into
+// Reverse by accident (S18A/P5). Mirrors `isKnownMotorMode()` above.
+inline bool isKnownMotionDirection(MotionDirection direction) {
+    switch (direction) {
+        case MotionDirection::Forward:
+        case MotionDirection::Reverse:
+            return true;
+    }
+    return false;
+}
+
 // VOCABULARY ONLY - no firmware path may consume this type.
 //
 // The single owner of a run's target and time contract is

@@ -216,6 +216,25 @@ void test_shaping_limits_reject_malformed_values(void) {
         static_cast<int>(ev::validateMotionProfileLimits(cruiseAboveCeiling).error));
 }
 
+void test_shaping_limits_reject_an_unknown_command_direction(void) {
+    // S18A/P5: a direction encoding that names no physical direction is
+    // malformed, not a polarity - it must be refused rather than folded into
+    // Reverse by the agreement checks.
+    const ev::MotionProfileLimits unknownDirection(
+        ev::Sourced<double>(2.0, ev::ValueSource::Measured),
+        ev::Sourced<double>(2.5, ev::ValueSource::Measured),
+        ev::Sourced<double>(0.5, ev::ValueSource::Measured),
+        ev::Sourced<double>(1.0, ev::ValueSource::Measured),
+        ev::Sourced<double>(0.05, ev::ValueSource::Measured),
+        ev::Sourced<ev::MotionDirection>(static_cast<ev::MotionDirection>(99),
+                                         ev::ValueSource::Measured));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::MotionProfileLimitsError::UnknownPositiveCommandDirection),
+        static_cast<int>(ev::validateMotionProfileLimits(unknownDirection).error));
+    TEST_ASSERT_FALSE(ev::validateMotionProfileLimits(unknownDirection).ok);
+    TEST_ASSERT_TRUE(ev::validateMotionProfileLimits(fixtureLimits()).ok);
+}
+
 void test_unusable_limits_never_shape_a_target(void) {
     const ev::MotionProfileLimits provisional(
         ev::Sourced<double>(2.0, ev::ValueSource::Provisional),
@@ -1291,6 +1310,7 @@ int main(int, char**) {
 
     RUN_TEST(test_shaping_limits_require_measured_values);
     RUN_TEST(test_shaping_limits_reject_malformed_values);
+    RUN_TEST(test_shaping_limits_reject_an_unknown_command_direction);
     RUN_TEST(test_unusable_limits_never_shape_a_target);
     RUN_TEST(test_invalid_inputs_never_shape_a_target);
 

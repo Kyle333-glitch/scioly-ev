@@ -247,20 +247,155 @@ void test_nominal_sequence_reaches_the_permission(void) {
     TEST_ASSERT_EQUAL_UINT32(300U, status.sequenceElapsedMs);
 }
 
-void test_the_permission_is_latched_against_later_evidence(void) {
+void test_moving_evidence_after_the_stop_invalidates_the_permission(void) {
+    // S18A/P1 correction: this test used to require that a verified stop
+    // survive later moving evidence (`DirectionChangeReady` held with
+    // `stopVerified` true after a +2 m/s update). That is the H4 defect -
+    // historical completion consumed as current permission. The permission now
+    // requires current evidence: fresh motion invalidates it, and re-earning
+    // runs the full dwell again. History beyond the live verdict is the log's
+    // job, never a permission.
     ev::ReversalSequencer sequencer(fixtureConfig());
     sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse, 0U);
 
     uint32_t nowMs = 0U;
     earnPermission(sequencer, nowMs);
 
-    // The vehicle is verified stopped; a later measurement - even a moving one -
-    // cannot un-earn that. Whoever wants a new reversal must reset first, which
-    // is a deliberate act.
-    const ev::ReversalStatus status = sequencer.update(nowMs + 500U, moving(2.0));
+    ev::ReversalStatus status = sequencer.update(nowMs + 500U, moving(2.0));
+    expectPhase(ev::ReversalPhase::RampingDown, status);
+    TEST_ASSERT_FALSE(status.stopVerified);
+    TEST_ASSERT_FALSE(sequencer.stopVerified());
+    TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+
+    // One stopped sample does not revive the old permission: the verifier was
+    // reset, so the dwell starts over.
+    status = sequencer.update(nowMs + 550U, nearZero(true));
+    expectPhase(ev::ReversalPhase::VerifyingNearZero, status);
+    TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+
+    // The full dwell re-earns it.
+    status = sequencer.update(nowMs + 750U, nearZero(true));
     expectPhase(ev::ReversalPhase::DirectionChangeReady, status);
     TEST_ASSERT_TRUE(status.stopVerified);
     TEST_ASSERT_TRUE(sequencer.directionChangePermitted());
+}
+
+void test_unavailable_or_malformed_evidence_invalidates_the_permission(void) {
+    // Absence of evidence is not evidence of a stop: a permission earned on
+    // live evidence must not survive the evidence going away, and a malformed
+    // speed must not gate it either.
+    {
+        ev::ReversalSequencer sequencer(fixtureConfig());
+        sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse,
+                                0U);
+        uint32_t nowMs = 0U;
+        earnPermission(sequencer, nowMs);
+        ev::NearZeroEvidence unavailable;
+        unavailable.velocityUsable = false;
+        unavailable.velocityMps = 0.0;
+        unavailable.zeroSpeedClaimed = true;
+        const ev::ReversalStatus status = sequencer.update(nowMs + 50U, unavailable);
+        expectPhase(ev::ReversalPhase::RampingDown, status);
+        TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+    }
+    {
+        // Within threshold but the estimator never claimed the count stopped:
+        // a creeping vehicle, not a verified stop.
+        ev::ReversalSequencer sequencer(fixtureConfig());
+        sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse,
+                                0U);
+        uint32_t nowMs = 0U;
+        earnPermission(sequencer, nowMs);
+        const ev::ReversalStatus status = sequencer.update(nowMs + 50U, nearZero(false));
+        expectPhase(ev::ReversalPhase::RampingDown, status);
+        TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+    }
+    {
+        // A non-finite speed with a claim is malformed evidence, not a stop.
+        ev::ReversalSequencer sequencer(fixtureConfig());
+        sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse,
+                                0U);
+        uint32_t nowMs = 0U;
+        earnPermission(sequencer, nowMs);
+        ev::NearZeroEvidence malformed = nearZero(true);
+        malformed.velocityMps = std::numeric_limits<double>::quiet_NaN();
+        const ev::ReversalStatus status = sequencer.update(nowMs + 50U, malformed);
+        expectPhase(ev::ReversalPhase::RampingDown, status);
+        TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+    }
+    {
+        // Above the threshold even with a claim: fresh motion, not a stop.
+        ev::ReversalSequencer sequencer(fixtureConfig());
+        sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse,
+                                0U);
+        uint32_t nowMs = 0U;
+        earnPermission(sequencer, nowMs);
+        ev::NearZeroEvidence contradictory = moving(1.0);
+        contradictory.zeroSpeedClaimed = true;
+        const ev::ReversalStatus status = sequencer.update(nowMs + 50U, contradictory);
+        expectPhase(ev::ReversalPhase::RampingDown, status);
+        TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+    }
+}
+
+void test_a_repeated_update_with_the_same_stamp_holds_the_permission(void) {
+    // A frozen or repeated stamp is a timing artifact, not fresh motion: the
+    // permission gates on the evidence facts, so re-reading the same stopped
+    // evidence at the same stamp holds it.
+    ev::ReversalSequencer sequencer(fixtureConfig());
+    sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse, 0U);
+
+    uint32_t nowMs = 0U;
+    earnPermission(sequencer, nowMs);
+    const ev::ReversalStatus status = sequencer.update(nowMs, nearZero(true));
+    expectPhase(ev::ReversalPhase::DirectionChangeReady, status);
+    TEST_ASSERT_TRUE(status.stopVerified);
+    TEST_ASSERT_TRUE(sequencer.directionChangePermitted());
+}
+
+void test_an_expired_permission_refuses_even_with_perfect_evidence(void) {
+    // The sequence timeout bounds an already-earned permission too: the
+    // handoff must happen inside the budget, not whenever a historical latch
+    // is read. Fixture budget is 3 s from the begin at 0.
+    ev::ReversalSequencer sequencer(fixtureConfig());
+    sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse, 0U);
+
+    uint32_t nowMs = 0U;
+    earnPermission(sequencer, nowMs);
+
+    // Just inside the bound with stopped evidence: still ready.
+    ev::ReversalStatus status = sequencer.update(2999U, nearZero(true));
+    expectPhase(ev::ReversalPhase::DirectionChangeReady, status);
+    TEST_ASSERT_TRUE(sequencer.directionChangePermitted());
+
+    // Exactly at the bound: refused, even with perfect evidence.
+    status = sequencer.update(3000U, nearZero(true));
+    expectPhase(ev::ReversalPhase::StopRequired, status);
+    expectRefusal(ev::ReversalRefusal::TimedOut, status);
+    TEST_ASSERT_FALSE(status.stopVerified);
+    TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+}
+
+void test_millis_wrap_keeps_a_short_interval_and_refuses_a_long_one(void) {
+    // Unsigned wraparound arithmetic: a legitimate short interval across the
+    // wrap holds the permission, while an interval past the budget refuses.
+    const uint32_t startMs = 0xFFFFFF00U;
+    ev::ReversalSequencer sequencer(fixtureConfig());
+    sequencer.beginReversal(ev::MotionDirection::Forward, ev::MotionDirection::Reverse,
+                            startMs);
+
+    uint32_t nowMs = startMs;
+    earnPermission(sequencer, nowMs);
+    // nowMs wrapped past zero during the earn; the elapsed span is still 300.
+    ev::ReversalStatus status = sequencer.update(nowMs + 10U, nearZero(true));
+    expectPhase(ev::ReversalPhase::DirectionChangeReady, status);
+    TEST_ASSERT_TRUE(sequencer.directionChangePermitted());
+
+    // 3000 ms past the begin is past the budget even across the wrap.
+    status = sequencer.update(startMs + 3000U, nearZero(true));
+    expectPhase(ev::ReversalPhase::StopRequired, status);
+    expectRefusal(ev::ReversalRefusal::TimedOut, status);
+    TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
 }
 
 // --- Refusals ---------------------------------------------------------------
@@ -525,7 +660,11 @@ int main(int, char**) {
     RUN_TEST(test_a_reversal_to_the_same_direction_is_not_sequenced);
     RUN_TEST(test_an_unusable_configuration_refuses_immediately_and_latches);
     RUN_TEST(test_nominal_sequence_reaches_the_permission);
-    RUN_TEST(test_the_permission_is_latched_against_later_evidence);
+    RUN_TEST(test_moving_evidence_after_the_stop_invalidates_the_permission);
+    RUN_TEST(test_unavailable_or_malformed_evidence_invalidates_the_permission);
+    RUN_TEST(test_a_repeated_update_with_the_same_stamp_holds_the_permission);
+    RUN_TEST(test_an_expired_permission_refuses_even_with_perfect_evidence);
+    RUN_TEST(test_millis_wrap_keeps_a_short_interval_and_refuses_a_long_one);
     RUN_TEST(test_a_premature_request_ramps_down_first);
     RUN_TEST(test_a_second_request_does_not_restart_the_sequence);
     RUN_TEST(test_a_never_reached_near_zero_times_out);

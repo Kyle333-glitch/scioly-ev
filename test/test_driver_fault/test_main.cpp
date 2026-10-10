@@ -102,6 +102,19 @@ void test_not_installed_makes_polarity_verification_inapplicable(void) {
     TEST_ASSERT_FALSE(ev::driverFaultPolarityVerified(shipped));
 }
 
+// A cast-in unknown polarity is malformed, not a polarity: "measured" but
+// naming neither level must not pass the verification gate (S18A/P5).
+void test_installed_with_unknown_polarity_fails(void) {
+    const ev::Sourced<ev::DriverFaultPolarity> unknown(
+        static_cast<ev::DriverFaultPolarity>(99), ev::ValueSource::Measured);
+    TEST_ASSERT_FALSE(ev::driverFaultPolarityVerified(unknown));
+    const ev::DriverFaultConfigValidation validation =
+        ev::validateDriverFaultConfig(ev::DriverFaultCapability::Installed, unknown);
+    TEST_ASSERT_FALSE(validation.ok);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::DriverFaultConfigError::PolarityNotVerified),
+                          static_cast<int>(validation.error));
+}
+
 // The capability default is the conservative one: a forgotten assignment leaves
 // the line required, so arming is refused rather than the external fault gate
 // silently disappearing.
@@ -227,6 +240,7 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_installed_with_verified_polarity_passes);
     RUN_TEST(test_installed_with_unverified_polarity_fails);
+    RUN_TEST(test_installed_with_unknown_polarity_fails);
     RUN_TEST(test_not_installed_makes_polarity_verification_inapplicable);
     RUN_TEST(test_installed_is_the_default_capability);
     RUN_TEST(test_capability_names_are_wire_safe);

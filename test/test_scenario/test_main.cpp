@@ -334,10 +334,12 @@ void expectEveryDriveFollowsTheRunLeg(const ScenarioHarness& harness) {
 void expectNoPoweredReversalWithoutAVerifiedStop(const ScenarioHarness& harness) {
     ev::PoweredDirection previous = ev::PoweredDirection::None;
     for (const CycleRecord& record : harness.trace()) {
-        // A run boundary reinitializes the chain's direction memory, so the audit
-        // starts over there: a new run's first drive is legal in either direction
-        // without a stop, and the phases before any run is underway are where that
-        // boundary is visible in the trace.
+        // The audit starts over at Idle/ParameterValid records, where a reset
+        // boundary is visible in the trace. Note this is a trace-model
+        // convenience, not a memory fact: since S18A/P2 the authority's
+        // direction barrier survives a reset, so a new run's opposite-direction
+        // drive is refused until a fresh stop - and a same-direction or
+        // discharged first drive leaves no change for this audit to check.
         if (record.phase == ev::RunPhase::Idle || record.phase == ev::RunPhase::ParameterValid) {
             previous = ev::PoweredDirection::None;
         }
@@ -1314,6 +1316,128 @@ void test_a_chain_reset_returns_to_nothing_and_a_second_run_works(void) {
     expectTraceInvariants(harness);
 }
 
+void test_fresh_motion_before_the_run_handoff_aborts_the_reversal(void) {
+    // S18A/P1 through the real chain: the reversal is earned on observed
+    // stillness, then the encoder moves again before the handoff consumes the
+    // permission. The run must hold the deliberate stop instead of flipping to
+    // reverse travel, and re-earn the stop before handing off.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::BrakeZeroSpeed, driver));
+
+    // Let the earned permission arrive on stillness.
+    bool earned = false;
+    for (uint32_t cycle = 0U; cycle < 60U && !earned; ++cycle) {
+        earned = harness.step(driver.next(harness)).reversalPhase ==
+                 ev::ReversalPhase::DirectionChangeReady;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(earned, "the reversal was never earned on stillness");
+    TEST_ASSERT_TRUE(harness.stopVerified());
+
+    // Fresh motion before the handoff consumes it: the run holds the stop.
+    CycleScript moving;
+    moving.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
+    const CycleRecord& held = harness.step(moving);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::BrakeZeroSpeed),
+                          static_cast<int>(held.phase));
+    TEST_ASSERT_FALSE(ev::isRunTravelCommand(held.command));
+    TEST_ASSERT_FALSE(held.commandedDirection == ev::PoweredDirection::Reverse &&
+                      held.commandedClass == ev::ActuationClass::Drive);
+    TEST_ASSERT_FALSE(held.stopVerified);
+
+    // Stillness re-earns the stop and the run hands off to reverse travel.
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Reverse, driver));
+    TEST_ASSERT_TRUE(stepUntilDirectionAuthorized(harness, driver,
+                                                  ev::PoweredDirection::Reverse));
+    expectTraceInvariants(harness);
+}
+
+void test_a_mid_run_reset_bars_the_opposite_direction_until_a_fresh_stop(void) {
+    // S18A/P2 through the real chain and the shared new-run reset: reverse
+    // travel latches Reverse, a mid-run reset preserves the barrier, the fresh
+    // forward run is refused without motion, and a disarmed observed standstill
+    // discharges it - never the reset itself.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Reverse, driver));
+    TEST_ASSERT_TRUE(stepUntilDirectionAuthorized(harness, driver,
+                                                  ev::PoweredDirection::Reverse));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                          static_cast<int>(harness.authority().lastAuthorizedDirection()));
+
+    const ev::MotionChainResetReport report = harness.resetForNewRun();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Reverse),
+                          static_cast<int>(report.clearedRunPhase));
+    TEST_ASSERT_FALSE(harness.authority().isArmed());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Idle),
+                          static_cast<int>(harness.phase()));
+    TEST_ASSERT_FALSE(harness.stopVerified());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                          static_cast<int>(harness.authority().lastAuthorizedDirection()));
+
+    // A fresh announcement arms, but the opposite direction is refused: the
+    // reset proved no standstill.
+    announceAndArm(harness);
+    CycleScript hostile = driver.next(harness);
+    hostile.hasHostileRequest = true;
+    hostile.hostileRequest = ev::MotorEffort(ev::MotorMode::DriveForward, 300U);
+    const CycleRecord& refused = harness.step(hostile);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::DeniedUnsafeDirectionChange),
+                          static_cast<int>(refused.outcome));
+    TEST_ASSERT_FALSE(ev::isDrivingMode(refused.commandedMode));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                          static_cast<int>(harness.authority().lastAuthorizedDirection()));
+
+    // The run's own forward travel is refused the same way: no motion, no
+    // fault, the run simply cannot take powered forward motion on a barrier.
+    NominalDriver secondDriver;
+    bool forwardDrive = false;
+    for (uint32_t cycle = 0U; cycle < 40U && !forwardDrive; ++cycle) {
+        forwardDrive = harness.step(secondDriver.next(harness)).commandedDirection ==
+                       ev::PoweredDirection::Forward;
+    }
+    TEST_ASSERT_FALSE_MESSAGE(forwardDrive,
+                              "forward drive authorized on a reset-preserved reverse barrier");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                          static_cast<int>(harness.faultCode()));
+
+    // Disarming a run ends it by fault - the documented precedence - and the
+    // disarmed standstill that follows is what discharges the barrier through
+    // the authority's zero-speed path: observed evidence, never the reset.
+    harness.authority().disarm();
+    CycleScript still;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(harness.step(still).phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::DisarmedDuringRun),
+                          static_cast<int>(harness.faultCode()));
+    bool discharged = false;
+    for (uint32_t cycle = 0U; cycle < 40U && !discharged; ++cycle) {
+        harness.step(still);
+        discharged = harness.authority().lastAuthorizedDirection() ==
+                     ev::PoweredDirection::None;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(discharged,
+                             "a fresh disarmed standstill never discharged the barrier");
+
+    // A fresh run after the discharge travels forward again. One Idle cycle
+    // makes the reset boundary visible in the trace, the way the audit's
+    // run-boundary model expects.
+    const ev::MotionChainResetReport secondReset = harness.resetForNewRun();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(secondReset.clearedRunPhase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(harness.authority().lastAuthorizedDirection()));
+    CycleScript idle;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Idle),
+                          static_cast<int>(harness.step(idle).phase));
+    announceAndArm(harness);
+    TEST_ASSERT_TRUE(
+        stepUntilDirectionAuthorized(harness, secondDriver, ev::PoweredDirection::Forward));
+    expectTraceInvariants(harness);
+}
+
 // --- A stale intention at the boundary, and a hostile request -----------------
 
 void test_a_held_stale_intention_is_presented_as_no_powered_request(void) {
@@ -2229,6 +2353,8 @@ int main(int, char**) {
     RUN_TEST(test_a_direct_reverse_request_is_refused_and_the_run_reverses_legally);
     RUN_TEST(test_a_fault_overrides_a_travel_request_in_the_same_cycle);
     RUN_TEST(test_a_chain_reset_returns_to_nothing_and_a_second_run_works);
+    RUN_TEST(test_fresh_motion_before_the_run_handoff_aborts_the_reversal);
+    RUN_TEST(test_a_mid_run_reset_bars_the_opposite_direction_until_a_fresh_stop);
     RUN_TEST(test_an_incomplete_configuration_cannot_arm_the_chain);
     RUN_TEST(test_a_disarm_in_every_reversal_phase_stops_the_run);
     RUN_TEST(test_a_stalled_clock_is_not_speed_evidence_and_spends_no_phase_time);

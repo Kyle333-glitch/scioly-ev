@@ -494,6 +494,37 @@ void test_the_tick_polarity_must_agree_with_the_command_polarity(void) {
     }
 }
 
+void test_the_two_legs_must_name_the_same_global_polarity(void) {
+    // S18A/P5: the positive-command direction is one vehicle fact, not one per
+    // leg. Both per-leg validators can pass while the legs disagree, and the
+    // shaping/regulator pair would then drive reverse travel forward - so the
+    // legs must agree with each other as well as with the regulator effort.
+    TEST_ASSERT_TRUE(ev::directionalCommandPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Forward),
+        measuredDirection(ev::MotionDirection::Forward)));
+    TEST_ASSERT_TRUE(ev::directionalCommandPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Reverse),
+        measuredDirection(ev::MotionDirection::Reverse)));
+    TEST_ASSERT_FALSE(ev::directionalCommandPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Forward),
+        measuredDirection(ev::MotionDirection::Reverse)));
+    TEST_ASSERT_FALSE(ev::directionalCommandPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Reverse),
+        measuredDirection(ev::MotionDirection::Forward)));
+    // An unknown encoding agrees with nothing, not even itself.
+    const ev::Sourced<ev::MotionDirection> unknown(
+        static_cast<ev::MotionDirection>(99), ev::ValueSource::Measured);
+    TEST_ASSERT_FALSE(ev::directionalCommandPolarityAgrees(
+        measuredDirection(ev::MotionDirection::Forward), unknown));
+    TEST_ASSERT_FALSE(ev::directionalCommandPolarityAgrees(unknown, unknown));
+    // Unknown encodings agree with nothing at the pairwise checks either:
+    // the profile side must not fold into Reverse by accident.
+    TEST_ASSERT_FALSE(ev::polarityAgrees(unknown,
+                                          measuredMode(ev::MotorMode::DriveReverse)));
+    TEST_ASSERT_FALSE(ev::tickPolarityAgrees(unknown,
+                                              measuredDirection(ev::MotionDirection::Forward)));
+}
+
 // --- New-run reset -----------------------------------------------------------
 
 void test_a_new_run_resets_every_module_and_never_arms(void) {
@@ -574,7 +605,11 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
     TEST_ASSERT_TRUE(controller.integralPermille() == 0.0);
     TEST_ASSERT_TRUE(target.targetVelocityMps() == 0.0);
     TEST_ASSERT_FALSE(authority.isArmed());
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+    // S18A/P2: the new-run sequence preserves the remembered powered
+    // direction. A software reset is not a verified mechanical stop, so the
+    // forward barrier survives into the next run; only a zero-speed stop
+    // discharges it, exactly as before the reset.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Forward),
                           static_cast<int>(authority.lastAuthorizedDirection()));
 
     // The first control cycle after the reset starts from nothing: the estimator
@@ -597,6 +632,31 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
                           static_cast<int>(stillDenied.outcome));
     TEST_ASSERT_TRUE(stillDenied.command.isDisabled());
     TEST_ASSERT_TRUE(authority.arm(fullyReady()));
+
+    // S18A/P2 lifecycle through the shared new-run path: the re-armed chain
+    // keeps the forward barrier. The opposite direction stays refused while
+    // motion is reported, the same direction recovers, and a zero-speed stop
+    // discharges the barrier.
+    ev::SafetySystemState moving = state;
+    moving.atZeroSpeed = false;
+    const ev::AuthorizationResult barred = authority.authorize(
+        ev::MotorEffort(ev::MotorMode::DriveReverse, 500U), moving, limitsWithMaxEffort(600U));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::DeniedUnsafeDirectionChange),
+                          static_cast<int>(barred.outcome));
+    const ev::AuthorizationResult sameDirection = authority.authorize(
+        ev::MotorEffort(ev::MotorMode::DriveForward, 500U), moving, limitsWithMaxEffort(600U));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::AuthorizedDrive),
+                          static_cast<int>(sameDirection.outcome));
+    const ev::AuthorizationResult discharged = authority.authorize(
+        ev::MotorEffort(ev::MotorMode::Brake, 0U), state, limitsWithMaxEffort(600U));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::AuthorizedStop),
+                          static_cast<int>(discharged.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+    const ev::AuthorizationResult reversed = authority.authorize(
+        ev::MotorEffort(ev::MotorMode::DriveReverse, 500U), moving, limitsWithMaxEffort(600U));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::AuthorizedDrive),
+                          static_cast<int>(reversed.outcome));
 }
 
 void test_a_new_run_reports_the_fault_it_discards(void) {
@@ -815,6 +875,7 @@ int main(int, char**) {
     RUN_TEST(test_the_two_effort_ceilings_are_meant_to_be_equal);
     RUN_TEST(test_the_two_polarity_encodings_must_agree);
     RUN_TEST(test_the_tick_polarity_must_agree_with_the_command_polarity);
+    RUN_TEST(test_the_two_legs_must_name_the_same_global_polarity);
 
     RUN_TEST(test_a_new_run_resets_every_module_and_never_arms);
     RUN_TEST(test_a_new_run_reports_the_fault_it_discards);

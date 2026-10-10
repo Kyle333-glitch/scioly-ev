@@ -10,6 +10,7 @@
 #include <Motion.h>
 #include <MotionChainReset.h>
 #include <MotionProfile.h>
+#include <NearZeroVerifier.h>
 #include <Odometry.h>
 #include <OperatorPolicy.h>
 #include <OperatorResponse.h>
@@ -477,6 +478,14 @@ private:
     ev::MotionProfileTarget profileTarget_;
     ev::CompetitionStateMachine run_;
     ev::SafetyAuthority authority_;
+    // The disarmed stop-recovery verifier (S18A/P2): the same near-zero stop
+    // definition the reversal gate uses, stepped on live stop evidence every
+    // tick. While the authority is disarmed, a freshly verified stop
+    // contributes to the zero-speed fact the boundary is given - so a direction
+    // barrier that survived a software reset discharges on a real, observed
+    // standstill, never on the reset itself. While armed the run policy alone
+    // owns that fact. Reset at the new-run boundary with everything else.
+    ev::NearZeroVerifier recoveryStopVerifier_;
     ev::ControlScheduler scheduler_;
     ev::ControlTickOrderGuard orderGuard_;
 

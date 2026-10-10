@@ -86,6 +86,7 @@ enum class VelocityEstimatorConfigError : uint8_t {
     None = 0,
     WindowNotPositive,           // a zero window could never cover a span
     NoEdgeTimeoutNotPositive,    // a zero timeout would claim zero speed on the first sample
+    WindowNotBelowNoEdgeTimeout,  // a window at/above the timeout can never yield a window-derived zero
 };
 
 struct VelocityEstimatorConfigValidation {
@@ -105,6 +106,16 @@ inline VelocityEstimatorConfigValidation validateVelocityEstimatorConfig(
     }
     if (config.noEdgeTimeoutMs == 0U) {
         return {false, VelocityEstimatorConfigError::NoEdgeTimeoutNotPositive};
+    }
+    // The explicit zero-speed claim is checked before window coverage in
+    // `update()`: at rest the claim fires after `noEdgeTimeoutMs` without a
+    // window, so a window at or above the timeout can never produce a
+    // window-derived zero. Stop verification pairs the current claim with a
+    // retained window-derived speed (`composeStopEvidence()`), and without one
+    // no stop can ever verify - so such a combination is refused rather than
+    // left to time out (S18A/P5).
+    if (!(config.windowMs < config.noEdgeTimeoutMs)) {
+        return {false, VelocityEstimatorConfigError::WindowNotBelowNoEdgeTimeout};
     }
     return {true, VelocityEstimatorConfigError::None};
 }
@@ -431,6 +442,28 @@ private:
     uint32_t rejectedStamps_ = 0;
     uint32_t tickChanges_ = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Whether the configured window can be covered at the control cadence
+// ---------------------------------------------------------------------------
+//
+// The retained history holds at most `kMaxRetainedSamples` samples, so samples
+// `samplePeriodMs` apart can cover at most `(kMaxRetainedSamples - 1) *
+// samplePeriodMs` of span. A window above that reports `WindowExceedsHistory`
+// instead of a number for as long as the cadence holds - so a stop resting on
+// window-derived speed could never verify, and the failure would present as a
+// timeout rather than as the configuration mistake it is. This refuses that
+// combination at build time (S18A/P5). It is a configuration-build check, not a
+// runtime clamp: it does not make a window adequate, it only refuses one the
+// history cannot back.
+inline bool estimatorWindowCoverableAtCadence(uint32_t windowMs, uint32_t samplePeriodMs) {
+    if (samplePeriodMs == 0U) {
+        return false;
+    }
+    const uint32_t coverableMs =
+        static_cast<uint32_t>(VelocityEstimator::kMaxRetainedSamples - 1U) * samplePeriodMs;
+    return windowMs <= coverableMs;
+}
 
 // ---------------------------------------------------------------------------
 // Whether an estimate may be used for control right now

@@ -187,13 +187,21 @@ public:
 
     bool isArmed() const { return armed_; }
 
-    // Reinitialization. Clears the direction memory and any latched fault and
-    // returns to disarmed. After reset, no previous command is remembered and
-    // powered motion requires a fresh arming decision.
+    // Reinitialization. Clears any latched fault and returns to disarmed, but
+    // deliberately PRESERVES the remembered powered direction: a software reset
+    // is not a verified mechanical stop, and clearing the direction memory here
+    // would let a reset, followed by a fresh arm, authorize the opposite
+    // direction while the drivetrain may still be moving (S18A/P2). After
+    // reset, powered motion still requires a fresh arming decision - and a
+    // direction change still requires the zero-speed path: only an authorized
+    // non-powered command taken while zero speed is reported discharges the
+    // barrier, exactly as before the reset. The vehicle layer re-establishes
+    // that fact from fresh live stop evidence while disarmed (never from the
+    // reset itself), and a physical power cycle - which loses this memory - is
+    // an operator-observed boundary with its own standstill requirement.
     void reset() {
         armed_ = false;
         latchedFault_ = FaultState{};
-        lastDriveDirection_ = PoweredDirection::None;
     }
 
     // The fault of record. A latched fault blocks drive until clearFault().
@@ -206,11 +214,12 @@ public:
     // is a fresh decision. Returns true when a latched fault was actually
     // cleared.
     //
-    // Unlike reset(), clearFault() deliberately preserves the remembered powered
+    // Like reset(), clearFault() deliberately preserves the remembered powered
     // direction: the drivetrain may still be moving, so the path back to a
-    // reversal still runs through the zero-speed stop. reset() is the only
-    // operation that clears the direction memory, which is why a new run uses it
-    // (see MotionChainReset.h).
+    // reversal still runs through the zero-speed stop. No operation clears the
+    // direction memory except the zero-speed stop path (`noteStop()`), which is
+    // why a new run uses reset() without losing the barrier (see
+    // MotionChainReset.h).
     bool clearFault() {
         if (armed_) {
             return false;

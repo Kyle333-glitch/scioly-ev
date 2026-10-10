@@ -729,14 +729,19 @@ void test_disarming_does_not_forget_the_last_powered_direction(void) {
 // Reinitialization
 // ---------------------------------------------------------------------------
 
-void test_reset_clears_fault_and_direction_memory_and_requires_a_fresh_arm(void) {
+void test_reset_preserves_the_direction_barrier_and_requires_a_fresh_arm(void) {
+    // S18A/P2 correction: this test used to require that reset() forget the
+    // remembered powered direction. That is the H5 defect: disarm/reset/re-arm
+    // then authorized the opposite direction with no stop evidence, because a
+    // software reset was treated as a verified mechanical stop. The barrier
+    // now survives a reset; only a zero-speed stop discharges it.
     ev::SafetyAuthority authority;
     armHealthy(authority);
     const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
 
     authority.authorize(driveForward(500), readyState(), limits);
 
-    ev::SafetySystemState faulty = readyState();
+    ev::SafetySystemState faulty = readyState(/*atZeroSpeed=*/false);
     faulty.detectedFault = ev::FaultCode::ProvisionalCalibration;
     authority.authorize(driveForward(500), faulty, limits);
     TEST_ASSERT_FALSE(authority.isArmed());
@@ -745,16 +750,150 @@ void test_reset_clears_fault_and_direction_memory_and_requires_a_fresh_arm(void)
     TEST_ASSERT_FALSE(authority.isArmed());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
                           static_cast<int>(authority.latchedFault().code));
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Forward),
                           static_cast<int>(authority.lastAuthorizedDirection()));
 
     // After reset a drive needs a new arming decision: nothing resumes.
     expectOutcome(ev::AuthzOutcome::DeniedNotArmed,
                   authority.authorize(driveForward(500), readyState(), limits));
 
+    // Re-arming restores same-direction motion but not the opposite: the
+    // reset proved nothing about the drivetrain.
     armHealthy(authority);
     expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
                   authority.authorize(driveForward(500), readyState(), limits));
+    expectOutcome(ev::AuthzOutcome::DeniedUnsafeDirectionChange,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+
+    // A stop taken while zero speed is reported discharges the barrier, and
+    // only then is the opposite direction authorized.
+    expectOutcome(ev::AuthzOutcome::AuthorizedStop,
+                  authority.authorize(ev::MotorEffort(ev::MotorMode::Brake, 0U),
+                                      readyState(/*atZeroSpeed=*/true), limits));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+}
+
+void test_reset_after_reverse_bars_forward_until_a_verified_stop(void) {
+    // The H5 lifecycle in the other direction: reverse-powered, then
+    // disarm/reset/re-arm while the evidence still reports motion.
+    ev::SafetyAuthority authority;
+    armHealthy(authority);
+    const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
+
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveReverse(400), readyState(), limits));
+    authority.disarm();
+    authority.reset();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+
+    armHealthy(authority);
+    ev::SafetySystemState moving = readyState(/*atZeroSpeed=*/false);
+    const ev::AuthorizationResult refused =
+        authority.authorize(driveForward(400), moving, limits);
+    expectOutcome(ev::AuthzOutcome::DeniedUnsafeDirectionChange, refused);
+    expectSafeStop(refused);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+}
+
+void test_reset_immediately_after_a_powered_command_keeps_the_barrier(void) {
+    // No fault, no disarm ceremony: a reset one cycle after a powered command
+    // still proves no standstill.
+    ev::SafetyAuthority authority;
+    armHealthy(authority);
+    const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
+
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveForward(500), readyState(), limits));
+    authority.reset();
+
+    armHealthy(authority);
+    expectOutcome(ev::AuthzOutcome::DeniedUnsafeDirectionChange,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveForward(500), readyState(), limits));
+}
+
+void test_a_stop_without_reported_zero_speed_never_discharges_after_reset(void) {
+    // Missing, stale, or moving evidence cannot discharge the barrier the
+    // reset preserved: only a stop taken while zero speed is reported does.
+    ev::SafetyAuthority authority;
+    armHealthy(authority);
+    const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
+
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveForward(500), readyState(), limits));
+    authority.reset();
+    armHealthy(authority);
+
+    const ev::MotorEffort brake(ev::MotorMode::Brake, 0U);
+    expectOutcome(ev::AuthzOutcome::AuthorizedStop,
+                  authority.authorize(brake, readyState(/*atZeroSpeed=*/false), limits));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Forward),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+    expectOutcome(ev::AuthzOutcome::DeniedUnsafeDirectionChange,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+}
+
+void test_a_verified_stop_before_reset_leaves_no_barrier_behind(void) {
+    // Reset after a genuinely discharged barrier: the stop already proved
+    // standstill through the zero-speed path, so the fresh arm starts clean
+    // and either direction may be established.
+    ev::SafetyAuthority authority;
+    armHealthy(authority);
+    const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
+
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveForward(500), readyState(), limits));
+    expectOutcome(ev::AuthzOutcome::AuthorizedStop,
+                  authority.authorize(ev::MotorEffort(ev::MotorMode::Brake, 0U),
+                                      readyState(/*atZeroSpeed=*/true), limits));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+
+    authority.reset();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+    armHealthy(authority);
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+}
+
+void test_repeated_disarm_and_reset_never_weakens_the_barrier(void) {
+    ev::SafetyAuthority authority;
+    armHealthy(authority);
+    const ev::SafetyLimits limits = limitsWithMaxEffort(1000);
+
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveReverse(500), readyState(), limits));
+    for (int round = 0; round < 3; ++round) {
+        authority.disarm();
+        authority.reset();
+        TEST_ASSERT_FALSE(authority.isArmed());
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Reverse),
+                              static_cast<int>(authority.lastAuthorizedDirection()));
+    }
+    armHealthy(authority);
+    expectOutcome(ev::AuthzOutcome::DeniedUnsafeDirectionChange,
+                  authority.authorize(driveForward(500), readyState(), limits));
+}
+
+void test_a_booted_authority_holds_no_direction(void) {
+    // Boot is the distinct lifecycle boundary: volatile memory starts empty,
+    // so there is no prior direction to preserve - and no barrier to
+    // discharge. The first powered direction is established by driving it.
+    // (A power cycle loses the barrier by construction; the operator
+    // standstill requirement across power loss is documented, not sensed.)
+    ev::SafetyAuthority authority;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(authority.lastAuthorizedDirection()));
+    armHealthy(authority);
+    expectOutcome(ev::AuthzOutcome::AuthorizedDrive,
+                  authority.authorize(driveReverse(500), readyState(), limitsWithMaxEffort(1000)));
 }
 
 void test_reset_does_not_clear_a_fault_that_is_still_reported(void) {
@@ -929,7 +1068,13 @@ int main(int, char**) {
     RUN_TEST(test_stop_without_zero_speed_does_not_clear_the_direction_memory);
     RUN_TEST(test_disarming_does_not_forget_the_last_powered_direction);
 
-    RUN_TEST(test_reset_clears_fault_and_direction_memory_and_requires_a_fresh_arm);
+    RUN_TEST(test_reset_preserves_the_direction_barrier_and_requires_a_fresh_arm);
+    RUN_TEST(test_reset_after_reverse_bars_forward_until_a_verified_stop);
+    RUN_TEST(test_reset_immediately_after_a_powered_command_keeps_the_barrier);
+    RUN_TEST(test_a_stop_without_reported_zero_speed_never_discharges_after_reset);
+    RUN_TEST(test_a_verified_stop_before_reset_leaves_no_barrier_behind);
+    RUN_TEST(test_repeated_disarm_and_reset_never_weakens_the_barrier);
+    RUN_TEST(test_a_booted_authority_holds_no_direction);
     RUN_TEST(test_reset_does_not_clear_a_fault_that_is_still_reported);
 
     RUN_TEST(test_no_input_sequence_produces_an_unauthorized_direction_flip);

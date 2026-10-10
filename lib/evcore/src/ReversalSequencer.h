@@ -30,8 +30,11 @@ namespace ev {
 //           -> StopRequired         hold the stop; do not reverse
 //
 // * It answers one yes/no question for the run layer: may the travel direction
-//   change yet? `DirectionChangeReady` is that yes, and once earned it is
-//   latched, because a verified stop does not stop being verified.
+//   change yet? `DirectionChangeReady` is that yes, and it holds only while the
+//   live stop evidence still shows the verified stop (S18A/P1): a verified stop
+//   is historical completion, and fresh contradictory evidence, unavailable
+//   evidence, or an expired sequence invalidates the permission. Re-earning
+//   runs the full dwell again; no historical latch can revive it.
 // * The near-zero test is not invented here. It is `NearZeroVerifier`
 //   (threshold + dwell over fresh, valid speed evidence and the estimator's
 //   explicit zero-speed claim), configured from the same `Sourced` values.
@@ -123,7 +126,10 @@ enum class ReversalPhase : uint8_t {
     Braking = 2,
     // The stop is observed and being held; the dwell interval is accumulating.
     VerifyingNearZero = 3,
-    // The direction change has been earned. Latched until reset().
+    // The direction change has been earned and the live evidence still shows
+    // the verified stop. Held only while `update()` keeps seeing that evidence;
+    // contradictory evidence, unavailable evidence, or the sequence timeout
+    // invalidates it (S18A/P1).
     DirectionChangeReady = 4,
     // The reversal will not happen. The run layer must hold a stop and raise the
     // fault named by `refusal`.
@@ -156,9 +162,11 @@ struct ReversalStatus {
     // Why a stop is required. Non-None exactly when phase == StopRequired.
     ReversalRefusal refusal;
 
-    // True once the near-zero stop has been verified. Latched: a verified stop
-    // does not stop being verified, and the permission must not flicker under a
-    // caller that reads it one cycle later.
+    // True while the sequence currently holds a verified stop: set when the
+    // near-zero dwell completes, cleared when fresh evidence invalidates the
+    // permission or the sequence resets. It reports the stop the run is
+    // presenting right now - which is what the vehicle layer maps onto the
+    // authority's zero-speed fact - never a historical permission (S18A/P1).
     bool stopVerified;
 
     // The facts behind the latest verification step (which of the three held).
@@ -207,14 +215,21 @@ public:
     ReversalPhase phase() const { return phase_; }
 
     // True only in DirectionChangeReady: the single permission this module
-    // grants. It states that a stop was verified, not that the vehicle is
-    // stopped now, so a consumer that has commanded powered travel since earning
-    // it must have reset the sequencer before trusting it again. The run layer
-    // does exactly that at the handoff, which is the only place the permission is
-    // consumed.
+    // grants. It states that a stop was verified *and that the live evidence
+    // still shows it*: `update()` re-checks the timeout and the current stop
+    // evidence on every call, including while ready, so fresh contradictory or
+    // unavailable evidence invalidates the permission (S18A/P1). A consumer that
+    // has commanded powered travel since earning it must still have reset the
+    // sequencer before trusting it again. The run layer does exactly that at
+    // the handoff, which is the only place the permission is consumed - and the
+    // handoff re-checks the current verdict before consuming it.
     bool directionChangePermitted() const { return phase_ == ReversalPhase::DirectionChangeReady; }
 
-    // True once the near-zero stop has been verified (latched).
+    // True while the sequence currently holds a verified stop. Unlike the old
+    // historical latch, this is cleared when fresh evidence invalidates the
+    // permission: it reports the stop the run is presenting right now, which is
+    // what the vehicle layer maps onto the authority's zero-speed fact. History
+    // beyond that is the log's job, never a permission (S18A/P1).
     bool stopVerified() const { return stopVerified_; }
 
     // Returns the sequencer to its post-construction state: no sequence, no
@@ -277,7 +292,10 @@ public:
     // control loop that stalled for longer than the configured bound refuses the
     // reversal on the next update instead of crediting the missing time to a
     // dwell it did not observe. The bound is the sequence's whole budget, so it
-    // is also what decides how long an unobserved pause may be.
+    // is also what decides how long an unobserved pause may be. It bounds an
+    // already-earned permission too: a verified stop is historical completion,
+    // not everlasting permission, and a stale handoff must refuse rather than
+    // consume it (S18A/P1).
     ReversalStatus update(uint32_t nowMs, const NearZeroEvidence& evidence) {
         if (phase_ == ReversalPhase::Idle) {
             return status(0U);
@@ -287,16 +305,31 @@ public:
         }
 
         const uint32_t elapsedMs = static_cast<uint32_t>(nowMs - startedAtMs_);
-        if (phase_ != ReversalPhase::DirectionChangeReady &&
-            elapsedMs >= msFromSeconds(config_.reversalTimeoutS.value)) {
+        if (elapsedMs >= msFromSeconds(config_.reversalTimeoutS.value)) {
             phase_ = ReversalPhase::StopRequired;
             refusal_ = ReversalRefusal::TimedOut;
             refusedAtElapsedMs_ = elapsedMs;
+            // No verified stop is presented anymore - including one earned
+            // earlier in this same sequence - so no later reader can mistake
+            // the refused status for current permission (S18A/P1).
+            stopVerified_ = false;
             return status(elapsedMs);
         }
         if (phase_ == ReversalPhase::DirectionChangeReady) {
-            // The permission is latched; the verifier is no longer stepped, so a
-            // later measurement cannot un-earn a verified stop.
+            // The permission holds only while the live evidence still shows the
+            // verified stop. Fresh contradictory or unavailable evidence
+            // invalidates it: the verifier is reset so re-earning runs the full
+            // dwell again, and the historical latch cannot revive it. The
+            // verifier is deliberately not stepped here - a frozen or repeated
+            // stamp is a timing artifact, not fresh motion, and the evidence
+            // facts below are what gate the permission.
+            if (!permissionEvidenceHolds(evidence)) {
+                verifier_.reset();
+                verification_ = noObservation();
+                stopVerified_ = false;
+                phase_ = ReversalPhase::RampingDown;
+                return status(elapsedMs);
+            }
             return status(elapsedMs);
         }
 
@@ -323,6 +356,21 @@ private:
     // What a sequencer that has never stepped reports: nothing observed.
     static NearZeroVerdict noObservation() {
         return NearZeroVerdict(false, NearZeroStatus::AwaitingEvidence, false, false, false, 0U);
+    }
+
+    // Whether the live evidence still shows the stop the permission rests on:
+    // a fresh, valid speed within the same threshold that earned it, plus the
+    // estimator's explicit zero-speed claim. Anything else - motion, an
+    // unavailable or malformed speed, a missing claim - invalidates the
+    // permission (S18A/P1). A repeated or frozen stamp is not consulted here:
+    // the stamp is a timing artifact, and the evidence facts are what gate.
+    bool permissionEvidenceHolds(const NearZeroEvidence& evidence) const {
+        if (!configUsable()) {
+            return false;
+        }
+        return evidence.velocityUsable && std::isfinite(evidence.velocityMps) &&
+               std::fabs(evidence.velocityMps) <= config_.verification.velocityThresholdMps.value &&
+               evidence.zeroSpeedClaimed;
     }
 
     ReversalStatus status(uint32_t sequenceElapsedMs) const {

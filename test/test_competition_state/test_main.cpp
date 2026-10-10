@@ -857,6 +857,102 @@ void test_the_handoff_presents_a_stop_cycle_before_asking_for_reverse(void) {
     TEST_ASSERT_TRUE(ev::isRunTravelCommand(reverse.intention.command));
 }
 
+void test_fresh_motion_before_the_handoff_aborts_the_reversal(void) {
+    // S18A/P1 at the consumption boundary: the stop was verified and the
+    // one-cycle handoff is pending, but the next tick's live evidence shows
+    // fresh motion after a long gap. The handoff must not consume the stale
+    // permission: the run holds the deliberate stop, and the full dwell must
+    // re-run before any reverse travel is asked for.
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::BrakeZeroSpeed));
+
+    // Reach the earned permission; the handoff is now pending.
+    ev::RunStatus status = harness.machine.update(harness.nowMs, inputsFrom(evidenceFor(ev::RunPhase::BrakeZeroSpeed)));
+    for (uint32_t step = 0U; step < 8U &&
+                             status.reversalPhase != ev::ReversalPhase::DirectionChangeReady;
+         ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::BrakeZeroSpeed));
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::DirectionChangeReady),
+                          static_cast<int>(status.reversalPhase));
+    TEST_ASSERT_TRUE(status.stopVerified);
+
+    // Fresh motion (+1 m/s, no claim) after a 2000 ms gap: still inside the
+    // fixture's 3 s sequence budget, so only the evidence rule can refuse.
+    Evidence moving;
+    moving.stopUsable = true;
+    moving.stopSpeedMps = 1.0;
+    moving.stopClaimed = false;
+    status = tick(harness, moving, 2000U);
+    expectPhase(ev::RunPhase::BrakeZeroSpeed, status);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::RampingDown),
+                          static_cast<int>(status.reversalPhase));
+    TEST_ASSERT_FALSE(status.stopVerified);
+    expectCommand(ev::RunMotionCommand::BrakeForward, status);
+
+    // The stop re-earned on live evidence still hands off to reverse.
+    for (uint32_t step = 0U; step < 8U && status.phase != ev::RunPhase::Reverse; ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::BrakeZeroSpeed));
+    }
+    expectPhase(ev::RunPhase::Reverse, status);
+    expectCommand(ev::RunMotionCommand::DriveReverse, status);
+}
+
+void test_a_fault_with_a_pending_handoff_faults_instead_of_reversing(void) {
+    // Fault precedence at the handoff: a fault raised while the one-cycle
+    // stop is being presented discards the pending handoff with everything
+    // else. The run faults; it never flips to reverse travel.
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::BrakeZeroSpeed));
+
+    ev::RunStatus status = harness.machine.update(harness.nowMs, inputsFrom(evidenceFor(ev::RunPhase::BrakeZeroSpeed)));
+    for (uint32_t step = 0U; step < 8U &&
+                             status.reversalPhase != ev::ReversalPhase::DirectionChangeReady;
+         ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::BrakeZeroSpeed));
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::DirectionChangeReady),
+                          static_cast<int>(status.reversalPhase));
+
+    Evidence faulted = evidenceFor(ev::RunPhase::BrakeZeroSpeed);
+    faulted.fault = ev::FaultCode::InvalidRunConfig;
+    status = tick(harness, faulted);
+    expectPhase(ev::RunPhase::Fault, status);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::Idle),
+                          static_cast<int>(status.reversalPhase));
+    TEST_ASSERT_FALSE(status.stopVerified);
+}
+
+void test_reset_with_a_pending_handoff_returns_to_nothing_verified(void) {
+    // S18A/P2 lifecycle at the handoff: a reset while the one-cycle stop is
+    // being presented clears the pending handoff with the run. No verified
+    // stop survives into the fresh run, and a new announcement starts clean.
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::BrakeZeroSpeed));
+
+    ev::RunStatus status = harness.machine.update(harness.nowMs, inputsFrom(evidenceFor(ev::RunPhase::BrakeZeroSpeed)));
+    for (uint32_t step = 0U; step < 8U &&
+                             status.reversalPhase != ev::ReversalPhase::DirectionChangeReady;
+         ++step) {
+        status = tick(harness, evidenceFor(ev::RunPhase::BrakeZeroSpeed));
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::DirectionChangeReady),
+                          static_cast<int>(status.reversalPhase));
+
+    harness.machine.reset(harness.nowMs);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Idle),
+                          static_cast<int>(harness.machine.phase()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ReversalPhase::Idle),
+                          static_cast<int>(harness.machine.reversalPhase()));
+    TEST_ASSERT_FALSE(harness.machine.stopVerified());
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::Started),
+                          static_cast<int>(announceValidRun(harness)));
+}
+
 void test_no_evidence_can_skip_the_reversal_phases(void) {
     Harness harness = defaultHarness(0.0);
     announceValidRun(harness);
@@ -1825,6 +1921,9 @@ int main(int, char**) {
     RUN_TEST(test_every_legal_transition_in_order);
     RUN_TEST(test_the_reversal_presentation_and_the_sequencer_evidence_stay_distinct);
     RUN_TEST(test_the_handoff_presents_a_stop_cycle_before_asking_for_reverse);
+    RUN_TEST(test_fresh_motion_before_the_handoff_aborts_the_reversal);
+    RUN_TEST(test_a_fault_with_a_pending_handoff_faults_instead_of_reversing);
+    RUN_TEST(test_reset_with_a_pending_handoff_returns_to_nothing_verified);
     RUN_TEST(test_no_evidence_can_skip_the_reversal_phases);
     RUN_TEST(test_the_reversal_timeout_faults_instead_of_reversing);
     RUN_TEST(test_stale_stop_evidence_never_permits_the_reversal);
