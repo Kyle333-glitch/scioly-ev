@@ -73,6 +73,21 @@ enum class FaultCode : uint8_t {
     // software-only identity: it carries no measured electrical meaning, so its
     // response is the same safe fault stop as every other non-electrical fault.
     TravelStalled,
+    // Accepted powered travel stopped showing encoder progress: control cycles
+    // kept authorizing a driving mode while the signed tick count stopped
+    // advancing in the expected direction for the configured
+    // `RunPhaseConfig::encoderProgressTimeoutS`. This is the bounded response to
+    // lost feedback (frozen counts, wrong-sign counts, or incoherent counts
+    // under power) - the frozen-encoder defect the October audits record. It is
+    // deliberately distinct from `TravelStalled`: that bound watches the
+    // plan-owned remaining distance from brake entry and names a vehicle that
+    // stopped short of its landmark, while this watches raw tick progress
+    // during any accepted powered travel and names lost feedback. A fresh
+    // sample of an unchanged count is not progress here, and neither is an
+    // invalid velocity estimate a reason to pause: the monitor consumes ticks
+    // only. It is a software-only identity with the same safe fault stop as
+    // every other non-electrical fault.
+    EncoderFeedbackLost,
 };
 
 // A fault together with when it happened and whether it is latched. Fault

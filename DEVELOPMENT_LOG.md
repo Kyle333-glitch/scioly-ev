@@ -8010,3 +8010,80 @@ Full source/caller/coverage ledger and exact command statuses/resources:
 .agent-work/reviews/s18c-m1-2026-10-10/; checkpoint verification:
 .agent-work/utilities/U1-S18C-M1-checkpoint.md. Original D54-D57 unchanged.
 Next eligible action is resume S18C; NOT started here. STOP after prerequisite.
+
+## D59 / S18C-RESUME - 2026-10-11 - Bounded travel on lost encoder feedback
+
+**S18C-RESUME PASS; conditional checkpoint authorized after complete staged
+review. Parent S18C is therefore complete; cumulative S18 (A/B/C) is complete
+as software.** Entry was main at c5553aa67266aaf5aac9712aa5a10a8eb53c09e7
+(S18C-M1, ISR-owned decoder reset atomic), 21 ahead / 0 behind origin/main,
+tracked tree clean except the authorized work below. Both untracked October
+6/8 audits remain byte-identical and unstaged. No recovery import, hardware
+action, upload, calibration promotion or push.
+
+P4 (October 6 H7 / October 8 H4) reproduced on entry HEAD with a temporary
+actual-composition suite (real decoder/estimator/controller/run/authority via
+ScenarioHarness, synthetic Measured fixtures): moving history, then frozen
+counts for 1000 ms (50 cycles) sustained 50/50 powered forward authorizations
+with the zero-speed claim present and no fault - 1/1 passed as the unsafe
+behavior. The temporary suite was deleted after the log was preserved
+(.agent-work/reviews/s18c-resume/p4-prerepair-repro.log); the committed
+regressions assert the bounded fault instead. A standalone MinGW probe binary
+could not be built in this sandbox (even a trivial file fails there), so the
+Unity reproduction is the before-evidence, not a re-run of old probe logs.
+
+Feedback-loss contract: ACTIVE POWERED TRAVEL is the authority's returned
+driving command (previous cycle's fact at evaluation); REQUEST (regulator
+effort/intention) never suffices; progress is a net signed tick advance >= 1
+in the leg's expected direction through the measured polarity; dropouts,
+placeholders, and unmeasured polarity pause rather than fault; the interval
+starts at the first accepted authorization (startup allowance = full bound)
+and re-baselines on every coherent advance; non-powered cycles neither
+consume nor renew it (no toggle bypass); violation latches
+FaultCode::EncoderFeedbackLost via the existing observed-fault path with
+driver-first/feedback-second/duration-last priority and the single Disable
+stop; reset clears the monitor without discharging the S18A barrier.
+
+Minimum policy: new pure EncoderProgressMonitor.h (accumulated powered time
+without progress, dtMs-based and wrap-safe); RunPhaseConfig gains measured
+encoderProgressTimeoutS with NonPositiveEncoderProgress refusal (no new check
+ID, 16-check vocabulary and mask unchanged); production placeholder
+kPlannedEncoderProgressTimeoutS = 0.5 s Provisional (25 periods; a software
+exposure budget, not a physical claim; P-H5/H7/H9 own the measurement);
+runtime evaluates before the run policy and stores the authorized-powered
+fact; harness mirrors the ordering; schema stays v3 with one new fault
+spelling. Three older frozen-count expectations corrected with explanation
+(two scripted starvation cases and the S18B planted frozen case now end at
+the feedback bound, which supersedes the S18B-era deliberate non-detection).
+
+P7 (October 6 M16 / October 8 M7) resolved by Option B without a model
+rewrite or wire change: kRunTimingModelValidated stays false, timingReady
+false owns no cruise/delay/refusal, and the structural omissions (one ramp
+pair over rule distance vs two stopped execution legs with margins, second
+ramps, ceilings, dwells, interaction timing) plus the two-gate enablement
+rule are now stated at the flag, the plan inputs, the estimator arithmetic,
+the architecture, and the limitations. Existing timing-independence and
+serial-independence suites pin the behavior.
+
+New regressions: 22-case test_encoder_progress_monitor (startup, forward,
+reverse, dwell exemption, fault/recovery, timing boundaries, config) plus 10
+scenario integration cases (frozen forward/reverse, wrong sign, intermittent
+progress, dropout pause, untriggered exemption, wrap, large gap, stalled
+clock, fault/reset/barrier) and the fault sweep/vocabulary/policy extensions.
+All registered, zero orphans (38 suites / 0 problems).
+
+Final checks on the exact staged content: native **740/740 in 38 suites**
+(708 + 32), three clean firmware builds **SUCCESS / 0 warnings** at RAM/Flash
+nano_r4 **7500/77152** (+32/+224), bench **7700/84664** (+32/+224),
+bench-watchdog **7692/84004** (+32/+224), telemetry **142/142 OK**, diff check
+clean, each command exit 0. S14/S15/S16/S18A/S18B/S18C-M1 suites green;
+production still unarmable on Provisional values; no warning suppressed and
+no safety assertion weakened. No physical evidence is promoted; the timeout,
+scale, polarity, braking, and timing facts stay unmeasured.
+
+Full ledger, contract, and October 8 dispositions:
+.agent-work/stages/S18C-RESUME.md; raw logs:
+.agent-work/reviews/s18c-resume/; checkpoint verification:
+.agent-work/utilities/U1-S18C-RESUME-checkpoint.md. Original D54-D58 and
+S18C.md (BLOCKED) unchanged. Next eligible action is independent cumulative
+S18 review; no next stage started here. STOP after this stage.

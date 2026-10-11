@@ -6,6 +6,7 @@
 #include <CompetitionStateMachine.h>
 #include <ControlScheduler.h>
 #include <ControlTickOrder.h>
+#include <EncoderProgressMonitor.h>
 #include <HostGreetPolicy.h>
 #include <Motion.h>
 #include <MotionChainReset.h>
@@ -488,6 +489,18 @@ private:
     ev::NearZeroVerifier recoveryStopVerifier_;
     ev::ControlScheduler scheduler_;
     ev::ControlTickOrderGuard orderGuard_;
+    // The feedback-progress supervision (S18C/P4): bounds accepted powered
+    // travel without observed encoder progress. Stepped every tick from the
+    // previous cycle's authorized-powered fact (stage 4 faults before the run
+    // policy, so a violation stops this same cycle's authorization); reset at
+    // the new-run boundary with everything else. Inert while its timeout is a
+    // placeholder, so production gains no new behavior until the bound is
+    // physically qualified - and no run may be armed on it either.
+    ev::EncoderProgressMonitor feedbackMonitor_;
+    // Whether the previous control tick's authorized command was a driving
+    // mode. The monitor's "accepted powered travel" fact: a request the
+    // boundary refused never starts or sustains the interval.
+    bool lastCycleAuthorizedPowered_ = false;
 
     // Per-run measurement state. The encoder reference and the run origin are
     // established at `begin()` and at a later run boundary; the harness's rule

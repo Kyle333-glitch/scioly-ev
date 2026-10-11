@@ -211,6 +211,8 @@ inline const char* telemetryFaultName(FaultCode code) {
             return "RunDurationExceeded";
         case FaultCode::TravelStalled:
             return "TravelStalled";
+        case FaultCode::EncoderFeedbackLost:
+            return "EncoderFeedbackLost";
     }
     return "?";
 }

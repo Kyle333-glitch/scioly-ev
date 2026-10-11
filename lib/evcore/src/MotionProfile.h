@@ -497,6 +497,18 @@ inline RunTimingPlan refusedTimingPlan(RunTimingPlanStatus status) {
 
 // Builds the diagnostic estimate for one announced run.
 //
+// The estimate is deliberately diagnostic and unvalidated (S18C/P7): it models
+// the whole rule-geometry travel as one start/stop trip with a single
+// acceleration/deceleration pair, omitting the execution plan's extra
+// forward-stop margin on both legs, the stop and reversal between the legs,
+// the second acceleration/deceleration pair, the per-phase strategy ceilings
+// and their ramps, and the stop-verification dwells and bottle-interaction
+// timing. Reserving the reversal dwell alone does not account for these
+// differences. Enabling the model for control therefore requires a
+// model-structure review against two-leg execution arithmetic plus the
+// physical Run Time comparison (P-H14 step 12); no flag flip repairs the
+// structure.
+//
 // The algebra, and why it is exact rather than searched: for a cruise speed at
 // or below the peak of the triangular profile, the travel time is
 // `d/v + v*(1/(2a) + 1/(2d))`, which is decreasing in `v`. Setting it equal to

@@ -316,7 +316,7 @@ void test_fault_response_is_independent_of_fault_identity(void) {
     const ev::FaultCode codes[] = {
         ev::FaultCode::None,           ev::FaultCode::InvalidRunConfig,
         ev::FaultCode::ProvisionalCalibration, ev::FaultCode::MissingSafetyLimits,
-        ev::FaultCode::InvalidMotorEffort,
+        ev::FaultCode::InvalidMotorEffort, ev::FaultCode::EncoderFeedbackLost,
     };
     for (ev::FaultCode code : codes) {
         TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultStopPolicy::Disable),

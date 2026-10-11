@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <CompetitionStateMachine.h>
+#include <EncoderProgressMonitor.h>
 #include <Motion.h>
 #include <MotionChainReset.h>
 #include <MotionProfile.h>
@@ -106,6 +107,12 @@
 //      estimator answers by `ev::composeStopEvidence()`, and the run axis -
 //      announced geometry, polarity-applied position, and the two remaining
 //      distances - is computed by `RunAxis.h`.
+//   9. the feedback-progress supervision bounds accepted powered travel without
+//      observed encoder progress (`ev::EncoderProgressMonitor`, S18C/P4),
+//      stepped every cycle from the previous cycle's authorized-powered fact
+//      and reported as an observed fault with driver-first/feedback-second
+//      priority, exactly as the production vehicle layer orders it; a new-run
+//      boundary resets it with everything else.
 //
 // Where those rules live
 //
@@ -124,6 +131,8 @@
 //     ev::tickPolarityAgrees()               SafetyLimits.h
 //     ev::directionalCommandPolarityAgrees() SafetyLimits.h
 //     ev::estimatorWindowCoverableAtCadence() VelocityEstimator.h
+//     ev::EncoderProgressMonitor / ev::encoderProgressFault()
+//                                            EncoderProgressMonitor.h
 //
 //   A change to any of those decisions changes the scenarios with it, which is
 //   why they are not written down a second time here.
@@ -238,6 +247,18 @@ constexpr double kFixtureFinalApproachDistanceM = 0.5;
 // brake-entry, a frozen plant) reaches it, and this fixture value keeps the
 // nominal runs at their pre-S18B phase budgets rather than ending them early.
 constexpr double kFixtureTravelStallTimeoutS = 2.0;
+
+// The feedback-progress bound (S18C/P4): how long accepted powered travel may
+// go without a signed tick advance before the harness latches
+// `EncoderFeedbackLost`, mirroring the production vehicle layer. A synthetic
+// host-only `Measured` fixture like every other value here - never a
+// production promotion: it validates the software response (bounded fault,
+// safe stop, no false trip on healthy progress), not the physical timeout,
+// which remains unmeasured (P-H5/H7/H9). Generous relative to the fixture
+// cadence (25 control periods): nominal scripted legs advance every cycle, so
+// only a scenario that deliberately freezes or misdirects the counts reaches
+// it.
+constexpr double kFixtureEncoderProgressTimeoutS = 0.5;
 
 // The execution plan's own measured fixtures: how far either side of the nominal
 // contact position the touch may credibly be reported, and how far beyond the
@@ -390,8 +411,9 @@ inline ScenarioFixtures nominalFixtures() {
                            measuredValue(kFixturePushTimeoutS),
                            measuredValue(kFixtureReverseTimeoutS),
                            measuredValue(kFixtureFinalApproachTimeoutS),
-                           measuredValue(kFixtureFinalStopTimeoutS),
-                           measuredValue(kFixtureTravelStallTimeoutS),
+                            measuredValue(kFixtureFinalStopTimeoutS),
+                            measuredValue(kFixtureTravelStallTimeoutS),
+                            measuredValue(kFixtureEncoderProgressTimeoutS),
                            measuredValue(kFixtureFinalApproachDistanceM),
                            fixtureStopConfig(), measuredValue(kFixtureMinimumCruiseMps),
                            measuredValue(kFixtureBottlePhaseCeilingMps),
@@ -901,6 +923,10 @@ public:
         // may discharge the barrier the shared reset deliberately preserved
         // (S18A/P2). Live evidence re-establishes it.
         recoveryStopVerifier_.reset();
+        // The feedback-progress supervision restarts with the run: no previous
+        // attempt's ticks or powered time may bound the next run (S18C/P4).
+        feedbackMonitor_.reset();
+        lastCommandWasDrive_ = false;
         return report;
     }
 
@@ -1037,10 +1063,23 @@ public:
             ev::runDurationClockActive(runClock, run_.phase(), run_.faultCode()),
             runClock.actuatedAtMs, nowMs_, fixtures_.limits.maxRunDurationS);
         // A fault a scenario stated is kept first, so a scripted fault is never
-        // masked by a run that also overran its bound this cycle.
-        inputs.detectedFault = script.fault != ev::FaultCode::None
-                                   ? script.fault
-                                   : ev::runDurationFault(runDuration);
+        // masked by a run that also overran its bound this cycle. The
+        // feedback-progress supervision (S18C/P4) is evaluated here, before the
+        // run policy, from the previous cycle's accepted-powered fact - the
+        // same ordering the production vehicle layer uses - so a frozen count
+        // under an authorized drive latches `EncoderFeedbackLost` this same
+        // cycle. Priority is scripted fault first, then feedback (active-travel
+        // safety), then the run-scoped duration backstop.
+        const bool feedbackViolated = feedbackMonitor_.update(
+            encoderTicks_, script.sensorSampleFresh, lastCommandWasDrive_, legForward_,
+            fixtures_.positiveTicksDirection, fixtures_.phase.encoderProgressTimeoutS,
+            dtMs);
+        const ev::FaultCode feedbackFault = ev::encoderProgressFault(feedbackViolated);
+        inputs.detectedFault =
+            script.fault != ev::FaultCode::None
+                ? script.fault
+                : (feedbackFault != ev::FaultCode::None ? feedbackFault
+                                                        : ev::runDurationFault(runDuration));
 
         const ev::RunStatus status = run_.update(nowMs_, inputs);
 
@@ -1366,6 +1405,11 @@ private:
     // discharges on a freshly observed standstill here exactly as there
     // (S18A/P2). Reset at the new-run boundary with everything else.
     ev::NearZeroVerifier recoveryStopVerifier_;
+    // The feedback-progress supervision, mirroring the production vehicle
+    // layer's own member: stepped every cycle from the previous cycle's
+    // authorized-powered fact, reset at the new-run boundary with everything
+    // else (S18C/P4).
+    ev::EncoderProgressMonitor feedbackMonitor_;
     ActuatorBoundary actuator_;
 
     std::vector<CycleRecord> trace_;

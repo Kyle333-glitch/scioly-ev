@@ -220,7 +220,12 @@ inline RunAxisPosition runAxisPositionM(int32_t originTicks, int32_t currentTick
 // the vehicle travels to its execution plan's own targets, which are further out
 // than this rule course (`RunExecutionPlan.h`), and reconciling the two for the
 // timing estimate is a separate, owned decision rather than something this
-// arithmetic may assume.
+// arithmetic may assume. In particular the diagnostic timing estimate built on
+// this distance charges one acceleration/deceleration pair over the whole
+// out-and-back, not one pair per execution leg separated by the intermediate
+// stop (S18C/P7): that structural gap is documented where the estimate is
+// gated (`VehicleConfig.h::kRunTimingModelValidated`) and must be reviewed
+// before the estimate may ever control a run.
 inline double plannedTravelDistanceM(const RunAxisGeometry& geometry) {
     return geometry.bottleLinePositionM() + geometry.bottleLineDistanceM;
 }

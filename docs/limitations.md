@@ -125,7 +125,14 @@ Consequences that are easy to forget:
   (`vehicleConfig::kRunTimingModelValidated` is false) it may not choose a run's
   cruise, its numbers may not become a run's deliberate delay (that is the run's
   execution plan's `initialDelayS`, and it is 0), and an announced Target Time it
-  cannot meet does not invalidate an otherwise legal run. Every limit it would use
+  cannot meet does not invalidate an otherwise legal run. Its structure is
+  itself unvalidated (S18C/P7): one acceleration/deceleration pair over the
+  whole rule-geometry out-and-back, omitting the execution plan's forward-stop
+  margin on both legs, the intermediate stop and reversal, the second ramp
+  pair, the per-phase strategy ceilings and ramps, and the dwell and
+  bottle-interaction timing - so its numbers must never be read as a validated
+  elapsed-time prediction, and enabling it requires a model-structure review
+  plus the physical comparison, not a flag flip. Every limit it would use
   is still a placeholder, so nothing about a run's timing has been observed.
   Removed by: P-H14 step 12 - several announced Target Times on a marked course,
   with the diagnostic cruise/delay from the `OK,cmd=announce` line and the
@@ -368,7 +375,8 @@ or what remains provisional about the numbers it justified.
 - **Every calibration, limit, run-policy and control value is `Provisional`**
   (`src/VehicleConfig.h` section 2): distance per encoder tick, brake offsets,
   effort ceiling, cruise/accel/decel, every regulator gain, every phase timeout,
-  every near-zero threshold and dwell, the final-approach distance, and the three
+  the travel-stall and feedback-progress bounds, every near-zero threshold and
+  dwell, the final-approach distance, and the three
   encodings of the polarity fact. None is a measurement
   (`VERIFIED_STATE.md` #6, #8, #9). The polarity sign behind those three
   encodings was **observed informally** on 2026-10-02 (#3, #4) but is **not

@@ -62,6 +62,7 @@ went to the de-energized state.
 | `disarm` during a run | `DisarmedDuringRun`, motion stopped |
 | a sequencing inconsistency, if one can be provoked | `RunSequencingError` |
 | a run held past its validated maximum duration (S10) | `RunDurationExceeded`, motion stopped - **only while `maxRunDurationS` is `Measured`**; the shipped limit is `Provisional`, so a placeholder can never stop a run and this injection is unexercisable on the shipped configuration |
+| accepted powered travel without encoder progress (frozen, wrong-sign, or incoherent counts under an authorized drive) | `EncoderFeedbackLost`, motion stopped - **only while `encoderProgressTimeoutS` is `Measured`**; the shipped bound is `Provisional` (`kPlannedEncoderProgressTimeoutS`), so a placeholder can never stop a run and this injection is unexercisable on the shipped configuration. Like `TravelStalled` it needs a run, so it requires the same calibration promotion; unlike `TravelStalled` it applies to any accepted powered travel, not only from brake entry |
 | an out-of-range effort presented (bench-only injection) | `InvalidMotorEffort`, refused |
 
 For `RunSequencingError`, if there is no honest way to provoke it from outside the
@@ -110,11 +111,14 @@ and each is expected to stop the motor - if it does not, that is a hard finding.
    the motor keeps driving. A claimed stop with the vehicle still moving is the
    finding this protocol exists to expose.
 
-For either, if no `FaultCode` covers it (check `lib/evcore/src/VehicleState.h`),
-record the observed behavior and "encoder-fault enforcement pending" as a
-**pending software change** - the same honest outcome the electrical faults use.
-Do not mark it passing, and do not continue to H10 with the zero-speed gate known
-to be breakable while unguarded.
+For either, the covering `FaultCode` is now `EncoderFeedbackLost` (S18C/P4):
+record the observed behavior against that identity - whether it latched within
+its bound, whether the motor command went to the de-energized state, and the
+loss-injection-to-OFF latency. If the bound is still `Provisional`, record
+"encoder-fault enforcement pending measurement" as a **pending qualification**
+- the same honest outcome the electrical faults use. Do not mark it passing,
+and do not continue to H10 with the zero-speed gate known to be breakable
+while unguarded.
 
 ## Held constant
 

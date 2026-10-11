@@ -118,6 +118,7 @@ const char* faultName(ev::FaultCode fault) {
         case ev::FaultCode::DriverFaultBar: return "DriverFaultBar";
         case ev::FaultCode::RunDurationExceeded: return "RunDurationExceeded";
         case ev::FaultCode::TravelStalled: return "TravelStalled";
+        case ev::FaultCode::EncoderFeedbackLost: return "EncoderFeedbackLost";
     }
     return "?";
 }
@@ -657,6 +658,7 @@ void test_every_fault_identity_is_latched_in_every_phase_and_stops_the_boundary(
         ev::FaultCode::PhaseTimeout,         ev::FaultCode::ReversalNotVerified,
         ev::FaultCode::DisarmedDuringRun,    ev::FaultCode::RunSequencingError,
         ev::FaultCode::RunDurationExceeded,  ev::FaultCode::TravelStalled,
+        ev::FaultCode::EncoderFeedbackLost,
     };
 
     for (const ev::RunPhase phase : phases) {
@@ -1067,6 +1069,7 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
         ev::RunPhase phase;
         CycleScript starved;
         const char* name;
+        ev::FaultCode expectedFault;
     };
 
     // Never stop reporting earlier evidence, only never provide the evidence the
@@ -1083,22 +1086,31 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
     pushStarved.captureComplete = true;
 
     // No contact, no capture, no completed push, no closing distance, no target
-    // point and no verified final stop. Each phase waits under its own bound and
-    // faults rather than waiting forever or guessing. Every one of these cases is
-    // outside the leg's brake offset, so the run's brake-entry travel-progress
-    // bound (S18B) does not apply and each phase's own bound is what ends the run.
+    // point and no verified final stop. Cases with a moving encoder wait under
+    // the phase's own bound; cases with a frozen encoder under authorized
+    // powered travel now end at the feedback-progress bound (S18C/P4) with its
+    // own identity instead of waiting out the phase. Every one of these cases
+    // is outside the leg's brake offset, so the run's brake-entry
+    // travel-progress bound (S18B) does not apply to any of them.
     const Case cases[] = {
-        {ev::RunPhase::Approach, rolling(), "Approach without contact"},
-        {ev::RunPhase::Capture, captureStarved, "Capture without engagement"},
-        {ev::RunPhase::Push, pushStarved, "Push without completion"},
+        {ev::RunPhase::Approach, rolling(), "Approach without contact",
+         ev::FaultCode::PhaseTimeout},
+        {ev::RunPhase::Capture, captureStarved, "Capture without engagement",
+         ev::FaultCode::PhaseTimeout},
+        {ev::RunPhase::Push, pushStarved, "Push without completion",
+         ev::FaultCode::PhaseTimeout},
         // A vehicle that never moves off the bottle line: the reverse leg never
-        // closes its distance.
-        {ev::RunPhase::Reverse, CycleScript(), "Reverse without movement"},
+        // closes its distance, and the frozen counts under authorized reverse
+        // drive fault the feedback bound rather than the phase bound.
+        {ev::RunPhase::Reverse, CycleScript(), "Reverse without movement",
+         ev::FaultCode::EncoderFeedbackLost},
         {ev::RunPhase::FinalApproach, CycleScript(),
-         "FinalApproach without reaching the target point"},
+         "FinalApproach without reaching the target point",
+         ev::FaultCode::EncoderFeedbackLost},
         // A final stop that is never verified: the encoder keeps moving, so the
         // explicit zero-speed claim is never earned.
-        {ev::RunPhase::FinalBrake, rolling(), "FinalBrake without a verified stop"},
+        {ev::RunPhase::FinalBrake, rolling(), "FinalBrake without a verified stop",
+         ev::FaultCode::PhaseTimeout},
     };
 
     for (const Case& testCase : cases) {
@@ -1112,7 +1124,7 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
         const CycleRecord faulted = starveUntilFault(harness, testCase.starved, 3000U);
         TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::RunPhase::Fault),
                                       static_cast<int>(faulted.phase), testCase.name);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::FaultCode::PhaseTimeout),
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(testCase.expectedFault),
                                       static_cast<int>(faulted.faultOfRecord), testCase.name);
         expectTraceInvariants(harness);
     }
@@ -1207,12 +1219,17 @@ void test_a_vehicle_that_never_moves_again_never_finishes_the_reverse_leg(void) 
     TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Reverse, driver));
 
     // The reverse travel is asked for and authorized, but the encoder never
-    // moves: the closing distance never closes and the leg's own bound is what
-    // ends the run. (The reverse leg is still outside its brake offset here, so
-    // the brake-entry travel-progress bound does not apply.)
+    // moves: the frozen counts under authorized drive fault the
+    // feedback-progress bound (S18C/P4) with its own identity rather than
+    // waiting out the leg's own bound. (The reverse leg is still outside its
+    // brake offset here, so the brake-entry travel-progress bound does not
+    // apply; the feedback bound is the one that observes frozen counts under
+    // power anywhere.)
     CycleScript stuck;
     const CycleRecord faulted = starveUntilFault(harness, stuck, 1000U);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::PhaseTimeout),
                           static_cast<int>(faulted.faultOfRecord));
     for (const CycleRecord& record : harness.trace()) {
         if (record.phase == ev::RunPhase::Reverse) {
@@ -2448,11 +2465,14 @@ void test_a_planted_ideal_follower_stops_short_and_faults_with_its_own_identity(
     expectTraceInvariants(harness);
 }
 
-void test_a_planted_frozen_run_makes_no_progress_and_the_phase_bound_ends_it(void) {
-    // A vehicle that never moves outside brake entry is not a brake-entry
-    // short-stop: the travel-progress bound does not apply before brake entry, so
-    // the phase's own bound is the bounded terminal outcome and no landmark is
-    // claimed. This is the "no meaningful position progress" case.
+void test_a_planted_frozen_run_makes_no_progress_and_the_feedback_bound_ends_it(void) {
+    // A vehicle that never moves under authorized powered travel is a lost
+    // feedback fault, not a phase timeout: the feedback-progress bound
+    // (S18C/P4) observes frozen counts under power anywhere, including outside
+    // brake entry where the S18B travel-progress bound does not apply. This
+    // supersedes the S18B-era expectation that the phase's own bound ends a
+    // frozen run: S18B deliberately left frozen-encoder detection to S18C, and
+    // S18C now detects it with its own identity. No landmark is claimed.
     ScenarioHarness harness(plantedFixtures());
     PlantModel plant(PlantConfig{1.0, 1.0, /*frozen=*/true});
     harness.attachPlant(plant);
@@ -2460,7 +2480,9 @@ void test_a_planted_frozen_run_makes_no_progress_and_the_phase_bound_ends_it(voi
     NominalDriver driver;
 
     const CycleRecord faulted = plantedDriveUntilFault(harness, driver, 1000U);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::PhaseTimeout),
                           static_cast<int>(faulted.faultOfRecord));
     TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::TravelStalled),
                           static_cast<int>(faulted.faultOfRecord));
@@ -2536,6 +2558,279 @@ void test_a_planted_reverse_leg_that_stops_short_faults_with_its_own_identity(vo
     expectTraceInvariants(harness);
 }
 
+// --- The feedback-progress bound (S18C/P4) ----------------------------------
+//
+// Frozen, wrong-sign, or incoherent encoder counts under authorized powered
+// travel fault `EncoderFeedbackLost` with the authority's single fault stop.
+// Every count below is a synthetic host fixture, never a vehicle measurement;
+// the suite proves the software response, not the physical timeout.
+
+// Frozen forward counts under authorized drive fault with the run's own
+// identity, a safe output, and no false progression. This is the committed
+// regression for the October H7/H4 defect: 50 frozen cycles once sustained
+// 50/50 powered forward requests with no fault (S18C-RESUME pre-repair
+// reproduction); now the 26th powered cycle without an edge ends the run.
+void test_frozen_forward_counts_fault_with_the_feedback_identity(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    // Moving history first: 20 cycles of real progress.
+    for (uint32_t cycle = 0U; cycle < 20U; ++cycle) {
+        CycleScript moving;
+        moving.encoderAdvanceTicks = evscenario::kFixtureTicksPerCycle;
+        harness.step(moving);
+    }
+    // Then frozen counts with fresh samples until the run faults.
+    CycleScript frozen;
+    const CycleRecord faulted = starveUntilFault(harness, frozen, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(faulted.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::TravelStalled),
+                          static_cast<int>(faulted.faultOfRecord));
+    // The stop is the authority's own single fault response.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    TEST_ASSERT_EQUAL_UINT16(0U, faulted.commandedPermille);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(faulted.commandedDirection));
+    // Never a forward completion, a reversal, or Done on a frozen run.
+    for (const CycleRecord& record : harness.trace()) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::Reverse),
+                                      static_cast<int>(record.phase),
+                                      "a frozen run reversed");
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::Done),
+                                      static_cast<int>(record.phase),
+                                      "a frozen run completed");
+    }
+    expectTraceInvariants(harness);
+}
+
+// The reverse leg has the same contract: frozen counts under authorized
+// reverse drive fault with the same identity and never reach the Target
+// Point or Done.
+void test_frozen_reverse_counts_fault_with_the_feedback_identity(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Reverse, driver),
+                             "the run never reached the reverse leg");
+    CycleScript frozen;
+    const CycleRecord faulted = starveUntilFault(harness, frozen, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(faulted.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    for (const CycleRecord& record : harness.trace()) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::FinalBrake),
+                                      static_cast<int>(record.phase),
+                                      "a frozen reverse leg claimed the final stop");
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::Done),
+                                      static_cast<int>(record.phase),
+                                      "a frozen reverse leg completed");
+    }
+    expectTraceInvariants(harness);
+}
+
+// Wrong-sign counts are not progress: backwards ticks under forward power
+// never reset the interval and the run faults rather than driving on.
+void test_wrong_sign_counts_under_forward_power_fault(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    CycleScript backwards;
+    backwards.encoderAdvanceTicks = -evscenario::kFixtureTicksPerCycle;
+    const CycleRecord faulted = starveUntilFault(harness, backwards, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    expectTraceInvariants(harness);
+}
+
+// Intermittent real progress keeps the run alive: one advancing cycle in
+// twenty is slow but genuine, and the interval restarts on every edge.
+void test_intermittent_progress_under_power_never_faults_the_feedback_bound(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    for (uint32_t cycle = 0U; cycle < 200U; ++cycle) {
+        CycleScript script;
+        script.encoderAdvanceTicks =
+            (cycle % 20U == 19U) ? evscenario::kFixtureTicksPerCycle : 0;
+        const CycleRecord& record = harness.step(script);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "genuine intermittent progress faulted");
+        if (record.phase == ev::RunPhase::Fault) {
+            TEST_ASSERT_TRUE_MESSAGE(false, "no fault expected on intermittent progress");
+        }
+    }
+    expectTraceInvariants(harness);
+}
+
+// A long sensor dropout pauses the feedback bound instead of faulting on
+// evidence the run does not have: no sample is not a frozen count. The run
+// keeps asking (its intention is unchanged) while the boundary denies the
+// stale data, and the phase bound - not the feedback bound - remains the
+// terminal outcome for that case.
+void test_a_long_dropout_pauses_the_feedback_bound(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    CycleScript dropout;
+    dropout.sensorSampleFresh = false;
+    for (uint32_t cycle = 0U; cycle < 200U; ++cycle) {
+        const CycleRecord& record = harness.step(dropout);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "a dropout is not a frozen count");
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Approach),
+                          static_cast<int>(harness.phase()));
+    expectTraceInvariants(harness);
+}
+
+// An armed run that has not been triggered asks for no powered travel, so
+// frozen counts there never fault: intentional stationary phases are exempt
+// by construction, not by timeout.
+void test_an_untriggered_armed_run_with_frozen_counts_never_faults(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    CycleScript frozen;
+    // The first cycle carries the arming into the run policy; after that the
+    // untriggered run waits in Armed with no powered request.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Armed),
+                          static_cast<int>(harness.step(frozen).phase));
+    for (uint32_t cycle = 0U; cycle < 200U; ++cycle) {
+        const CycleRecord& record = harness.step(frozen);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::FaultCode::None),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "an untriggered run must not fault for standing still");
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Armed),
+                          static_cast<int>(harness.phase()));
+    expectTraceInvariants(harness);
+}
+
+// The bound is wrap-safe: a run frozen across the `millis()` uint32 wrap
+// faults with the same identity once its powered allowance expires.
+void test_a_frozen_run_across_the_timestamp_wrap_faults(void) {
+    ScenarioHarness harness(fixtures());
+    harness.primeClock(0xFFFFFF00U);
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach across the wrap");
+    CycleScript frozen;
+    const CycleRecord faulted = starveUntilFault(harness, frozen, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    expectTraceInvariants(harness);
+}
+
+// A large scheduling gap without progress is not forgiven: one 5 s jump
+// under power faults at once rather than granting a fresh allowance.
+void test_a_large_scheduling_gap_without_progress_faults_at_once(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    CycleScript gap;
+    gap.scriptedClock = true;
+    gap.clockAdvanceMs = 5000;
+    const CycleRecord faulted = starveUntilFault(harness, gap, 10U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    expectTraceInvariants(harness);
+}
+
+// A repeated timestamp accumulates no powered time: 100 frozen cycles at a
+// stalled clock fault nothing, because a clock that never advances never
+// consumes the allowance.
+void test_a_stalled_clock_with_frozen_counts_faults_nothing(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    CycleScript stalled;
+    stalled.scriptedClock = true;
+    stalled.clockAdvanceMs = 0;
+    for (uint32_t cycle = 0U; cycle < 100U; ++cycle) {
+        const CycleRecord& record = harness.step(stalled);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::FaultCode::None),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "a stalled clock must not consume the allowance");
+    }
+    expectTraceInvariants(harness);
+}
+
+// Fault, reset, and re-arm after lost feedback: the fault latches and stops
+// the boundary, the reset clears the monitor without discharging the S18A
+// direction barrier, and a fresh run with movement travels again.
+void test_a_feedback_fault_latches_and_a_reset_preserves_the_barrier(void) {
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, driver),
+                             "the run never reached Approach");
+    TEST_ASSERT_TRUE_MESSAGE(stepUntilDirectionAuthorized(harness, driver,
+                                                          ev::PoweredDirection::Forward),
+                             "forward drive was never authorized");
+    CycleScript frozen;
+    const CycleRecord faulted = starveUntilFault(harness, frozen, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    TEST_ASSERT_FALSE(harness.authority().isArmed());
+
+    // The reset clears the fault and the monitor but preserves the powered
+    // direction the fault interrupted: software reset proves no stop.
+    const ev::MotionChainResetReport report = harness.resetForNewRun();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(report.clearedFault));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::Forward),
+                          static_cast<int>(harness.authority().lastAuthorizedDirection()));
+
+    // A fresh announcement arms, but the opposite direction is still refused
+    // until a fresh verified stop discharges it through the zero-speed path.
+    announceAndArm(harness);
+    CycleScript hostile = driver.next(harness);
+    hostile.hasHostileRequest = true;
+    hostile.hostileRequest = ev::MotorEffort(ev::MotorMode::DriveReverse, 300U);
+    const CycleRecord& refused = harness.step(hostile);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::DeniedUnsafeDirectionChange),
+                          static_cast<int>(refused.outcome));
+
+    // And a fresh run with movement travels forward again: the cleared monitor
+    // grants the full allowance anew rather than faulting on the old attempt.
+    NominalDriver secondDriver;
+    TEST_ASSERT_TRUE_MESSAGE(stepUntilDirectionAuthorized(harness, secondDriver,
+                                                          ev::PoweredDirection::Forward),
+                             "a fresh run with movement never re-authorized forward drive");
+    expectTraceInvariants(harness);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -2574,8 +2869,18 @@ int main(int, char**) {
     RUN_TEST(test_a_capture_phase_ceiling_slows_only_capture_through_the_one_shaper);
     RUN_TEST(test_a_planted_coasting_run_reaches_done_through_the_real_chain);
     RUN_TEST(test_a_planted_ideal_follower_stops_short_and_faults_with_its_own_identity);
-    RUN_TEST(test_a_planted_frozen_run_makes_no_progress_and_the_phase_bound_ends_it);
+    RUN_TEST(test_a_planted_frozen_run_makes_no_progress_and_the_feedback_bound_ends_it);
     RUN_TEST(test_a_planted_overshooting_run_still_reaches_done);
     RUN_TEST(test_a_planted_reverse_leg_that_stops_short_faults_with_its_own_identity);
+    RUN_TEST(test_frozen_forward_counts_fault_with_the_feedback_identity);
+    RUN_TEST(test_frozen_reverse_counts_fault_with_the_feedback_identity);
+    RUN_TEST(test_wrong_sign_counts_under_forward_power_fault);
+    RUN_TEST(test_intermittent_progress_under_power_never_faults_the_feedback_bound);
+    RUN_TEST(test_a_long_dropout_pauses_the_feedback_bound);
+    RUN_TEST(test_an_untriggered_armed_run_with_frozen_counts_never_faults);
+    RUN_TEST(test_a_frozen_run_across_the_timestamp_wrap_faults);
+    RUN_TEST(test_a_large_scheduling_gap_without_progress_faults_at_once);
+    RUN_TEST(test_a_stalled_clock_with_frozen_counts_faults_nothing);
+    RUN_TEST(test_a_feedback_fault_latches_and_a_reset_preserves_the_barrier);
     return UNITY_END();
 }

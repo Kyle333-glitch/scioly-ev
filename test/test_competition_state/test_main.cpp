@@ -83,7 +83,7 @@ ev::BottleEvidenceConfig fixtureBottleConfig() {
 ev::RunPhaseConfig phaseConfig(double maximumOptionalDelayS) {
     return ev::RunPhaseConfig(
         measured(maximumOptionalDelayS), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(5.0), measured(2.0), measured(1.0),
+        measured(5.0), measured(5.0), measured(2.0), measured(0.5), measured(1.0),
         stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
         measured(0.30), fixtureBottleConfig());
 }
@@ -432,7 +432,7 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     // This machine's own bounds are placeholders, so it may not sequence a run.
     const ev::RunPhaseConfig placeholderDelay = ev::RunPhaseConfig(
         provisional(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10),
         measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(placeholderDelay, reversalConfig(), 1000U);
@@ -658,7 +658,7 @@ void test_a_bound_below_a_millisecond_expires_rather_than_never(void) {
     const ev::RunPhaseConfig shortBounds =
         ev::RunPhaseConfig(measured(0.0), measured(0.0005), measured(1.0), measured(5.0),
                            measured(5.0), measured(5.0), measured(5.0), measured(2.0),
-                           measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+                           measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
                            measured(0.30),
                            measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(shortBounds, reversalConfig(), 1000U);
@@ -1213,7 +1213,7 @@ void test_progress_resets_the_travel_progress_bound(void) {
     // run, so only the stall window is under test.
     const ev::RunPhaseConfig longPushBound(
         measured(0.0), measured(5.0), measured(1.0), measured(10.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0),
         stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
         measured(0.30), fixtureBottleConfig());
     Harness harness(longPushBound, reversalConfig(), 1000U);
@@ -1248,7 +1248,7 @@ void test_progress_resets_the_travel_progress_bound(void) {
 void test_the_phase_bound_keeps_precedence_over_the_travel_progress_bound(void) {
     const ev::RunPhaseConfig shortPushBound(
         measured(0.0), measured(5.0), measured(1.0), measured(1.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(5.0), measured(1.0),
+        measured(5.0), measured(5.0), measured(0.5), measured(1.0),
         stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
         measured(0.30), fixtureBottleConfig());
     Harness harness(shortPushBound, reversalConfig(), 1000U);
@@ -1667,6 +1667,11 @@ void test_reversal_refusals_map_to_faults(void) {
     TEST_ASSERT_EQUAL_INT(
         static_cast<int>(ev::FaultStopPolicy::Disable),
         static_cast<int>(ev::faultStopPolicyFor(ev::FaultCode::RunDurationExceeded)));
+    // Lost encoder feedback under power is a software condition too (S18C/P4):
+    // same identity/response separation, same safe stop.
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::FaultStopPolicy::Disable),
+        static_cast<int>(ev::faultStopPolicyFor(ev::FaultCode::EncoderFeedbackLost)));
 }
 
 // D35: the maximum optional delay is a rule value (rule 8.i), not a
@@ -1679,7 +1684,7 @@ void test_cited_rule_derived_optional_delay_passes(void) {
     TEST_ASSERT_TRUE(ev::optionalDelayProvenanceIsEstablished(citedDelay));
     const ev::RunPhaseConfig config(
         citedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
     ev::CompetitionStateMachine machine(config, reversalConfig());
@@ -1690,7 +1695,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     // Provisional placeholder fails.
     const ev::RunPhaseConfig provisionalConfig(
         provisional(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1702,7 +1707,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     TEST_ASSERT_FALSE(ev::optionalDelayProvenanceIsEstablished(uncitedDelay));
     const ev::RunPhaseConfig uncitedConfig(
         uncitedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(uncitedConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1720,7 +1725,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
 void test_the_bottle_phase_ceilings_are_selected_by_phase(void) {
     const ev::RunPhaseConfig config(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.11), measured(0.22), measured(0.33), fixtureBottleConfig());
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
 
@@ -1761,7 +1766,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // Provisional provenance: refused before anything is sequenced.
     const ev::RunPhaseConfig provisionalCeilings(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         provisional(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalCeilings).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1774,7 +1779,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // cannot complete.
     const ev::RunPhaseConfig zeroCeiling(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.0), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonPositiveStrategyCeiling),
                           static_cast<int>(ev::validateRunPhaseConfig(zeroCeiling).error));
@@ -1782,7 +1787,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // A NaN ceiling is told apart from a non-positive one.
     const ev::RunPhaseConfig nanCeiling(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(0.5), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.30), measured(std::nan("")), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonFiniteValue),
                           static_cast<int>(ev::validateRunPhaseConfig(nanCeiling).error));

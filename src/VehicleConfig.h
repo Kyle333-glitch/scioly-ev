@@ -221,6 +221,23 @@ constexpr double kPlannedMaximumOptionalDelayS = ev::rules2027::kTargetTimeMaxS;
 // and recording several announced Target Times against realised Run Times on a
 // marked course (P-H14 step 12) with the raw data preserved, so the estimate can
 // be compared with what the vehicle actually did.
+//
+// The estimate's structure is itself unvalidated, independently of its limits
+// (S18C/P7, October audits M16/M7): it sizes one acceleration/deceleration pair
+// over the whole rule-geometry out-and-back (`plannedTravelDistanceM()`), while
+// execution travels two legs - forward to the plan's forward stop (Bottle Line
+// plus the measured forward-stop margin, which the rule distance omits on both
+// legs), a stop and reversal between them, then reverse to the Target Point -
+// with two sets of acceleration/deceleration behavior, per-phase strategy
+// ceilings and ramps, stop-verification dwells, and bottle-interaction timing
+// that no kinematic estimate contains. Enabling the flag therefore requires a
+// model-structure review against two-leg execution arithmetic first, and the
+// physical Run Time comparison second; a single empirical correction must not
+// be assumed transferable across the legal parameter space. Until both exist
+// the numbers stay a labelled diagnostic: reported in the announce
+// acknowledgement and the `plan` line (whose `timing_ready` and absent
+// `predicted_s` marker say unavailable rather than zero), never a choice of
+// cruise, delay, or refusal.
 constexpr bool kRunTimingModelValidated = false;
 
 // Bottle-interaction placeholders: how far before the Bottle Start Point the
@@ -278,6 +295,21 @@ constexpr double kPlannedReversalTimeoutS = 3.0;
 // Until then it is Provisional, `validateRunPhaseConfig()` refuses the run
 // policy, and no run can be announced or armed on it.
 constexpr double kPlannedTravelStallTimeoutS = 2.0;
+
+// The feedback-progress bound (S18C/P4): how long accepted powered travel may
+// go without the signed tick count advancing in the expected direction before
+// the run faults `EncoderFeedbackLost` rather than sustaining a drive request
+// on frozen feedback. It is a **placeholder** - no run may be armed on it -
+// and the measurement that replaces it is the slowest reliable edge spacing
+// under conservative loaded operation (both signs), the startup latency from
+// first authorized drive to first edge, and the loaded scheduling gaps, plus a
+// conservative margin (P-H5/H7/H9); it is not a number anyone has measured,
+// and it is deliberately not derived from the bench stall window, the phase
+// bounds, or the brake-entry timeout, which measure different things
+// (command servicing, waiting for evidence, coasting to a landmark).
+// Until then it is Provisional, `validateRunPhaseConfig()` refuses the run
+// policy, and no run can be announced or armed on it.
+constexpr double kPlannedEncoderProgressTimeoutS = 0.5;
 
 // The planned polarity fact, in its three encodings, for the one physical
 // direction the project cannot name yet (`VERIFIED_STATE.md` #4): which way the
@@ -566,7 +598,8 @@ inline ev::RunPhaseConfig runPhaseConfig() {
                               provisionalValue(kPlannedReverseTimeoutS),
                               provisionalValue(kPlannedFinalApproachTimeoutS),
                               provisionalValue(kPlannedFinalStopTimeoutS),
-                              provisionalValue(kPlannedTravelStallTimeoutS),
+                               provisionalValue(kPlannedTravelStallTimeoutS),
+                               provisionalValue(kPlannedEncoderProgressTimeoutS),
                               provisionalValue(kPlannedFinalApproachDistanceM),
                               finalStopVerification(),
                               provisionalValue(kPlannedMinimumCruiseMps),
@@ -709,6 +742,7 @@ inline bool allPromotedValuesCiteEvidence() {
                             provenance::cited(phase.finalApproachTimeoutS) &&
                             provenance::cited(phase.finalStopTimeoutS) &&
                             provenance::cited(phase.travelStallTimeoutS) &&
+                            provenance::cited(phase.encoderProgressTimeoutS) &&
                             provenance::cited(phase.finalApproachDistanceM) &&
                             provenance::cited(phase.minimumPlannedCruiseMps) &&
                             provenance::cited(phase.approachCeilingMps) &&

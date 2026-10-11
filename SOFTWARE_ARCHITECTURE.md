@@ -537,7 +537,16 @@ another's, and none is a run state machine.
     strategy cruise is used), may not become the run's delay (the plan carries
     `timingReady = false` and `initialDelayS = 0`), and may not refuse an otherwise
     legal announcement for an unreachable announced Target Time - it is reported
-    in the `OK,cmd=announce` acknowledgement as the diagnostic it is. The bounded
+    in the `OK,cmd=announce` acknowledgement as the diagnostic it is. The
+    estimate's structure is itself unvalidated (S18C/P7): one
+    acceleration/deceleration pair over the whole rule-geometry out-and-back,
+    omitting the execution plan's forward-stop margin on both legs, the
+    intermediate stop and reversal, the second ramp pair, the per-phase
+    strategy ceilings and ramps, and the dwell and bottle-interaction timing -
+    so it cannot be mistaken for a validated elapsed-time prediction, and no
+    flag flip repairs that structure without a model-structure review against
+    two-leg execution arithmetic plus the physical Run Time comparison (P-H14
+    step 12). The bounded
     `MotionTimingIntent`/`motionTimingSummary()` estimate remains the vocabulary
     for a caller that has limits but no announced run, and all of it uses the one
     `travelDurationS()` arithmetic so the numbers cannot disagree about a trip. The
@@ -874,7 +883,11 @@ dwell interval? It combines exactly the three facts the safety contract names -
   that passed its validated maximum duration (S10, `RunDurationGuard.h`) - a
   whole-run bound, deliberately distinct from the per-phase `PhaseTimeout` - and
   `TravelStalled` for a travel leg that reached brake entry and then stopped
-  advancing toward the landmark its completion needs (S18B).
+  advancing toward the landmark its completion needs (S18B), and
+  `EncoderFeedbackLost` for accepted powered travel that stopped showing
+  encoder progress in the expected direction (S18C/P4,
+  `EncoderProgressMonitor.h`) - frozen, wrong-sign, or incoherent counts under
+  an authorized drive, anywhere, not only at brake entry.
   All of them are software conditions with no measured electrical answer, so
   `faultStopPolicyFor()` maps every one to `Disable`, exactly like the faults that
   came before them.
@@ -893,10 +906,27 @@ dwell interval? It combines exactly the three facts the safety contract names -
   reads speed, never re-derives a landmark, pauses (rather than faults) on
   unusable position evidence, and commands nothing - its response is the
   authority's existing fault stop. The phase bound and the run-scoped duration
-  bound remain the final fail-safe, and the phase deadline keeps precedence when
-  both are due on the same cycle. The short-stop it names is a software outcome:
-  no stopping distance is claimed, and the brake offset that defines brake entry
-  stays an unmeasured placeholder until the physical braking trials set it.
+   bound remain the final fail-safe, and the phase deadline keeps precedence when
+   both are due on the same cycle. The short-stop it names is a software outcome:
+   no stopping distance is claimed, and the brake offset that defines brake entry
+   stays an unmeasured placeholder until the physical braking trials set it.
+- **Accepted powered travel is bounded by its encoder progress (S18C/P4).**
+  Sampling the encoder is not moving the vehicle: while control cycles keep
+  authorizing a driving mode, the signed tick count must keep advancing in the
+  expected direction (the leg mapped through the measured positive-ticks
+  polarity), or `EncoderFeedbackLost` is latched. The startup allowance is the
+  same bound baselined at the first accepted authorization; ongoing travel
+  re-baselines on every coherent advance. Cycles without accepted powered
+  travel neither consume nor renew the allowance, so toggling cannot evade it
+  and only genuine progress resets it; dropouts, placeholder bounds, and
+  unmeasured polarity pause it rather than faulting. It never reads speed, and
+  an invalid velocity estimate is never a reason to pause: the monitor consumes
+  ticks only. Its response is the authority's existing fault stop through the
+  existing observed-fault path (vehicle layer before the run policy, harness
+  mirrored), and the new-run boundary resets it with everything else without
+  discharging the S18A direction barrier. The timeout stays a `Provisional`
+  placeholder until the slowest reliable edge spacing, startup latency, both
+  signs, and loaded gaps are measured (P-H5/H7/H9).
 - **A global bound is evaluated by the vehicle layer, not by a phase.** The
   run-scoped maximum-duration bound is one timer over the whole run, not a
   fourth phase timeout: the vehicle layer evaluates it once per tick from the

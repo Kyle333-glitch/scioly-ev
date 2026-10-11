@@ -274,9 +274,26 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // latches it (its fault of record), and the authority latches it too and
     // answers with its single deterministic fault stop. The driver fault is kept
     // first so a real electrical fault is never masked by a run that overran.
+    //
+    // The feedback-progress supervision (S18C/P4) is evaluated here, before the
+    // run policy, from the previous cycle's accepted-powered fact: while
+    // control cycles keep authorizing a driving mode, the signed tick count
+    // must keep advancing in the expected direction, or the run latches
+    // `EncoderFeedbackLost` this same cycle and the authority answers with its
+    // single fault stop - so a violation stops this cycle's authorization, not
+    // the next one's. Priority is driver first (electrical), then feedback
+    // (active-travel safety), then the run-scoped duration backstop; every one
+    // answers with the same Disable stop.
+    const bool feedbackViolated = feedbackMonitor_.update(
+        ticks.ticks, true, lastCycleAuthorizedPowered_, legForward_,
+        vehicleConfig::positiveTicksDirection(), run_.config().encoderProgressTimeoutS,
+        dtMs);
+    const ev::FaultCode feedbackFault = ev::encoderProgressFault(feedbackViolated);
     const ev::FaultCode cycleFault =
-        observedFault != ev::FaultCode::None ? observedFault
-                                             : ev::runDurationFault(runDuration);
+        observedFault != ev::FaultCode::None
+            ? observedFault
+            : (feedbackFault != ev::FaultCode::None ? feedbackFault
+                                                    : ev::runDurationFault(runDuration));
 
     // ---------------------------------------------------------------- stage 5
     // The run policy, fed only this cycle's evidence. The distance it consumes is
@@ -439,6 +456,12 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
         status.fault != ev::FaultCode::None ? status.fault : cycleFault;
 
     const ev::AuthorizationResult authorized = authority_.authorize(effort, safetyState, safetyLimits_);
+
+    // The next cycle's "accepted powered travel" fact for the feedback monitor:
+    // whether this cycle's authorized command was a driving mode. A request the
+    // boundary refused (or a non-powered stop) never starts or sustains the
+    // progress interval.
+    lastCycleAuthorizedPowered_ = authorized.command.isDriving();
 
     // ---------------------------------------------------------------- stage 9
     // The only command that can reach the driver is the one the authority
@@ -1151,6 +1174,12 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     // a previous run's observed standstill, and a fresh barrier must not be
     // discharged by it either (S18A/P2). Live evidence re-establishes it.
     recoveryStopVerifier_.reset();
+    // The feedback-progress supervision restarts with the run: no previous
+    // attempt's ticks or powered time may bound the next run, and the next
+    // powered travel takes a fresh reference with the full allowance (S18C/P4).
+    // This clears evidence; it never discharges the S18A direction barrier.
+    feedbackMonitor_.reset();
+    lastCycleAuthorizedPowered_ = false;
     odometryTravel_ = ev::OdometryEstimate{0.0, false, ev::OdometryEstimateStatus::ScaleIsNotMeasured};
     odometrySampleMs_ = 0U;
     hasOdometrySample_ = false;

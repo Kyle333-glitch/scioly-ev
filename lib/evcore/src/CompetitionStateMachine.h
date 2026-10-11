@@ -343,6 +343,7 @@ struct RunPhaseConfig {
                              Sourced<double> finalApproachTimeoutS_,
                              Sourced<double> finalStopTimeoutS_,
                              Sourced<double> travelStallTimeoutS_,
+                             Sourced<double> encoderProgressTimeoutS_,
                              Sourced<double> finalApproachDistanceM_,
                              NearZeroConfig stopVerification_,
                              Sourced<double> minimumPlannedCruiseMps_,
@@ -358,6 +359,7 @@ struct RunPhaseConfig {
           finalApproachTimeoutS(finalApproachTimeoutS_),
           finalStopTimeoutS(finalStopTimeoutS_),
           travelStallTimeoutS(travelStallTimeoutS_),
+          encoderProgressTimeoutS(encoderProgressTimeoutS_),
           finalApproachDistanceM(finalApproachDistanceM_),
           stopVerification(stopVerification_),
           minimumPlannedCruiseMps(minimumPlannedCruiseMps_),
@@ -411,6 +413,24 @@ struct RunPhaseConfig {
     // satisfy, which is the fail-closed direction; it must be `Measured` before
     // any run may be armed.
     Sourced<double> travelStallTimeoutS;
+
+    // How long accepted powered travel may go without the signed tick count
+    // advancing in the expected direction before the run latches
+    // `FaultCode::EncoderFeedbackLost`, seconds.
+    //
+    // It is the bounded response to lost encoder feedback during powered
+    // travel: frozen counts, wrong-sign counts, or incoherent counts under an
+    // authorized drive. The startup allowance is the same bound, baselined at
+    // the first accepted powered authorization rather than at announce/arm;
+    // ongoing travel re-baselines on every coherent tick advance. Cycles
+    // without accepted powered travel (Disabled/brake/dwell/stop) neither
+    // consume nor renew the allowance, so toggling cannot evade it and only
+    // genuine progress resets it. A placeholder here can only add a bound the
+    // run cannot satisfy, which is the fail-closed direction; it must be
+    // `Measured` before any run may be armed. The real hardware value is
+    // unmeasured: slowest reliable edge spacing, startup latency, both signs,
+    // and loaded scheduling gaps (P-H5/H7/H9).
+    Sourced<double> encoderProgressTimeoutS;
 
     // The last stretch of the reverse leg, metres of remaining distance at which
     // the run moves into the final approach phase.
@@ -467,6 +487,7 @@ enum class RunPhaseConfigError : uint8_t {
     NegativeDelay,                    // maximumOptionalDelayS below zero
     NonPositiveTimeout,               // a phase bound that is not > 0
     NonPositiveTravelStall,           // the travel-progress bound is not > 0
+    NonPositiveEncoderProgress,       // the feedback-progress bound is not > 0
     NonPositiveFinalApproachDistanceM,  // the final approach distance is not > 0
     StopVerificationNotUsable,        // the NearZeroConfig failed its own validation
     NonPositiveMinimumCruise,         // the planned-cruise floor is not > 0
@@ -501,6 +522,7 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !config.captureTimeoutS.isMeasured() || !config.pushTimeoutS.isMeasured() ||
         !config.reverseTimeoutS.isMeasured() || !config.finalApproachTimeoutS.isMeasured() ||
         !config.finalStopTimeoutS.isMeasured() || !config.travelStallTimeoutS.isMeasured() ||
+        !config.encoderProgressTimeoutS.isMeasured() ||
         !config.finalApproachDistanceM.isMeasured() ||
         !config.minimumPlannedCruiseMps.isMeasured() ||
         !config.approachCeilingMps.isMeasured() || !config.captureCeilingMps.isMeasured() ||
@@ -514,6 +536,7 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !std::isfinite(config.finalApproachTimeoutS.value) ||
         !std::isfinite(config.finalStopTimeoutS.value) ||
         !std::isfinite(config.travelStallTimeoutS.value) ||
+        !std::isfinite(config.encoderProgressTimeoutS.value) ||
         !std::isfinite(config.finalApproachDistanceM.value) ||
         !std::isfinite(config.minimumPlannedCruiseMps.value) ||
         !std::isfinite(config.approachCeilingMps.value) ||
@@ -547,6 +570,9 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
     }
     if (!(config.travelStallTimeoutS.value > 0.0)) {
         return {false, RunPhaseConfigError::NonPositiveTravelStall};
+    }
+    if (!(config.encoderProgressTimeoutS.value > 0.0)) {
+        return {false, RunPhaseConfigError::NonPositiveEncoderProgress};
     }
     if (!(config.finalApproachDistanceM.value > 0.0)) {
         return {false, RunPhaseConfigError::NonPositiveFinalApproachDistanceM};
