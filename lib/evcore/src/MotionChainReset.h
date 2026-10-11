@@ -2,7 +2,6 @@
 
 #include "CompetitionStateMachine.h"
 #include "MotionProfile.h"
-#include "QuadratureDecoder.h"
 #include "SafetyAuthority.h"
 #include "VehicleState.h"
 #include "VelocityController.h"
@@ -28,7 +27,6 @@ namespace ev {
 //                                      phaseElapsedMs counts from this boundary
 //   VelocityController::reset()        disable() plus dropped integral, time base
 //                                      and remembered direction
-//   QuadratureDecoder::reset()         no reference, no count
 //   VelocityEstimator::reset()         no samples, no window, no claim, no counters
 //   MotionProfileTarget::resetForNewRun()   target back to exactly zero
 //   SafetyAuthority::reset()           disarmed, no latched fault; the remembered
@@ -53,7 +51,9 @@ namespace ev {
 //   re-enabled, and that is all.
 // * It does not touch hardware and owns no clock, pin or Arduino type
 //   (SOFTWARE_ARCHITECTURE.md section 2). The vehicle layer calls it, and the
-//   vehicle layer establishes the decoder reference afterwards. Its one clock
+//   encoder adapter alone resets the ISR-shared count and reference afterwards.
+//   The decoder is deliberately not accepted here: a pure helper cannot protect
+//   its multi-field mutation against the ISR (S18C-M1). Its one clock
 //   argument, `nowMs`, is the caller's `millis()` reading: it is passed straight
 //   to `CompetitionStateMachine::reset()` to stamp the new Idle phase, and
 //   nothing here reads a clock.
@@ -62,10 +62,11 @@ namespace ev {
 //   only succeeds on complete readiness data, and a run that may travel still
 //   requires a fresh announcement to the state machine.
 //
-// Caller obligation after the call: feed the decoder one stationary
-// `update(aLevel, bLevel)` sample to re-establish its reference before motion,
-// because `reset()` deliberately discards the reference and the first sample on
-// a resynchronized decoder must never be counted (QuadratureDecoder.h).
+// Caller obligation after the call: reset/re-reference the encoder through its
+// owner before consuming new-run measurements. Production uses EncoderInput's
+// single PRIMASK-preserving reset/reference operation; a synthetic local decoder
+// can be reset directly by its test owner. This sequence does not prove physical
+// standstill, discharge direction history, or preserve every edge during reset.
 
 // What the reset found and what state it left behind. No default constructor:
 // the report is the only evidence the caller has about a boundary that is
@@ -93,14 +94,13 @@ struct MotionChainResetReport {
     RunPhase clearedRunPhase;
 };
 
-// Resets every per-run state in the chain so the next run starts from nothing,
+// Resets the pure per-run state (not the encoder adapter's measurement epoch),
 // and leaves the regulator enabled on that fresh state.
 //
 // It never arms the authority and never commands motion. Returns the report
 // above so a refusal to re-enable, a discarded fault, or the phase the previous
 // run ended in is visible instead of silent.
-inline MotionChainResetReport resetMotionChainForNewRun(QuadratureDecoder& decoder,
-                                                        VelocityEstimator& estimator,
+inline MotionChainResetReport resetMotionChainForNewRun(VelocityEstimator& estimator,
                                                         VelocityController& controller,
                                                         MotionProfileTarget& target,
                                                         SafetyAuthority& authority,
@@ -121,8 +121,8 @@ inline MotionChainResetReport resetMotionChainForNewRun(QuadratureDecoder& decod
     //    sequence is disable() then enable() and not just enable().
     controller.disable();
 
-    // 3. Discard every measurement that described the previous run.
-    decoder.reset();
+    // 3. Discard the estimator history. The caller resets the encoder through
+    //    its owner, never through this interrupt-unaware pure orchestration.
     estimator.reset();
 
     // 4. Zero the caller-held profile target. A stale target would silently

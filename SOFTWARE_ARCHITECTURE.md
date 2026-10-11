@@ -570,18 +570,23 @@ another's, and none is a run state machine.
   its own ceiling as an authorization, or decide a stop.
 - **A new run resets the whole chain through one sequence.**
   `ev::resetMotionChainForNewRun()` in `lib/evcore/src/MotionChainReset.h` is the
-  single place that returns every module's per-run state to nothing: the run
-  policy (idle, no announcement, no fault of record, and the reversal sequencer
-  and stop verifier it owns), the regulator (disable-then-enable, because
-  `enable()` on a running regulator is a deliberate no-op), the decoder reference
-  and count, the estimator window/claim/counters, the caller-held target, and the
-  safety boundary (disarmed, no fault of record, no remembered direction). It
+  pure orchestration for the run policy (idle, no announcement, no fault of
+  record, and the reversal sequencer and stop verifier it owns), the regulator
+  (disable-then-enable, because `enable()` on a running regulator is a deliberate
+  no-op), the estimator window/claim/counters, the caller-held target, and the
+  safety boundary (disarmed, no fault of record, remembered direction retained
+  per S18A). The helper never accepts or mutates an ISR-shared decoder. It
   never arms and never commands motion; it reports whether the regulator could be
   re-enabled, which fault it discarded and which run phase the previous run ended
   in, so the run log can record what ended it. Arming stays a separate,
   deliberate transition, a run still requires a fresh announcement (section 14),
-  and the caller re-establishes the decoder reference with one stationary sample
-  before motion.
+  and `EncoderInput` alone resets the production decoder and samples its
+  reference in one PRIMASK-preserving critical section (S18C-M1 / D58), before
+  new-run measurements. No mutable decoder escapes the adapter. Its ISR updates
+  and masked snapshot/reset/reference operations are the only access paths.
+  This excludes ISR interleaving, not mechanical motion: sequential pin reads
+  are not simultaneous and physical edges during reset may be lost/coalesced.
+  A coherent reset proves no stop and cannot discharge the direction barrier.
 - **Velocity freshness has an owner.** `VelocityEstimate::elapsedMs` is the
   clock reading that produced an answer, and `ev::velocityReadiness()` in
   `VelocityEstimator.h` is the single verdict combining estimate existence,

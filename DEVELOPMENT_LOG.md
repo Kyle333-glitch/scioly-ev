@@ -7902,3 +7902,111 @@ findings (M2-M18, L1-L6) stay open except H3, which this stage repairs. Every
 physical placeholder stays `Provisional`, no stopping distance is claimed, and
 the brake offset that defines brake entry stays unmeasured until the physical
 braking trials set it. Full record: `.agent-work/stages/S18B.md`.
+
+## D57 / S18C - 2026-10-10 - Encoder-feedback stage blocked by the unprotected reset dependency
+
+**S18C BLOCKED; checkpoint NOT ATTEMPTED.** Live entry matched the authorized
+S18B checkpoint: main at afc98a55869390be13ac822963757b04dcde98cb,
+20 ahead / 0 behind origin/main, tracked worktree and index clean, only the two
+untracked October 6/8 audit documents. Both audits remain byte-identical.
+S18A and S18B remain checkpointed PASS; S18 as a whole is not complete.
+
+Recovered mapping: P4 = October 6 H7 / October 8 H4, missing bounded production
+encoder-progress supervision; P7 = October 6 M16 / October 8 M7, incomplete
+one-trip timing diagnostic; remaining P8 = October 6 M13 / October 8 M17,
+actual-source lifecycle/composition coverage. October 8 M16 instead concerns
+reply-loss accounting. Prior 50/50-powered frozen-count probe logs were reviewed,
+but no independent S18B-HEAD reproduction or post-repair result is claimed.
+
+The user-required M1 dependency check found the defect still present:
+VehicleRuntime::applyReset passes encoderInput::decoder() into the pure
+resetMotionChainForNewRun helper, whose decoder.reset() mutates ISR-shared
+fields with interrupts enabled. Only the subsequent adapter reset/reference is
+PRIMASK-protected. That second reset does not synchronize the first mutation.
+Reset is admitted in Fault without proof of stationary mechanics; S18A retains
+the direction barrier for exactly that reason. A sequential host mock cannot
+establish this required fault/reset/re-arm measurement boundary as coherent.
+No physical race or specific downstream powered behavior was observed.
+
+Under the explicit dependency STOP, no source/test/configuration repair, guard,
+new fault identity, timeout, timing-output migration, or unrelated analyzer or
+watchdog fix was introduced. The prerequisite is a separately authorized narrow
+M1 reset-ownership repair and deterministic interrupt-injection review, then
+resumed S18C reproduction/design/implementation/validation. Option B (visibly
+unsupported diagnostic estimates) is recommended for P7, not implemented;
+kRunTimingModelValidated remains false and S16's plan gate is unchanged.
+
+No full native/telemetry suite or firmware build was rerun after the dependency
+stop. S18B's recorded 696/696 native cases in 36 suites, 142/142 telemetry,
+three successful zero-warning builds and RAM/Flash 7468/76968, 7668/84480,
+7660/83812 B remain historical baseline, not S18C regression evidence.
+Git diff hygiene, audit hashes and append-only history are checked after this
+record. D54, D55 and D56 are not rewritten; only this D57 is appended.
+
+Full finding ledger, partial versus remaining P8 coverage, October 8 backlog
+reconciliation, physical uncertainty and unmet acceptance gates are in
+.agent-work/stages/S18C.md; checkpoint-not-attempted record:
+.agent-work/utilities/U1-S18C-checkpoint.md. No staging or commit, no push,
+merge, tag, upload, port access, hardware action or calibration promotion.
+Production remains unarmable. E is separately unexecuted; F waits for E and
+separate authorization plus applicable safety/instrument review. Independent
+cumulative S18 review is still needed after eventual C PASS. STOP after S18C.
+
+## D58 / S18C-M1 - 2026-10-10 - Sole protected ownership of the ISR-shared decoder reset
+
+**S18C-M1 PASS (software prerequisite); conditional checkpoint authorized after
+complete staged review. Parent S18C remains unfinished, not PASS.** Entry was
+main at afc98a55869390be13ac822963757b04dcde98cb, 20 ahead / 0 behind;
+the known +49/-0 D57 carryover was the only tracked edit and is preserved
+unchanged. Both untracked October 6/8 audits remain byte-identical and unstaged.
+No recovery import, hardware action, upload, calibration promotion or push.
+
+Live M1 confirmed: VehicleRuntime.cpp:1133 passed the ISR-owned decoder to the
+pure chain; MotionChainReset.h:125 reset six shared fields without masking.
+Only the subsequent adapter reset/reference at runtime:1142 was protected.
+That second reset did not synchronize the first. A new actual-source host
+regression sees the old count already erased at the FIRST adapter mask boundary
+(expected 2, actual 0), giving 1 failed / 7 passed before repair, exit 1.
+This is deterministic software evidence, not an observed physical race.
+
+Option A chosen: resetMotionChainForNewRun no longer accepts/resets a decoder.
+EncoderInput alone owns production mutations, and its mutable decoder accessor
+is removed. The existing single saved-PRIMASK reset/reference guard is retained;
+local pure-test decoders are reset explicitly by their synthetic owners. Runtime
+cache invalidation, plan/origin reset, S18A direction-history barrier, S16 arm
+gate and fault precedence remain intact. Architecture documents that ownership.
+No P4 feedback policy, P7 timing correction or cumulative S18C integration began.
+
+Twelve new registered Unity cases link the actual EncoderInput.cpp and
+VehicleRuntime.cpp with suite-local fake Arduino I/O. They cover enabled and
+disabled initial masks, outer guard preservation, pending callback injection at
+both pin reads and the guard boundaries, all four initial A/B phases and both
+software signs, before/after-reference moving edges, nonzero-count/fault/cache
+reset, no false standstill, timer wrap without restarting the schedule, retained
+direction protection, production refusal and synthetic reannouncement with the
+S16 execution-plan refusal. The mock coalesces pending requests and cannot admit
+an ISR while masked. NANOR4 CMSIS memory clobbers and compiled ARM disassembly
+confirm MRS PRIMASK / CPSID / all reset stores and reference / MSR saved PRIMASK.
+All reset/access callers in vehicle, bench, watchdog and synthetic tests reviewed;
+each firmware has one decoder, encoder ISR, setup and loop, no escaping accessor.
+
+Final checks after last source/test edits: focused **67/67**, native **708/708 in
+37 suites** (696 + 12), three clean firmware builds **SUCCESS / 0 warnings**,
+telemetry **142/142 OK**, registration **37 suites / 0 problems**, diff check
+clean; each command exit 0. RAM/Flash B: nano_r4 **7468/76928**, bench
+**7668/84440**, bench-watchdog **7660/83780**. RAM unchanged; Flash -40/-40/-32
+from S18B. No performance speedup claimed. S14/S15/S16/S18A/S18B suites green;
+VehicleConfig untouched, timing validation false, physical values Provisional,
+production unarmable. No warning suppressed and no safety assertion weakened.
+
+Interrupt exclusion establishes software consistency, not mechanical standstill:
+sequential reads are not simultaneous, pending physical edges may coalesce or be
+absorbed into the reset reference, and prior counts are deliberately discarded.
+Encoder direction, repeatability, edge-capture reliability, distance calibration
+and stopping remain physical gates. No physical evidence is promoted.
+
+Full source/caller/coverage ledger and exact command statuses/resources:
+.agent-work/stages/S18C-M1.md; raw logs and preservation manifest:
+.agent-work/reviews/s18c-m1-2026-10-10/; checkpoint verification:
+.agent-work/utilities/U1-S18C-M1-checkpoint.md. Original D54-D57 unchanged.
+Next eligible action is resume S18C; NOT started here. STOP after prerequisite.

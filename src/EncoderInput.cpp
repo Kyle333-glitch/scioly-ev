@@ -5,9 +5,9 @@ namespace encoderInput {
 namespace {
 
 // The one decoder in the firmware, with static storage duration because the
-// interrupt handler has to reach it. It is written only by the ISR and read only
-// through the snapshot below (and through `decoder()` for the chain calls that
-// own per-run state), so no other code has to reason about a changing count.
+// interrupt handler has to reach it. Only this adapter mutates it: the ISR
+// updates it, and main-context reset/reference operations mask interrupts.
+// Main-loop readers use snapshotTicks(); no mutable decoder escapes the adapter.
 ev::QuadratureDecoder g_decoder;
 
 // The interrupt handler.
@@ -42,16 +42,10 @@ void begin() {
 }
 
 void reestablishReference() {
-    // The reference sample must be taken with the same two levels the decoder
-    // will see next, and it never counts (QuadratureDecoder.h). Reading the pins
-    // here rather than assuming both are low keeps this honest even if the idle
-    // levels turn out to be the opposite of what the plan guesses.
-    //
-    // The two pin reads and the decoder update are one observation, so they run
-    // with the encoder interrupt masked (audit M4 / S13R M-3): an edge between
-    // the reads or between a read and the update would otherwise make the
-    // reference a mixture of two instants. The mask is PRIMASK-preserving and
-    // spans a handful of instructions - it is not held across anything else.
+    // Sample actual levels rather than assuming idle LOW. After reset this
+    // establishes a reference without counting; with an existing reference it
+    // is an ordinary update. Masking prevents ISR interleaving, not changes to
+    // electrical inputs: the two digitalRead calls are still sequential.
     const uint32_t primask = saveAndDisableInterrupts();
     g_decoder.update(digitalRead(kEncoderA) == HIGH, digitalRead(kEncoderB) == HIGH);
     restoreInterrupts(primask);
@@ -61,11 +55,13 @@ void resetAndReestablishReference() {
     // The coherent new-run boundary for the ISR-shared decoder: the reset (six
     // field writes the ISR could interleave with) and the reference sample are
     // one critical section, so the state an interrupt sees before and after is a
-    // valid one and the reference cannot be crossed by an edge. The caller must
-    // have the drivetrain stationary, exactly as `begin()` requires: an edge that
-    // arrives while interrupts are masked is not lost by the hardware, it is
-    // serviced the moment the mask is restored, and it is then judged against a
-    // reference that belongs to this instant rather than to a torn one.
+    // complete one. Restore exactly the prior PRIMASK, including an outer
+    // caller's disabled state. No formatting, allocation or blocking belongs here.
+    //
+    // Reset does NOT prove standstill. Stationary mechanics are required for
+    // trustworthy physical attribution: pin reads are sequential, pending edges
+    // can coalesce, and motion during this boundary need not be preserved.
+    // A pending callback may see the newly sampled A level and count no edge.
     const uint32_t primask = saveAndDisableInterrupts();
     g_decoder.reset();
     g_decoder.update(digitalRead(kEncoderA) == HIGH, digitalRead(kEncoderB) == HIGH);
@@ -81,8 +77,6 @@ TickSnapshot snapshotTicks() {
     restoreInterrupts(primask);
     return snapshot;
 }
-
-ev::QuadratureDecoder& decoder() { return g_decoder; }
 
 }  // namespace encoderInput
 }  // namespace evhw

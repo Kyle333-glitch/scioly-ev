@@ -1127,18 +1127,14 @@ void VehicleRuntime::applyArm() {
 
 void VehicleRuntime::applyReset(uint32_t nowMs) {
     // The whole new-run sequence, from the module that owns it - not a subset
-    // assembled here: the run policy, the regulator's control state, the decoder,
-    // the estimator, the profile target and the authority all return to their
-    // post-construction state, and the report says what was discarded.
+    // assembled here: run policy, regulator, estimator, target and authority.
+    // Direction history is deliberately retained; software reset proves no stop.
     const ev::MotionChainResetReport report = ev::resetMotionChainForNewRun(
-        encoderInput::decoder(), estimator_, velocityController_, profileTarget_, authority_, run_,
-        nowMs);
-    // A coherent decoder boundary: the chain's own `decoder.reset()` runs as part
-    // of the sequence above, and this adapter-owned call then re-does the reset
-    // and the reference sample together, with the interrupt masked (audit M4 /
-    // S13R M-3). Nothing reads the decoder between the two, so the state left
-    // behind is the coherent one: no interrupt can interleave between the reset
-    // and the two pin reads, and no edge seen under a stale reference survives.
+        estimator_, velocityController_, profileTarget_, authority_, run_, nowMs);
+    // The sole ISR-shared decoder reset owner (S18C-M1): reset and reference
+    // sampling together inside the adapter's PRIMASK-preserving guard. The pure
+    // chain never mutates that decoder. This establishes software coherence,
+    // not mechanical standstill or lossless capture of moving electrical edges.
     encoderInput::resetAndReestablishReference();
 
     // Nothing that measured the previous run may survive the boundary (audit M12

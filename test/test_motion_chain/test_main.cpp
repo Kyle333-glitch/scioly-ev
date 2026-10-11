@@ -583,10 +583,10 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Armed),
                           static_cast<int>(run.update(1020U, chainRunInputs()).phase));
 
-    // The single new-run sequence resets every one of those states. The clock
-    // reading is the caller's, passed through to stamp the new Idle phase.
+    // The pure new-run sequence resets its states, but never owns the decoder.
+    // The clock reading passes through to stamp the new Idle phase.
     const ev::MotionChainResetReport report =
-        ev::resetMotionChainForNewRun(decoder, estimator, controller, target, authority, run,
+        ev::resetMotionChainForNewRun(estimator, controller, target, authority, run,
                                       1040U);
 
     TEST_ASSERT_TRUE(report.controllerEnabled);
@@ -599,6 +599,11 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
                           static_cast<int>(run.faultCode()));
     TEST_ASSERT_FALSE(run.stopVerified());
+    // S18C-M1: the pure helper must leave even a local decoder untouched.
+    // Its owner explicitly resets it; hardware uses one protected adapter call.
+    TEST_ASSERT_TRUE(decoder.hasReference());
+    TEST_ASSERT_EQUAL_INT32(1, decoder.ticks());
+    decoder.reset();
     TEST_ASSERT_FALSE(decoder.hasReference());
     TEST_ASSERT_EQUAL_INT32(0, decoder.ticks());
     TEST_ASSERT_EQUAL_UINT32(0U, estimator.acceptedSamples());
@@ -661,7 +666,6 @@ void test_a_new_run_resets_every_module_and_never_arms(void) {
 }
 
 void test_a_new_run_reports_the_fault_it_discards(void) {
-    ev::QuadratureDecoder decoder;
     ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{20U, 5000U});
     ev::VelocityController controller(controllerConfig(ev::MotorMode::DriveForward));
     ev::MotionProfileTarget target;
@@ -688,7 +692,7 @@ void test_a_new_run_reports_the_fault_it_discards(void) {
                           static_cast<int>(runStatus.phase));
 
     const ev::MotionChainResetReport report =
-        ev::resetMotionChainForNewRun(decoder, estimator, controller, target, authority, run,
+        ev::resetMotionChainForNewRun(estimator, controller, target, authority, run,
                                       1000U);
 
     // The fault is reported before it is cleared, so the run log can record what
@@ -719,14 +723,13 @@ void test_a_new_run_reports_a_regulator_that_cannot_be_re_enabled(void) {
     ev::VelocityController controller(provisionalConfig);
     TEST_ASSERT_FALSE(controller.enable());
 
-    ev::QuadratureDecoder decoder;
     ev::VelocityEstimator estimator(ev::VelocityEstimatorConfig{20U, 5000U});
     ev::MotionProfileTarget target;
     ev::SafetyAuthority authority;
     ev::CompetitionStateMachine run(chainPhaseConfig(), chainReversalConfig());
 
     const ev::MotionChainResetReport report =
-        ev::resetMotionChainForNewRun(decoder, estimator, controller, target, authority, run,
+        ev::resetMotionChainForNewRun(estimator, controller, target, authority, run,
                                       1000U);
     TEST_ASSERT_FALSE(report.controllerEnabled);
     TEST_ASSERT_FALSE(controller.isEnabled());

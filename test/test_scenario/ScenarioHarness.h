@@ -870,13 +870,14 @@ public:
     }
 
     // The whole-chain new-run boundary, exactly as the production sequence
-    // defines it. Afterwards the harness re-establishes the decoder reference the
-    // reset discarded, and forgets everything that described the previous run.
+    // defines it. Afterwards the harness owns the reset/reference of its local
+    // (non-ISR-shared) decoder, and forgets the previous run's measurements.
     // It never arms.
     ev::MotionChainResetReport resetForNewRun() {
         const ev::MotionChainResetReport report = ev::resetMotionChainForNewRun(
-            decoder_, estimator_, controller_, profileTarget_, authority_, run_, nowMs_);
+            estimator_, controller_, profileTarget_, authority_, run_, nowMs_);
 
+        decoder_.reset();  // Synthetic owner; production uses EncoderInput's guard.
         establishDecoderReference();
         configurationValid_ = false;
         hasEstimate_ = false;
