@@ -865,12 +865,33 @@ dwell interval? It combines exactly the three facts the safety contract names -
   `ReversalNotVerified` and `DisarmedDuringRun` (a run that loses the armed state
   it started with is stopped and latched rather than left asking for motion the
   authority is refusing), plus `RunSequencingError` for a sequencing
-  inconsistency the policy must not act on, and `RunDurationExceeded` for a run
+  inconsistency the policy must not act on, `RunDurationExceeded` for a run
   that passed its validated maximum duration (S10, `RunDurationGuard.h`) - a
-  whole-run bound, deliberately distinct from the per-phase `PhaseTimeout`.
+  whole-run bound, deliberately distinct from the per-phase `PhaseTimeout` - and
+  `TravelStalled` for a travel leg that reached brake entry and then stopped
+  advancing toward the landmark its completion needs (S18B).
   All of them are software conditions with no measured electrical answer, so
   `faultStopPolicyFor()` maps every one to `Disable`, exactly like the faults that
   came before them.
+- **A travel phase is bounded by its progress, not only by its clock (S18B).**
+  A positive brake offset makes the target shaper reach zero *inside* the
+  measured offset, so from brake entry the run is asking the vehicle to coast the
+  rest of the way to the leg's landmark (`RunExecutionPlan.h`). A vehicle that
+  comes to rest short of it would otherwise present a zero target for the whole
+  phase budget and leave only at `PhaseTimeout`, which measures the wrong thing.
+  `RunInputs::legInBrakeEntry` (derived by the vehicle layer from the plan's leg
+  remaining distance and the direction's measured brake offset - the same values
+  the shaper uses) arms the run's brake-entry travel-progress bound:
+  `RunPhaseConfig::travelStallTimeoutS` is how long a travel phase may go without
+  the remaining distance advancing before `TravelStalled` is latched. It is not a
+  second timeout: it applies only from brake entry in a travel phase, it never
+  reads speed, never re-derives a landmark, pauses (rather than faults) on
+  unusable position evidence, and commands nothing - its response is the
+  authority's existing fault stop. The phase bound and the run-scoped duration
+  bound remain the final fail-safe, and the phase deadline keeps precedence when
+  both are due on the same cycle. The short-stop it names is a software outcome:
+  no stopping distance is claimed, and the brake offset that defines brake entry
+  stays an unmeasured placeholder until the physical braking trials set it.
 - **A global bound is evaluated by the vehicle layer, not by a phase.** The
   run-scoped maximum-duration bound is one timer over the whole run, not a
   fourth phase timeout: the vehicle layer evaluates it once per tick from the

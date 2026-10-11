@@ -59,6 +59,20 @@ enum class FaultCode : uint8_t {
     // a `Measured` duration, so a placeholder can never stop a run for a reason
     // nobody established.
     RunDurationExceeded,
+    // A travel phase stopped making progress toward the leg's required execution
+    // target: the run was travelling, but the position it acts on did not advance
+    // toward the landmark its completion depends on for the configured
+    // `RunPhaseConfig::travelStallTimeoutS`. This is the bounded terminal outcome
+    // for a run that has commanded the vehicle's stop (the target shaper reached
+    // zero inside the brake offset) and whose vehicle did not coast the remaining
+    // distance to the landmark - the short-stop the taper/landmark contract leaves
+    // open. It is deliberately distinct from `PhaseTimeout`: the phase bound waits
+    // for a phase's whole budget to expire, while this names the specific fact
+    // that the travel itself is no longer going anywhere, and it is deliberately
+    // not `RunDurationExceeded`, which bounds the run as a whole. It is a
+    // software-only identity: it carries no measured electrical meaning, so its
+    // response is the same safe fault stop as every other non-electrical fault.
+    TravelStalled,
 };
 
 // A fault together with when it happened and whether it is latched. Fault

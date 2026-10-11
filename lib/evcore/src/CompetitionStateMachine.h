@@ -41,6 +41,18 @@ namespace ev {
 //   - wait for that completion and are bounded by a configured timeout, exactly as
 //   the stop phases wait for their verified stop. A phase that never gets its
 //   completion faults instead of waiting forever or guessing.
+// * A travel phase is additionally bounded by the run's *progress* once the leg
+//   has reached brake entry, and not only by its clock (S18B). The target shaper
+//   reaches zero inside the measured brake offset, so from brake entry the vehicle
+//   is expected to coast the rest of the way to the landmark its completion needs;
+//   a vehicle that comes to rest short of it would otherwise present a zero target
+//   for the whole phase budget. The travel-progress bound watches the one position
+//   fact the run already consumes and latches `FaultCode::TravelStalled` when that
+//   fact has not advanced toward the landmark for
+//   `RunPhaseConfig::travelStallTimeoutS`. It never claims the landmark was
+//   reached and never commands motion: a run whose travel is going nowhere ends,
+//   safely and with its own identity, rather than waiting out a bound that
+//   measures the wrong thing.
 // * It is blind to how a completion was produced. `RunInputs` carries three
 //   completion booleans and nothing about their producer: today the vehicle layer
 //   derives them from the run axis thresholded at the run's own execution-plan
@@ -145,6 +157,34 @@ inline bool isRunPhaseUnderway(RunPhase phase) {
         case RunPhase::Idle:
         case RunPhase::ParameterValid:
         case RunPhase::Armed:
+        case RunPhase::Done:
+        case RunPhase::Fault:
+            return false;
+    }
+    return false;
+}
+
+// True for the phases in which the run is asking the vehicle to travel toward the
+// leg's execution target, and in which the position it acts on is expected to
+// advance toward that target. These are exactly the phases the travel-progress
+// bound guards; every other phase is either stationary on purpose (the delay, the
+// deliberate stop, the final stop) or waiting for something else (arming, a
+// configuration verdict), and a lack of progress there is not a travel fault.
+inline bool runPhaseCarriesTravel(RunPhase phase) {
+    switch (phase) {
+        case RunPhase::Approach:
+        case RunPhase::Capture:
+        case RunPhase::Push:
+        case RunPhase::Reverse:
+        case RunPhase::FinalApproach:
+            return true;
+        case RunPhase::Idle:
+        case RunPhase::ParameterValid:
+        case RunPhase::Armed:
+        case RunPhase::OptionalDelay:
+        case RunPhase::ForwardDecel:
+        case RunPhase::BrakeZeroSpeed:
+        case RunPhase::FinalBrake:
         case RunPhase::Done:
         case RunPhase::Fault:
             return false;
@@ -302,6 +342,7 @@ struct RunPhaseConfig {
                              Sourced<double> pushTimeoutS_, Sourced<double> reverseTimeoutS_,
                              Sourced<double> finalApproachTimeoutS_,
                              Sourced<double> finalStopTimeoutS_,
+                             Sourced<double> travelStallTimeoutS_,
                              Sourced<double> finalApproachDistanceM_,
                              NearZeroConfig stopVerification_,
                              Sourced<double> minimumPlannedCruiseMps_,
@@ -316,6 +357,7 @@ struct RunPhaseConfig {
           reverseTimeoutS(reverseTimeoutS_),
           finalApproachTimeoutS(finalApproachTimeoutS_),
           finalStopTimeoutS(finalStopTimeoutS_),
+          travelStallTimeoutS(travelStallTimeoutS_),
           finalApproachDistanceM(finalApproachDistanceM_),
           stopVerification(stopVerification_),
           minimumPlannedCruiseMps(minimumPlannedCruiseMps_),
@@ -350,6 +392,25 @@ struct RunPhaseConfig {
     Sourced<double> reverseTimeoutS;         // -> FinalApproach, on the closing distance
     Sourced<double> finalApproachTimeoutS;   // -> FinalBrake, on reaching the Target Point
     Sourced<double> finalStopTimeoutS;       // -> Done, on the stop being verified
+
+    // How long a travel phase (Approach, Capture, Push, Reverse, FinalApproach)
+    // may go without the position it acts on advancing toward the leg's required
+    // execution target before the run latches `FaultCode::TravelStalled`, seconds.
+    //
+    // It is the bounded terminal outcome for the taper/landmark contract: once a
+    // leg is inside its measured brake offset the target shaper has reached zero,
+    // so the vehicle is expected to coast the rest of the way to the landmark; a
+    // vehicle that comes to rest short of it would otherwise present a zero target
+    // for the whole phase budget and only leave at `PhaseTimeout`. This bound
+    // names that specific fact instead of waiting out the phase. It is not a
+    // second phase timeout: it applies only from brake entry in a travel phase,
+    // against the position evidence, and the phase's own bound (and the
+    // run-scoped duration bound) remain the final fail-safe. It gates nothing it
+    // cannot observe - an unusable or non-finite position pauses the check rather
+    // than faulting - so a placeholder here can only add a bound the run cannot
+    // satisfy, which is the fail-closed direction; it must be `Measured` before
+    // any run may be armed.
+    Sourced<double> travelStallTimeoutS;
 
     // The last stretch of the reverse leg, metres of remaining distance at which
     // the run moves into the final approach phase.
@@ -405,6 +466,7 @@ enum class RunPhaseConfigError : uint8_t {
     NonFiniteValue,                   // NaN or infinity
     NegativeDelay,                    // maximumOptionalDelayS below zero
     NonPositiveTimeout,               // a phase bound that is not > 0
+    NonPositiveTravelStall,           // the travel-progress bound is not > 0
     NonPositiveFinalApproachDistanceM,  // the final approach distance is not > 0
     StopVerificationNotUsable,        // the NearZeroConfig failed its own validation
     NonPositiveMinimumCruise,         // the planned-cruise floor is not > 0
@@ -438,7 +500,8 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
     if (!optionalDelayProvenanceIsEstablished(config.maximumOptionalDelayS) || !config.approachTimeoutS.isMeasured() ||
         !config.captureTimeoutS.isMeasured() || !config.pushTimeoutS.isMeasured() ||
         !config.reverseTimeoutS.isMeasured() || !config.finalApproachTimeoutS.isMeasured() ||
-        !config.finalStopTimeoutS.isMeasured() || !config.finalApproachDistanceM.isMeasured() ||
+        !config.finalStopTimeoutS.isMeasured() || !config.travelStallTimeoutS.isMeasured() ||
+        !config.finalApproachDistanceM.isMeasured() ||
         !config.minimumPlannedCruiseMps.isMeasured() ||
         !config.approachCeilingMps.isMeasured() || !config.captureCeilingMps.isMeasured() ||
         !config.pushCeilingMps.isMeasured()) {
@@ -450,6 +513,7 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !std::isfinite(config.reverseTimeoutS.value) ||
         !std::isfinite(config.finalApproachTimeoutS.value) ||
         !std::isfinite(config.finalStopTimeoutS.value) ||
+        !std::isfinite(config.travelStallTimeoutS.value) ||
         !std::isfinite(config.finalApproachDistanceM.value) ||
         !std::isfinite(config.minimumPlannedCruiseMps.value) ||
         !std::isfinite(config.approachCeilingMps.value) ||
@@ -480,6 +544,9 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
         !(config.pushTimeoutS.value > 0.0) || !(config.reverseTimeoutS.value > 0.0) ||
         !(config.finalApproachTimeoutS.value > 0.0) || !(config.finalStopTimeoutS.value > 0.0)) {
         return {false, RunPhaseConfigError::NonPositiveTimeout};
+    }
+    if (!(config.travelStallTimeoutS.value > 0.0)) {
+        return {false, RunPhaseConfigError::NonPositiveTravelStall};
     }
     if (!(config.finalApproachDistanceM.value > 0.0)) {
         return {false, RunPhaseConfigError::NonPositiveFinalApproachDistanceM};
@@ -571,8 +638,33 @@ struct RunInputs {
     // run axis and the encoder's tick convention (Odometry.h,
     // MotionProfileInputs::remainingDistanceM); this machine only compares the
     // reconciled number against its configured final-approach distance.
+    //
+    // It is also the one position fact the run's travel-progress bound consumes.
+    // The Target Point is fixed and, on the forward leg, sits before the forward
+    // execution target and on the reverse leg *is* the execution target, so this
+    // distance decreases strictly as the vehicle travels along either leg and a
+    // run that reaches its landmark necessarily reduces it. The bound watches
+    // that decrease and nothing else; it never re-derives a landmark or a speed
+    // from it, and an unusable or non-finite value pauses the bound rather than
+    // faulting on evidence the run does not have.
     bool remainingDistanceUsable = false;
     double remainingDistanceM = 0.0;
+
+    // Whether the leg the run is travelling is within that leg's measured brake
+    // offset: the distance from the current position to the leg's execution target
+    // is at or inside the distance the vehicle is measured to travel after its
+    // command reaches zero (`MotionProfileLimits::brakeOffsetM`, the same value
+    // the shaping taper uses). This is the *commanded* travel reaching its
+    // configured end - the point from which the run expects the vehicle to coast
+    // the rest of the way to the landmark - and it is a travel fact, not a claim
+    // that the landmark was reached.
+    //
+    // The vehicle layer owns it because only the vehicle layer holds both the
+    // reconciled leg remaining distance and the direction's brake offset; the run
+    // policy must not hold a second copy of that measured distance. False means
+    // either the leg is still outside the offset or there is no usable leg target,
+    // so the travel-progress bound does not apply.
+    bool legInBrakeEntry = false;
 
     // The evidence the near-zero verification rests on. The reversal sequence
     // consumes it while the run is bringing the forward leg to a stop, and the
@@ -866,6 +958,9 @@ public:
         finalStopDwellStartMs_ = 0U;
         finalStopVerifiedAt_ = false;
         finalStopVerifiedAtMs_ = 0U;
+        travelProgressTracking_ = false;
+        travelProgressBestRemainingM_ = 0.0;
+        travelProgressImprovedAtMs_ = 0U;
         sequencer_.reset();
         stopVerifier_.reset();
     }
@@ -941,6 +1036,13 @@ public:
             if (boundMs != 0U && phaseElapsedMs(nowMs) >= boundMs) {
                 latchFault(FaultCode::PhaseTimeout, nowMs);
             }
+            // The travel-progress bound (S18B): a travel phase that stops
+            // advancing toward the landmark its completion needs ends with its own
+            // identity rather than presenting a zero target until the phase bound
+            // expires. It is evaluated after the phase bound, so the phase
+            // deadline keeps precedence when both are due on the same cycle; it
+            // never observes a fault that is already of record.
+            checkTravelProgress(nowMs, inputs);
         }
 
         if (phase_ != RunPhase::Fault) {
@@ -1221,6 +1323,11 @@ private:
     void enterPhase(RunPhase phase, uint32_t nowMs) {
         phase_ = phase;
         phaseEnteredMs_ = nowMs;
+        // A new phase re-baselines the travel-progress bound: the landmark it is
+        // advancing toward belongs to the new phase, and the bound measures from
+        // where the vehicle actually was when that phase began rather than
+        // inheriting the previous phase's clock.
+        travelProgressTracking_ = false;
     }
 
     uint32_t phaseElapsedMs(uint32_t nowMs) const {
@@ -1233,6 +1340,70 @@ private:
     static uint32_t boundMsFromSeconds(double seconds) {
         const uint32_t ms = msFromSeconds(seconds);
         return ms == 0U ? 1U : ms;
+    }
+
+    // The travel-progress bound (S18B). It applies only once the leg the run is
+    // travelling has reached its brake entry - the commanded travel has reached
+    // its configured end and the run now expects the vehicle to coast the rest of
+    // the way to the landmark - because that is exactly where the taper/landmark
+    // contract leaves the gap: the shaper commands zero inside the measured brake
+    // offset, and only *after* that can a vehicle that has not coasted sit short
+    // of the landmark with a zero target. Before brake entry the run is still
+    // commanding travel and the phase's own bound is the right outcome; outside a
+    // travel phase the run is stationary on purpose.
+    //
+    // While it applies, it watches the one position fact the run policy consumes
+    // and faults with `TravelStalled` when that fact has not advanced toward the
+    // leg's landmark for `config_.travelStallTimeoutS`. See
+    // `RunPhaseConfig::travelStallTimeoutS` for why this is a distinct identity
+    // from `PhaseTimeout`.
+    //
+    // The evidence is treated conservatively, which is the whole point of a
+    // bounded *safety* outcome rather than a success claim:
+    //
+    //   * outside brake entry, or in a non-travel phase, the bound is inactive and
+    //     its baseline is cleared, so entering brake entry always starts a fresh
+    //     measurement window;
+    //   * with no usable, finite position this cycle there is no progress fact at
+    //     all, so the stall clock is paused (not reset to zero and not counted
+    //     against the run) and no fault is claimed - the phase's own bound and the
+    //     run-scoped duration bound remain the terminal outcome for that case;
+    //   * progress is a strict decrease of the remaining distance below the best
+    //     (smallest) value seen since brake entry, so any genuine coast toward the
+    //     landmark counts and only a complete absence of it can fault;
+    //   * the arithmetic is unsigned subtraction, so it stays correct across the
+    //     `millis()` wrap exactly like every other bound here.
+    //
+    // It never claims the landmark was reached, never commands motion, and never
+    // reads speed: it is a fault, and its response is the authority's existing
+    // fault stop.
+    void checkTravelProgress(uint32_t nowMs, const RunInputs& inputs) {
+        if (!runPhaseCarriesTravel(phase_) || !inputs.legInBrakeEntry) {
+            travelProgressTracking_ = false;
+            return;
+        }
+        if (!inputs.remainingDistanceUsable || !std::isfinite(inputs.remainingDistanceM)) {
+            // Uncertain evidence pauses the bound rather than faulting on it.
+            if (travelProgressTracking_) {
+                travelProgressImprovedAtMs_ = nowMs;
+            }
+            return;
+        }
+        if (!travelProgressTracking_) {
+            travelProgressTracking_ = true;
+            travelProgressBestRemainingM_ = inputs.remainingDistanceM;
+            travelProgressImprovedAtMs_ = nowMs;
+            return;
+        }
+        if (inputs.remainingDistanceM < travelProgressBestRemainingM_) {
+            travelProgressBestRemainingM_ = inputs.remainingDistanceM;
+            travelProgressImprovedAtMs_ = nowMs;
+            return;
+        }
+        const uint32_t boundMs = boundMsFromSeconds(config_.travelStallTimeoutS.value);
+        if (static_cast<uint32_t>(nowMs - travelProgressImprovedAtMs_) >= boundMs) {
+            latchFault(FaultCode::TravelStalled, nowMs);
+        }
     }
 
     // The phase's configured bound in milliseconds, or 0 when the phase has none.
@@ -1332,6 +1503,14 @@ private:
     // phase transition derives geometry from it, and inside this machine only
     // `initialDelayS()` reads it.
     double initialDelayS_ = 0.0;
+
+    // The travel-progress bound's state (S18B): whether the current travel phase
+    // has a baseline yet, the smallest remaining distance seen since it began, and
+    // the clock reading of the last improvement. Reset on every phase entry and by
+    // `reset()`.
+    bool travelProgressTracking_ = false;
+    double travelProgressBestRemainingM_ = 0.0;
+    uint32_t travelProgressImprovedAtMs_ = 0U;
 
     // The final stop has been verified by this machine's own `stopVerifier_`
     // (latched through Done). It is not the reversal gate's verdict: that latch

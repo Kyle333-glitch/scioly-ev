@@ -400,7 +400,7 @@ void test_the_run_spends_the_execution_plans_delay_bounded_by_the_policy_maximum
 
     const ev::RunPhaseConfig config(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0),
+        measured(5.0), measured(2.0), measured(1.0),
         ev::NearZeroConfig(measured(0.05), measured(0.2),
                            ev::Sourced<uint32_t>(250U, ev::ValueSource::Measured)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), bottle);

@@ -209,6 +209,8 @@ inline const char* telemetryFaultName(FaultCode code) {
             return "DriverFaultBar";
         case FaultCode::RunDurationExceeded:
             return "RunDurationExceeded";
+        case FaultCode::TravelStalled:
+            return "TravelStalled";
     }
     return "?";
 }

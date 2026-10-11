@@ -66,9 +66,23 @@ namespace {
 
 using evscenario::CycleRecord;
 using evscenario::CycleScript;
+using evscenario::PlantConfig;
+using evscenario::PlantModel;
 using evscenario::ScenarioHarness;
 
 evscenario::ScenarioFixtures fixtures() { return evscenario::nominalFixtures(); }
+
+// The fixture set the output-coupled plant tests use (S18B): the nominal fixtures
+// with room in the reversal and final-stop bounds, so the plant's deliberately
+// uncalibrated coast time is not itself what ends a nominally successful planted
+// run. These are fixtures like every other number here, not measurements, and they
+// change nothing about the brake-entry travel-progress bound under test.
+evscenario::ScenarioFixtures plantedFixtures() {
+    evscenario::ScenarioFixtures planted = evscenario::nominalFixtures();
+    planted.reversal.reversalTimeoutS = evscenario::measuredValue(3.0);
+    planted.phase.finalStopTimeoutS = evscenario::measuredValue(3.0);
+    return planted;
+}
 
 const char* phaseName(ev::RunPhase phase) {
     switch (phase) {
@@ -103,6 +117,7 @@ const char* faultName(ev::FaultCode fault) {
         case ev::FaultCode::RunSequencingError: return "RunSequencingError";
         case ev::FaultCode::DriverFaultBar: return "DriverFaultBar";
         case ev::FaultCode::RunDurationExceeded: return "RunDurationExceeded";
+        case ev::FaultCode::TravelStalled: return "TravelStalled";
     }
     return "?";
 }
@@ -226,6 +241,20 @@ CycleRecord starveUntilFault(ScenarioHarness& harness, const CycleScript& starve
                              uint32_t maxCycles = 2000U) {
     for (uint32_t cycle = 0U; cycle < maxCycles; ++cycle) {
         const CycleRecord& record = harness.step(starved);
+        if (record.phase == ev::RunPhase::Fault) {
+            return record;
+        }
+    }
+    return harness.last();
+}
+
+// The nominal evidence, stepped until the run faults, for a harness whose encoder
+// is driven by an attached plant (S18B). The plant ignores the script's prescribed
+// advance, so this is the same driver against output-coupled movement.
+CycleRecord plantedDriveUntilFault(ScenarioHarness& harness, NominalDriver& driver,
+                                   uint32_t maxCycles = 3000U) {
+    for (uint32_t cycle = 0U; cycle < maxCycles; ++cycle) {
+        const CycleRecord& record = harness.step(driver.next(harness));
         if (record.phase == ev::RunPhase::Fault) {
             return record;
         }
@@ -627,7 +656,7 @@ void test_every_fault_identity_is_latched_in_every_phase_and_stops_the_boundary(
         ev::FaultCode::MissingSafetyLimits,  ev::FaultCode::InvalidMotorEffort,
         ev::FaultCode::PhaseTimeout,         ev::FaultCode::ReversalNotVerified,
         ev::FaultCode::DisarmedDuringRun,    ev::FaultCode::RunSequencingError,
-        ev::FaultCode::RunDurationExceeded,
+        ev::FaultCode::RunDurationExceeded,  ev::FaultCode::TravelStalled,
     };
 
     for (const ev::RunPhase phase : phases) {
@@ -1055,7 +1084,9 @@ void test_a_phase_that_never_gets_its_evidence_times_out(void) {
 
     // No contact, no capture, no completed push, no closing distance, no target
     // point and no verified final stop. Each phase waits under its own bound and
-    // faults rather than waiting forever or guessing.
+    // faults rather than waiting forever or guessing. Every one of these cases is
+    // outside the leg's brake offset, so the run's brake-entry travel-progress
+    // bound (S18B) does not apply and each phase's own bound is what ends the run.
     const Case cases[] = {
         {ev::RunPhase::Approach, rolling(), "Approach without contact"},
         {ev::RunPhase::Capture, captureStarved, "Capture without engagement"},
@@ -1177,7 +1208,8 @@ void test_a_vehicle_that_never_moves_again_never_finishes_the_reverse_leg(void) 
 
     // The reverse travel is asked for and authorized, but the encoder never
     // moves: the closing distance never closes and the leg's own bound is what
-    // ends the run.
+    // ends the run. (The reverse leg is still outside its brake offset here, so
+    // the brake-entry travel-progress bound does not apply.)
     CycleScript stuck;
     const CycleRecord faulted = starveUntilFault(harness, stuck, 1000U);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
@@ -2330,6 +2362,180 @@ void test_a_capture_phase_ceiling_slows_only_capture_through_the_one_shaper(void
                           static_cast<int>(slowed.phase()));
 }
 
+// --- Output-coupled liveness (S18B) -----------------------------------------
+//
+// These cases attach the synthetic plant so the encoder follows the authorized
+// output, and assert what the composed production chain does once the commanded
+// travel reaches brake entry - where the target shaper has reached zero inside
+// the measured brake offset and the run expects the vehicle to coast the rest of
+// the way to the landmark. The plant is a deterministic fixture (`ScenarioHarness`
+// labels its limits); it is not a vehicle model, and no case here claims real
+// stopping behavior.
+
+void test_a_planted_coasting_run_reaches_done_through_the_real_chain(void) {
+    // The vehicle has enough inertia to coast past the commanded stop point, so it
+    // crosses the forward stop and the Target Point and the run completes - the
+    // success path the brake-entry travel-progress bound must not break.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{0.15, 1.0, false});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Done, driver),
+                             "the coasting planted run did not reach Done");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                          static_cast<int>(harness.faultCode()));
+    TEST_ASSERT_TRUE(harness.stopVerified());
+    // It really travelled, through the plant: forward past the execution target
+    // and back to the Target Point (within the plant's own lag).
+    double furthestM = 0.0;
+    for (const CycleRecord& record : harness.trace()) {
+        if (record.runAxisPositionM > furthestM) {
+            furthestM = record.runAxisPositionM;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(furthestM > harness.forwardStopMpPositionM(),
+                             "the coasting plant never crossed the forward stop");
+    TEST_ASSERT_TRUE(std::fabs(harness.last().runAxisPositionM - harness.targetPointPositionM()) < 0.2);
+    expectTraceInvariants(harness);
+}
+
+void test_a_planted_ideal_follower_stops_short_and_faults_with_its_own_identity(void) {
+    // The ideal follower stops the instant the shaped target reaches zero, which
+    // is inside the brake offset - short of the forward stop. The run must end
+    // with `TravelStalled`, its own bounded identity, rather than present a zero
+    // target for the whole push budget and end at `PhaseTimeout` - and it must
+    // never claim the push completed or reverse on an unproven landmark.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{1.0, 1.0, false});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    const CycleRecord faulted = plantedDriveUntilFault(harness, driver, 4000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(faulted.phase));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::FaultCode::TravelStalled),
+                                  static_cast<int>(faulted.faultOfRecord),
+                                  "a short-stop did not end with the travel-progress identity");
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    // The stop is the authority's own single fault response: nothing powered.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    TEST_ASSERT_EQUAL_UINT16(0U, faulted.commandedPermille);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::PoweredDirection::None),
+                          static_cast<int>(faulted.commandedDirection));
+    // The fault is terminal and no false progression was ever claimed: the run
+    // never left Push, never entered the reversal, reverse travel or Done.
+    for (const CycleRecord& record : harness.trace()) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::ForwardDecel),
+                                      static_cast<int>(record.phase),
+                                      "the run reversed on a push it never completed");
+        TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::RunPhase::Reverse),
+                              static_cast<int>(record.phase));
+        TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::RunPhase::Done),
+                              static_cast<int>(record.phase));
+    }
+    // It really stopped short of the forward execution target.
+    TEST_ASSERT_TRUE(harness.last().runAxisPositionM < harness.forwardStopMpPositionM());
+    // The vehicle was commanded to travel and the plant responded; the fault is
+    // about the missing coast, not about a vehicle that never moved.
+    TEST_ASSERT_TRUE(plant.positionM() > 0.5);
+    expectTraceInvariants(harness);
+}
+
+void test_a_planted_frozen_run_makes_no_progress_and_the_phase_bound_ends_it(void) {
+    // A vehicle that never moves outside brake entry is not a brake-entry
+    // short-stop: the travel-progress bound does not apply before brake entry, so
+    // the phase's own bound is the bounded terminal outcome and no landmark is
+    // claimed. This is the "no meaningful position progress" case.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{1.0, 1.0, /*frozen=*/true});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    const CycleRecord faulted = plantedDriveUntilFault(harness, driver, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::TravelStalled),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    // The plant never moved, and the run never claimed a forward completion.
+    TEST_ASSERT_TRUE(plant.positionM() == 0.0);
+    TEST_ASSERT_TRUE(harness.last().runAxisPositionM < harness.forwardStopMpPositionM());
+    expectTraceInvariants(harness);
+}
+
+void test_a_planted_overshooting_run_still_reaches_done(void) {
+    // A controlled overshoot (the vehicle travels further than its command asks)
+    // crosses the landmarks early and must still complete safely: the run is not
+    // wedged by arriving past a target, and the final stop still verifies.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{0.08, 1.0, false});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Done, driver),
+                             "the overshooting planted run did not reach Done");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                          static_cast<int>(harness.faultCode()));
+    TEST_ASSERT_TRUE(harness.stopVerified());
+    // It really overshot the forward execution target before coming back.
+    double furthestM = 0.0;
+    for (const CycleRecord& record : harness.trace()) {
+        if (record.runAxisPositionM > furthestM) {
+            furthestM = record.runAxisPositionM;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(furthestM > harness.forwardStopMpPositionM() + 0.05,
+                             "the overshooting plant did not pass the forward stop");
+    expectTraceInvariants(harness);
+}
+
+void test_a_planted_reverse_leg_that_stops_short_faults_with_its_own_identity(void) {
+    // The reverse leg has the same contract as the forward leg: it must reach the
+    // Target Point. Here the forward leg coasts (so the push and reversal
+    // complete) and then the reverse leg becomes ideal, stopping short of the
+    // Target Point inside the reverse brake offset. The run must end with
+    // `TravelStalled` and must never claim the final stop or Done.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{0.15, 1.0, false});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Reverse, driver),
+                             "the planted run never reached the reverse leg");
+    plant.setConfig(PlantConfig{1.0, 1.0, false});
+
+    const CycleRecord faulted = plantedDriveUntilFault(harness, driver, 2000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::TravelStalled),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    // It stopped short of the Target Point and never claimed the final stop.
+    TEST_ASSERT_TRUE(harness.last().remainingToTargetM > 0.0);
+    for (const CycleRecord& record : harness.trace()) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::RunPhase::FinalBrake),
+                                      static_cast<int>(record.phase),
+                                      "a short reverse leg claimed the final stop");
+        TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::RunPhase::Done),
+                              static_cast<int>(record.phase));
+    }
+    expectTraceInvariants(harness);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -2366,5 +2572,10 @@ int main(int, char**) {
     RUN_TEST(test_the_forward_stop_the_run_shapes_to_is_the_push_objective_it_completes_at);
     RUN_TEST(test_the_run_enters_capture_when_the_capture_window_opens_without_claiming_contact);
     RUN_TEST(test_a_capture_phase_ceiling_slows_only_capture_through_the_one_shaper);
+    RUN_TEST(test_a_planted_coasting_run_reaches_done_through_the_real_chain);
+    RUN_TEST(test_a_planted_ideal_follower_stops_short_and_faults_with_its_own_identity);
+    RUN_TEST(test_a_planted_frozen_run_makes_no_progress_and_the_phase_bound_ends_it);
+    RUN_TEST(test_a_planted_overshooting_run_still_reaches_done);
+    RUN_TEST(test_a_planted_reverse_leg_that_stops_short_faults_with_its_own_identity);
     return UNITY_END();
 }

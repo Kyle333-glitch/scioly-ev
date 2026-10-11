@@ -306,6 +306,19 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     runInputs.pushComplete = bottleEvidence.pushComplete;
     runInputs.remainingDistanceUsable = positionUsable_;
     runInputs.remainingDistanceM = remainingToTargetM;
+    // The brake entry of the leg being travelled (S18B): the leg's remaining
+    // distance to its execution target is inside that direction's measured brake
+    // offset, which is exactly where the shaping taper below reaches zero and the
+    // run's travel-progress bound begins to apply. It is computed here, from the
+    // same plan-owned leg target and direction limits the shaper uses, so the run
+    // policy never needs its own copy of the measured offset; with no usable leg
+    // target there is no brake entry.
+    const ev::MotionDirection legDirectionNow =
+        legForward_ ? ev::MotionDirection::Forward : ev::MotionDirection::Reverse;
+    const double legBrakeOffsetM =
+        runProfileLimits_.forDirection(legDirectionNow).brakeOffsetM.value;
+    runInputs.legInBrakeEntry = legTarget.usable && std::isfinite(legBrakeOffsetM) &&
+                                legRemainingM <= legBrakeOffsetM;
     runInputs.stopEvidence = ev::composeStopEvidence(
         estimate_, hasEstimate_, lastValidEstimate_, hasLastValidEstimate_, nowMs,
         vehicleConfig::kMaxSampleAgeMs, vehicleConfig::kStopEvidenceMaxAgeMs);

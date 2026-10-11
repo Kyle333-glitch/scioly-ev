@@ -232,6 +232,13 @@ constexpr double kFixtureFinalApproachTimeoutS = 10.0;
 constexpr double kFixtureFinalStopTimeoutS = 1.0;
 constexpr double kFixtureFinalApproachDistanceM = 0.5;
 
+// The travel-progress bound (S18B). Deliberately generous relative to the fixture
+// cadence and leg lengths: a nominal scripted or plant-coupled leg advances every
+// cycle, so only a scenario that deliberately starves the travel (a stopped-short
+// brake-entry, a frozen plant) reaches it, and this fixture value keeps the
+// nominal runs at their pre-S18B phase budgets rather than ending them early.
+constexpr double kFixtureTravelStallTimeoutS = 2.0;
+
 // The execution plan's own measured fixtures: how far either side of the nominal
 // contact position the touch may credibly be reported, and how far beyond the
 // Bottle Line rule landmark the vehicle's commanded forward stop lies. The
@@ -384,6 +391,7 @@ inline ScenarioFixtures nominalFixtures() {
                            measuredValue(kFixtureReverseTimeoutS),
                            measuredValue(kFixtureFinalApproachTimeoutS),
                            measuredValue(kFixtureFinalStopTimeoutS),
+                           measuredValue(kFixtureTravelStallTimeoutS),
                            measuredValue(kFixtureFinalApproachDistanceM),
                            fixtureStopConfig(), measuredValue(kFixtureMinimumCruiseMps),
                            measuredValue(kFixtureBottlePhaseCeilingMps),
@@ -602,6 +610,113 @@ static_assert(!std::is_default_constructible<ev::AuthorizedMotorCommand>::value,
               "an authorized command must never default-construct");
 
 // ---------------------------------------------------------------------------
+// A deterministic, output-coupled synthetic plant (S18B test support)
+// ---------------------------------------------------------------------------
+//
+// Deliberately NOT a model of this vehicle. The scripted scenarios above
+// prescribe the encoder reading directly, so their position advances whether or
+// not anything was ever commanded - which is exactly why they cannot express the
+// short-stop liveness question: a vehicle that has stopped short keeps being
+// reported as if it were still moving. This plant closes that gap by coupling the
+// commanded motor output to movement, so a phase whose command has reached zero
+// produces no further travel and a vehicle that comes to rest short of a landmark
+// stays there. Its limitations are explicit, and it asserts nothing about the real
+// vehicle:
+//
+//   * one scalar velocity, first-order lag toward a commanded velocity, integrated
+//     as position: no torque, friction, rolling resistance, slip, gearbox,
+//     drivetrain compliance, battery or tyre model;
+//   * the commanded velocity is the profile's shaped target for the cycle, and it
+//     is only followed while the boundary authorized a *drive* - so a refused,
+//     stale, wrong-directed or non-powered cycle produces no movement, which is
+//     the coupling that matters here;
+//   * `responsiveness` (0, 1] is the only inertia: 1.0 tracks the command exactly
+//     (a vehicle that stops the instant the target reaches zero and therefore
+//     comes to rest *short* of the landmark inside the brake offset), and a small
+//     value coasts after the command reaches zero (a vehicle that covers the
+//     remaining offset and reaches the landmark);
+//   * `commandedGain` scales the followed velocity, so a scenario can make the
+//     vehicle overshoot the point its command asks for;
+//   * a `frozen` plant never moves, whatever is commanded - a stalled drivetrain
+//     or a lost encoder, and NOT a claim about how this vehicle fails;
+//   * the cumulative position is converted to ticks (not each cycle's step), so
+//     the tick advance carries no accumulated rounding drift.
+//
+// A passing planted scenario proves what the *composition* does when it is handed
+// this output-coupled evidence. It is still software verification only, and every
+// hardware row in `VERIFIED_STATE.md` stays UNVERIFIED.
+struct PlantConfig {
+    // Explicit constructor rather than member initializers: the host toolchain
+    // builds this tree as C++11, where a class with default member initializers is
+    // not an aggregate and cannot be brace-initialized.
+    constexpr PlantConfig(double responsiveness_ = 1.0, double commandedGain_ = 1.0,
+                          bool frozen_ = false)
+        : responsiveness(responsiveness_), commandedGain(commandedGain_), frozen(frozen_) {}
+
+    // Fraction of the gap between the plant's velocity and the commanded velocity
+    // closed each cycle, in (0, 1]. 1.0 = ideal following; smaller = more inertia,
+    // so the vehicle keeps moving after the command reaches zero.
+    double responsiveness;
+
+    // Multiplier on the followed commanded velocity. 1.0 = no gain; greater than
+    // one makes the vehicle travel further than its command asks for.
+    double commandedGain;
+
+    // When true the plant never moves, whatever is commanded.
+    bool frozen;
+};
+
+class PlantModel {
+public:
+    explicit PlantModel(const PlantConfig& config = PlantConfig()) : config_(config) {}
+
+    // A scenario may change the plant's behaviour between cycles (for example to
+    // make the forward leg coast and the reverse leg stop short).
+    void setConfig(const PlantConfig& config) { config_ = config; }
+    const PlantConfig& config() const { return config_; }
+
+    void reset() {
+        positionM_ = 0.0;
+        velocityMps_ = 0.0;
+    }
+
+    // One cycle. `commandedVelocityMps` is the profile's shaped target for this
+    // cycle and `commandIsDrive` is whether the boundary authorized a drive for
+    // it; the plant only follows a command it was actually given.
+    //
+    // Below `kRestVelocityMps` the plant comes to rest exactly, the way a vehicle
+    // does: a first-order lag alone only ever approaches zero, so its encoder would
+    // keep producing a tick every cycle and a stop could never be observed. The
+    // snap reflects a real drivetrain reaching rest; it is a fixture, not a claim.
+    void advance(double commandedVelocityMps, bool commandIsDrive, double dtS) {
+        const bool follows = commandIsDrive && !config_.frozen;
+        const double target = follows ? config_.commandedGain * commandedVelocityMps : 0.0;
+        velocityMps_ += config_.responsiveness * (target - velocityMps_);
+        if (std::fabs(velocityMps_) < kRestVelocityMps) {
+            velocityMps_ = 0.0;
+        }
+        positionM_ += velocityMps_ * dtS;
+    }
+
+    // The speed below which the plant is treated as at rest, metres per second.
+    static constexpr double kRestVelocityMps = 0.005;
+
+    double positionM() const { return positionM_; }
+    double velocityMps() const { return velocityMps_; }
+
+    // The cumulative position as a signed tick count at the given scale.
+    int32_t tickTarget(double distancePerTickM) const {
+        const double scale = distancePerTickM > 0.0 ? distancePerTickM : 1.0;
+        return static_cast<int32_t>(std::lround(positionM_ / scale));
+    }
+
+private:
+    PlantConfig config_;
+    double positionM_ = 0.0;
+    double velocityMps_ = 0.0;
+};
+
+// ---------------------------------------------------------------------------
 // ScenarioHarness
 // ---------------------------------------------------------------------------
 //
@@ -642,6 +757,14 @@ public:
 
     uint32_t cycles() const { return static_cast<uint32_t>(trace_.size()); }
     uint32_t droppedSamples() const { return droppedSamples_; }
+
+    // Couples the chain to a synthetic plant (S18B). Once attached, each fresh
+    // sample's encoder advance is produced by the plant from the *previous*
+    // cycle's shaped target and authorized command instead of the script's
+    // prescribed advance, so a scripted advance is ignored and movement only
+    // happens when travel was actually commanded. The plant is reset with the run
+    // axis at a new-run boundary.
+    void attachPlant(PlantModel& plant) { plant_ = &plant; }
 
     // True if the scripted tick advance ever needed more decoder steps than the
     // guard allows. A scenario that trips this is not a scenario.
@@ -770,6 +893,9 @@ public:
         stopCyclesAtZeroSinceLastDrive_ = 0U;
         verifiedStopSinceLastDrive_ = false;
         droppedSamples_ = 0U;
+        if (plant_ != nullptr) {
+            plant_->reset();
+        }
         // The recovery verifier restarts with the run: no inherited standstill
         // may discharge the barrier the shared reset deliberately preserved
         // (S18A/P2). Live evidence re-establishes it.
@@ -794,7 +920,24 @@ public:
         // 1. Sensors: the prescribed advances go through the real decoder, the
         //    real tick-to-distance arithmetic and the real estimator.
         if (script.sensorSampleFresh) {
-            if (script.hasRawLevels) {
+            if (plant_ != nullptr) {
+                // Output-coupled sampling (S18B): the plant is advanced by the
+                // *previous* cycle's shaped target and authorized command - one
+                // cycle of lag, as a real actuator has - and the harness moves the
+                // real decoder to the plant's cumulative position. A refused or
+                // non-powered command therefore produces no movement.
+                plant_->advance(lastShapedTargetMps_, lastCommandWasDrive_,
+                                static_cast<double>(dtMs) / 1000.0);
+                const int64_t targetTick = static_cast<int64_t>(plant_->tickTarget(
+                    fixtures_.calibration.distancePerEncoderTickM.value));
+                const int64_t delta = targetTick - static_cast<int64_t>(decoder_.ticks());
+                if (delta < static_cast<int64_t>(INT32_MIN) ||
+                    delta > static_cast<int64_t>(INT32_MAX)) {
+                    decoderStepGuardTripped_ = true;
+                } else {
+                    advanceEncoderBy(static_cast<int32_t>(delta));
+                }
+            } else if (script.hasRawLevels) {
                 // The scenario prescribes the sample; the production decoder
                 // decides what it counts - a duplicate or B-only sample is
                 // ignored, an A transition is counted from its landing state.
@@ -863,6 +1006,18 @@ public:
         inputs.pushComplete = script.pushComplete;
         inputs.remainingDistanceUsable = positionUsable;
         inputs.remainingDistanceM = remainingToTargetM;
+        // The brake entry of the leg being travelled (S18B): within the leg's own
+        // measured brake offset, which is where the shaping taper has reached zero
+        // and the run expects the vehicle to coast the rest of the way to the
+        // landmark. Computed from the same production values the shaper uses - the
+        // plan's leg remaining distance and the direction's measured brake offset -
+        // so the harness cannot disagree with the vehicle layer about where brake
+        // entry is. With no usable leg target there is no brake entry.
+        const ev::MotionDirection brakeEntryDirection =
+            legForward_ ? ev::MotionDirection::Forward : ev::MotionDirection::Reverse;
+        const double legBrakeOffsetM = profile_.forDirection(brakeEntryDirection).brakeOffsetM.value;
+        inputs.legInBrakeEntry = legTarget.usable && std::isfinite(legBrakeOffsetM) &&
+                                 legRemainingM <= legBrakeOffsetM;
         // The stop-verification packet, composed by its production owner from the
         // current cycle's claim and the retained window-derived estimate: the
         // control path's limit for the claim, the packet's own longer limit for
@@ -977,6 +1132,11 @@ public:
 
         // 7. The actuator boundary: the single authorized command.
         actuator_.apply(authorized.command);
+
+        // What the plant follows on the next cycle (S18B): this cycle's shaped
+        // target and whether the boundary authorized a drive for it.
+        lastShapedTargetMps_ = shaped.targetVelocityMps;
+        lastCommandWasDrive_ = authorized.command.isDriving();
 
         CycleRecord record;
         record.nowMs = nowMs_;
@@ -1212,6 +1372,12 @@ private:
     uint32_t nowMs_ = 0U;
     uint32_t lastCycleMs_ = 0U;
     uint32_t droppedSamples_ = 0U;
+
+    // The optional output-coupled plant (S18B) and the previous cycle's command
+    // it follows. Null means the classic scripted-advance behaviour.
+    PlantModel* plant_ = nullptr;
+    double lastShapedTargetMps_ = 0.0;
+    bool lastCommandWasDrive_ = false;
 
     // The run layer's own geometry, adopted from a valid announcement only. The
     // zero geometry is the no-run state: the axis origin, with no run to give it

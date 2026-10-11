@@ -83,7 +83,7 @@ ev::BottleEvidenceConfig fixtureBottleConfig() {
 ev::RunPhaseConfig phaseConfig(double maximumOptionalDelayS) {
     return ev::RunPhaseConfig(
         measured(maximumOptionalDelayS), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(5.0), measured(1.0),
+        measured(5.0), measured(5.0), measured(2.0), measured(1.0),
         stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
         measured(0.30), fixtureBottleConfig());
 }
@@ -168,6 +168,11 @@ struct Evidence {
     bool pushed = false;
     bool remainingUsable = false;
     double remainingM = 0.0;
+    // Whether the leg being travelled is inside its measured brake offset (S18B),
+    // the fact that arms the run's brake-entry travel-progress bound. Stated here
+    // like every other input; in production the vehicle layer derives it from the
+    // plan's leg target and the direction's brake offset.
+    bool brakeEntry = false;
     bool stopUsable = true;
     double stopSpeedMps = 0.0;
     bool stopClaimed = true;
@@ -183,6 +188,7 @@ ev::RunInputs inputsFrom(const Evidence& evidence) {
     inputs.pushComplete = evidence.pushed;
     inputs.remainingDistanceUsable = evidence.remainingUsable;
     inputs.remainingDistanceM = evidence.remainingM;
+    inputs.legInBrakeEntry = evidence.brakeEntry;
     inputs.stopEvidence.velocityUsable = evidence.stopUsable;
     inputs.stopEvidence.velocityMps = evidence.stopSpeedMps;
     inputs.stopEvidence.zeroSpeedClaimed = evidence.stopClaimed;
@@ -426,7 +432,8 @@ void test_a_policy_configuration_that_is_not_usable_faults(void) {
     // This machine's own bounds are placeholders, so it may not sequence a run.
     const ev::RunPhaseConfig placeholderDelay = ev::RunPhaseConfig(
         provisional(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(0.10),
         measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(placeholderDelay, reversalConfig(), 1000U);
     TEST_ASSERT_FALSE(harness.machine.configUsable());
@@ -650,8 +657,9 @@ void test_a_bound_below_a_millisecond_expires_rather_than_never(void) {
     // timeout into an unbounded wait.
     const ev::RunPhaseConfig shortBounds =
         ev::RunPhaseConfig(measured(0.0), measured(0.0005), measured(1.0), measured(5.0),
-                           measured(5.0), measured(5.0), measured(5.0), measured(1.0),
-                           stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30),
+                           measured(5.0), measured(5.0), measured(5.0), measured(2.0),
+                           measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+                           measured(0.30),
                            measured(0.30), measured(0.30), fixtureBottleConfig());
     Harness harness(shortBounds, reversalConfig(), 1000U);
     announceValidRun(harness);
@@ -1131,6 +1139,147 @@ void test_final_brake_waits_for_the_verified_stop_and_times_out(void) {
     TEST_ASSERT_FALSE(status.stopVerified);
 }
 
+// --- The brake-entry travel-progress bound (S18B) ---------------------------
+
+// A travel phase that has reached brake entry - the shaper has reached zero and
+// the run expects the vehicle to coast the rest of the way to the landmark - and
+// then makes no progress ends with the run's own identity, not the phase bound.
+// Both legs, and the phases on each.
+void test_a_brake_entry_travel_phase_without_progress_faults_travel_stalled(void) {
+    struct Case {
+        ev::RunPhase phase;
+        double remainingM;
+    };
+    // The remaining distance is held constant so the phase neither completes nor
+    // leaves; the value only has to keep the phase (Reverse stays above the final
+    // approach distance, FinalApproach stays above the Target Point).
+    const Case cases[] = {
+        {ev::RunPhase::Approach, -5.0},
+        {ev::RunPhase::Push, -1.0},
+        {ev::RunPhase::Reverse, 2.0},
+        {ev::RunPhase::FinalApproach, 0.5},
+    };
+
+    for (const Case& testCase : cases) {
+        Harness harness = defaultHarness(0.0);
+        announceValidRun(harness);
+        TEST_ASSERT_TRUE_MESSAGE(driveTo(harness, testCase.phase), phaseName(testCase.phase));
+
+        Evidence stuck;
+        stuck.remainingUsable = true;
+        stuck.remainingM = testCase.remainingM;
+        stuck.brakeEntry = true;
+        const ev::RunStatus status = starveUntilFault(harness, stuck, 400U);
+        expectFault(ev::FaultCode::TravelStalled, status);
+        expectCommand(ev::RunMotionCommand::None, status);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                                      static_cast<int>(status.fault), phaseName(testCase.phase));
+    }
+}
+
+// Outside brake entry the bound is inactive: the run is still commanding travel,
+// so the phase's own bound is the bounded outcome.
+void test_the_travel_progress_bound_is_inactive_outside_brake_entry(void) {
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Approach));
+
+    Evidence stuck;
+    stuck.remainingUsable = true;
+    stuck.remainingM = 2.0;
+    stuck.brakeEntry = false;
+    const ev::RunStatus status = starveUntilFault(harness, stuck, 400U);
+    expectFault(ev::FaultCode::PhaseTimeout, status);
+}
+
+// Unusable position evidence pauses the bound rather than faulting on it: with no
+// progress fact there is nothing to fault on, and the phase bound is the outcome.
+void test_the_travel_progress_bound_pauses_on_unusable_evidence(void) {
+    Harness harness = defaultHarness(0.0);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Push));
+
+    Evidence stuck;
+    stuck.remainingUsable = false;
+    stuck.brakeEntry = true;
+    const ev::RunStatus status = starveUntilFault(harness, stuck, 400U);
+    expectFault(ev::FaultCode::PhaseTimeout, status);
+}
+
+// Progress resets the bound: travel that keeps advancing is never faulted, however
+// long it takes, and only the stall after the last advance ends the run.
+void test_progress_resets_the_travel_progress_bound(void) {
+    // A push bound long enough that the phase deadline cannot be what ends this
+    // run, so only the stall window is under test.
+    const ev::RunPhaseConfig longPushBound(
+        measured(0.0), measured(5.0), measured(1.0), measured(10.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(2.0), measured(1.0),
+        stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
+        measured(0.30), fixtureBottleConfig());
+    Harness harness(longPushBound, reversalConfig(), 1000U);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Push));
+
+    Evidence moving;
+    moving.remainingUsable = true;
+    moving.brakeEntry = true;
+    double remainingM = -0.5;
+    // Advance for 5 s - more than twice the fixture's 2 s window - and stay in
+    // Push: continuous progress must never be faulted, however long it takes.
+    for (uint32_t step = 0U; step < 100U; ++step) {
+        moving.remainingM = remainingM;
+        remainingM -= 0.001;
+        const ev::RunStatus status = tick(harness, moving);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::RunPhase::Push),
+                                      static_cast<int>(status.phase),
+                                      "the bound faulted travel that was still advancing");
+    }
+
+    // Now it stops advancing: the bound ends the run after its own window from the
+    // last improvement, not from the phase entry.
+    moving.remainingM = remainingM;
+    const ev::RunStatus status = starveUntilFault(harness, moving, 200U);
+    expectFault(ev::FaultCode::TravelStalled, status);
+}
+
+// The phase bound keeps precedence. A policy whose stall window is longer than the
+// phase budget must not change which identity a starved phase produces: the phase
+// deadline is still the final fail-safe.
+void test_the_phase_bound_keeps_precedence_over_the_travel_progress_bound(void) {
+    const ev::RunPhaseConfig shortPushBound(
+        measured(0.0), measured(5.0), measured(1.0), measured(1.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(5.0), measured(1.0),
+        stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30), measured(0.30),
+        measured(0.30), fixtureBottleConfig());
+    Harness harness(shortPushBound, reversalConfig(), 1000U);
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Push));
+
+    Evidence stuck;
+    stuck.remainingUsable = true;
+    stuck.remainingM = -1.0;
+    stuck.brakeEntry = true;
+    // 1 s push bound vs a 5 s stall window: the phase deadline fires first.
+    const ev::RunStatus status = starveUntilFault(harness, stuck, 400U);
+    expectFault(ev::FaultCode::PhaseTimeout, status);
+}
+
+// The bound's arithmetic is unsigned subtraction like every other bound here, so
+// it survives the millis() wrap.
+void test_the_travel_progress_bound_is_wrap_safe(void) {
+    Harness harness = defaultHarness(0.0);
+    harness.nowMs = 0xFFFFFF00U;  // 256 ms before the wrap, inside the stall window
+    announceValidRun(harness);
+    TEST_ASSERT_TRUE(driveTo(harness, ev::RunPhase::Push));
+
+    Evidence stuck;
+    stuck.remainingUsable = true;
+    stuck.remainingM = -1.0;
+    stuck.brakeEntry = true;
+    const ev::RunStatus status = starveUntilFault(harness, stuck, 400U);
+    expectFault(ev::FaultCode::TravelStalled, status);
+}
+
 // --- Done and reset ---------------------------------------------------------
 
 void test_done_never_permits_further_drive(void) {
@@ -1530,7 +1679,7 @@ void test_cited_rule_derived_optional_delay_passes(void) {
     TEST_ASSERT_TRUE(ev::optionalDelayProvenanceIsEstablished(citedDelay));
     const ev::RunPhaseConfig config(
         citedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
     ev::CompetitionStateMachine machine(config, reversalConfig());
@@ -1541,7 +1690,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     // Provisional placeholder fails.
     const ev::RunPhaseConfig provisionalConfig(
         provisional(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1553,7 +1702,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
     TEST_ASSERT_FALSE(ev::optionalDelayProvenanceIsEstablished(uncitedDelay));
     const ev::RunPhaseConfig uncitedConfig(
         uncitedDelay, measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)),
         measured(0.10), measured(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(uncitedConfig).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1571,7 +1720,7 @@ void test_uncited_and_provisional_optional_delay_fail(void) {
 void test_the_bottle_phase_ceilings_are_selected_by_phase(void) {
     const ev::RunPhaseConfig config(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.11), measured(0.22), measured(0.33), fixtureBottleConfig());
     TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(config).ok);
 
@@ -1612,7 +1761,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // Provisional provenance: refused before anything is sequenced.
     const ev::RunPhaseConfig provisionalCeilings(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         provisional(0.30), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_FALSE(ev::validateRunPhaseConfig(provisionalCeilings).ok);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::ValuesAreNotMeasured),
@@ -1625,7 +1774,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // cannot complete.
     const ev::RunPhaseConfig zeroCeiling(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.0), measured(0.30), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonPositiveStrategyCeiling),
                           static_cast<int>(ev::validateRunPhaseConfig(zeroCeiling).error));
@@ -1633,7 +1782,7 @@ void test_a_placeholder_bottle_phase_ceiling_is_unusable(void) {
     // A NaN ceiling is told apart from a non-positive one.
     const ev::RunPhaseConfig nanCeiling(
         measured(1.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0), measured(5.0),
-        measured(5.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
+        measured(5.0), measured(2.0), measured(1.0), stopConfig(measured(0.05), measured(0.2)), measured(0.10),
         measured(0.30), measured(std::nan("")), measured(0.30), fixtureBottleConfig());
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhaseConfigError::NonFiniteValue),
                           static_cast<int>(ev::validateRunPhaseConfig(nanCeiling).error));
@@ -1934,6 +2083,12 @@ int main(int, char**) {
     RUN_TEST(test_reverse_waits_for_the_closing_distance_and_times_out);
     RUN_TEST(test_final_approach_waits_for_the_target_point_and_times_out);
     RUN_TEST(test_final_brake_waits_for_the_verified_stop_and_times_out);
+    RUN_TEST(test_a_brake_entry_travel_phase_without_progress_faults_travel_stalled);
+    RUN_TEST(test_the_travel_progress_bound_is_inactive_outside_brake_entry);
+    RUN_TEST(test_the_travel_progress_bound_pauses_on_unusable_evidence);
+    RUN_TEST(test_progress_resets_the_travel_progress_bound);
+    RUN_TEST(test_the_phase_bound_keeps_precedence_over_the_travel_progress_bound);
+    RUN_TEST(test_the_travel_progress_bound_is_wrap_safe);
     RUN_TEST(test_done_never_permits_further_drive);
     RUN_TEST(test_a_fault_after_done_is_still_recorded);
     RUN_TEST(test_reset_requires_a_new_announcement_and_a_new_arming_decision);

@@ -45,6 +45,7 @@ inline FaultStopPolicy faultStopPolicyFor(FaultCode code) {
         case FaultCode::DisarmedDuringRun:
         case FaultCode::RunSequencingError:
         case FaultCode::RunDurationExceeded:
+        case FaultCode::TravelStalled:
             return FaultStopPolicy::Disable;
         default:
             // New enumerators must be mapped explicitly; this default is the

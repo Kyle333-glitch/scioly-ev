@@ -190,6 +190,7 @@ FAULTS: Final[tuple[str, ...]] = (
     "RunSequencingError",
     "DriverFaultBar",
     "RunDurationExceeded",
+    "TravelStalled",
 )
 
 # `telemetryAuthzOutcomeName()`.

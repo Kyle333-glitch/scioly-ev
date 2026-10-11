@@ -115,7 +115,8 @@ ev::SafetyLimits limitsWithMaxEffort(uint16_t maxEffortPermille) {
 ev::RunPhaseConfig chainPhaseConfig() {
     return ev::RunPhaseConfig(
         measuredValue(0.0), measuredValue(5.0), measuredValue(1.0), measuredValue(5.0),
-        measuredValue(5.0), measuredValue(5.0), measuredValue(5.0), measuredValue(1.0),
+        measuredValue(5.0), measuredValue(5.0), measuredValue(5.0), measuredValue(2.0),
+        measuredValue(1.0),
         stopConfig(measuredValue(0.05), measuredValue(0.2)), measuredValue(0.10),
         measuredValue(0.30), measuredValue(0.30), measuredValue(0.30),
         ev::BottleEvidenceConfig(measuredValue(0.10), measuredValue(0.20), measuredValue(0.05)));

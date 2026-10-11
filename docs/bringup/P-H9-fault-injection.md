@@ -57,6 +57,7 @@ went to the de-energized state.
 | provisional calibration value present, then `arm` | arming refused, naming the failing check |
 | missing safety limits present, then `arm` | arming refused, naming the failing check |
 | a phase held past its configured bound | `PhaseTimeout`, motion stopped |
+| a travel leg that reaches brake entry and then stops advancing (the taper's zero point short of the leg's landmark) | `TravelStalled`, motion stopped - applies only from brake entry, in `Approach`/`Capture`/`Push`/`Reverse`/`FinalApproach`. Like every run-phase row here it needs a run, so it requires the same calibration promotion as the others; the bound itself is a placeholder (`kPlannedTravelStallTimeoutS` is `Provisional`), and until it is measured no run policy validates |
 | a stop that cannot be verified (keep the shaft moving) | `ReversalNotVerified`, motion stopped |
 | `disarm` during a run | `DisarmedDuringRun`, motion stopped |
 | a sequencing inconsistency, if one can be provoked | `RunSequencingError` |

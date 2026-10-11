@@ -266,6 +266,19 @@ constexpr double kPlannedFinalStopTimeoutS = 10.0;
 constexpr double kPlannedFinalApproachDistanceM = 0.3;
 constexpr double kPlannedReversalTimeoutS = 3.0;
 
+// The travel-progress bound (S18B): how long a travel phase may go without the
+// position it acts on advancing toward the leg's execution target before the run
+// faults `TravelStalled` rather than presenting a zero target until its phase
+// bound expires. It is a **placeholder** - no run may be armed on it - and the
+// measurement that replaces it is a low-speed, loaded trace of the time between
+// the shaped target reaching zero (inside the measured brake offset) and the
+// vehicle actually coming to rest, plus a conservative margin; it is not a
+// number anyone has measured, and it is deliberately not derived from the phase
+// bounds, which measure a different thing (waiting for evidence, not advancing).
+// Until then it is Provisional, `validateRunPhaseConfig()` refuses the run
+// policy, and no run can be announced or armed on it.
+constexpr double kPlannedTravelStallTimeoutS = 2.0;
+
 // The planned polarity fact, in its three encodings, for the one physical
 // direction the project cannot name yet (`VERIFIED_STATE.md` #4): which way the
 // motor turns for a positive command, which way the decoder counts for forward
@@ -553,6 +566,7 @@ inline ev::RunPhaseConfig runPhaseConfig() {
                               provisionalValue(kPlannedReverseTimeoutS),
                               provisionalValue(kPlannedFinalApproachTimeoutS),
                               provisionalValue(kPlannedFinalStopTimeoutS),
+                              provisionalValue(kPlannedTravelStallTimeoutS),
                               provisionalValue(kPlannedFinalApproachDistanceM),
                               finalStopVerification(),
                               provisionalValue(kPlannedMinimumCruiseMps),
@@ -694,6 +708,7 @@ inline bool allPromotedValuesCiteEvidence() {
                             provenance::cited(phase.reverseTimeoutS) &&
                             provenance::cited(phase.finalApproachTimeoutS) &&
                             provenance::cited(phase.finalStopTimeoutS) &&
+                            provenance::cited(phase.travelStallTimeoutS) &&
                             provenance::cited(phase.finalApproachDistanceM) &&
                             provenance::cited(phase.minimumPlannedCruiseMps) &&
                             provenance::cited(phase.approachCeilingMps) &&

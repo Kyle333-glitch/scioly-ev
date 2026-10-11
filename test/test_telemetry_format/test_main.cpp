@@ -312,7 +312,7 @@ void test_vocabulary_names_are_wire_safe_and_measured(void) {
     TEST_ASSERT_EQUAL_UINT32(kLongestMotorModeNameChars, static_cast<uint32_t>(longestMotorMode));
 
     size_t longestFault = 0U;
-    for (uint8_t index = 0U; index <= static_cast<uint8_t>(ev::FaultCode::RunDurationExceeded);
+    for (uint8_t index = 0U; index <= static_cast<uint8_t>(ev::FaultCode::TravelStalled);
          ++index) {
         const char* name = ev::telemetryFaultName(static_cast<ev::FaultCode>(index));
         assertWireSafeName(name);

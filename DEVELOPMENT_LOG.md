@@ -7794,3 +7794,111 @@ clean. S14 bench safety, S15 integrity and S16 Option D behavior preserved;
 encoder-loss response and short-stop policy remain honestly identified as
 S18B/S18C work. Full ledger, per-case lists, resource analysis and remaining
 gates: `.agent-work/stages/S18A.md`. D54 preserved byte-identically above.
+
+## D56 / S18B - 2026-10-10 - A travel phase that reaches brake entry and stops advancing ends with its own identity
+
+**S18B PASS under the user-approved S18A/S18B/S18C split; checkpoint commit
+authorized on full pass only (see below).** S18B covers P3 (the shaper's zero
+inside the brake offset versus a state machine that cannot complete until the
+landmark is crossed) plus the P8 output-coupled liveness regressions that
+finding needs. S18A is the checkpointed input revision (`a049e49`); S18C
+(P4/H7 encoder-loss response, P7 timing model, remaining P8) is not started and
+S18 as a whole stays open. No S16 arming-policy change, no timing change, no
+new sensor, no calibration promotion, no hardware work.
+
+**The defect, reproduced on the pre-repair revision.** A positive brake offset
+makes the target shaper reach zero *inside* the measured offset, while the run
+layer cannot leave a travel phase until the vehicle reaches that phase's
+landmark. A vehicle that tracks its command and comes to rest short of the
+landmark therefore presents a zero target for the whole phase budget and leaves
+only at `PhaseTimeout`. Reproduced on `a049e49` with an output-coupled synthetic
+plant against the real `RunExecutionPlan` / `MotionProfile` /
+`CompetitionStateMachine` chain (`.agent-work/reviews/s18b-2026-10-10/`):
+forward settled **6.059502 m** against a forward execution target of
+**6.100000 m** (short by **0.040498 m**, inside the fixture's 50 mm brake
+offset) - **391 cycles** with a zero shaped target while still short,
+**11 980 ms** spent in `Push`, ending `PhaseTimeout` with no identity of its
+own; reverse settled **5.040629 m** against a Target Point of **5.000000 m**
+(short by **0.040600 m**) and ended `PhaseTimeout` in a phase other than
+`Reverse`. These are software counterexamples, not measured stopping distances,
+and no such number enters production.
+
+**Chosen policy.** The narrowest option that satisfies the invariants without
+inventing calibration: name brake entry explicitly as its own input fact and
+give the short-stop one bounded terminal outcome with its own identity.
+Rejected: a "stop-short fault" triggered by a zero-speed claim alone (a single
+motor encoder cannot prove standstill, so a claim derived from encoder silence
+is not independent evidence); any creep or powered correction drive (the
+physical endpoint stays the only source of truth and the firmware must not
+manufacture motion to satisfy a threshold); and renaming `PhaseTimeout`, which
+measures a different thing (waiting for evidence, not travelling).
+
+**Implementation.** `RunInputs::legInBrakeEntry` (derived in
+`src/VehicleRuntime.cpp` from the plan-owned leg remaining distance and the
+direction's measured brake offset - the same values the shaper uses, so the run
+policy never holds a second copy of a measured distance).
+`RunPhaseConfig::travelStallTimeoutS` (production
+`kPlannedTravelStallTimeoutS` is a `Provisional` placeholder, so
+`validateRunPhaseConfig()` still refuses the run policy and production remains
+unarmable). `CompetitionStateMachine::checkTravelProgress()` latches the new
+`FaultCode::TravelStalled` when a travel phase (`runPhaseCarriesTravel()`:
+`Approach`, `Capture`, `Push`, `Reverse`, `FinalApproach`) has been at brake
+entry for `travelStallTimeoutS` without the remaining distance strictly
+decreasing below the best value seen since the phase began. It is evaluated
+after the phase bound so the phase deadline keeps precedence, re-baselines on
+every phase entry, pauses (never faults) on unusable or non-finite position
+evidence, uses wrap-safe unsigned subtraction, never reads speed, never
+re-derives a landmark, commands no motion, and its response is the authority's
+existing single fault stop (`FaultStopPolicy::Disable`, like every other
+non-electrical fault). The wire schema stays **v3**: `telemetryFaultName()`
+gains the `TravelStalled` spelling and the vocabulary list widens, exactly as
+`RunDurationExceeded` did (S10). A semantic fault identity required the
+corresponding test, diagnostic-contract and minimal documentation updates:
+`docs/bringup/P-H9-fault-injection.md` gains its injection row and
+`SOFTWARE_ARCHITECTURE.md` section 14 names the identity and the bound.
+
+**Output-coupled liveness tests (P8).** The scenario harness gains a
+deterministic synthetic plant that couples commanded output to movement -
+position advances only while the boundary authorized a drive, so a phase whose
+command has reached zero produces no further travel - with explicit limitations
+(one scalar velocity, first-order lag, no torque, friction, slip, gearbox,
+battery or tyre model), labelled in the header. Five new `test_scenario` cases:
+a coasting plant still reaches `Done` (the success path the bound must not
+break); an ideal follower stops short and faults `TravelStalled` - never
+`PhaseTimeout`, never a push/reversal/Done claim, `ForcedFaultStop`, zero
+permille, no direction; a frozen plant makes no progress outside brake entry and
+the phase bound still ends it; a controlled overshoot still reaches `Done`; and
+a reverse leg that stops short faults `TravelStalled` without ever claiming the
+final stop. Six new `test_competition_state` cases cover the bound directly:
+every travel phase without progress, inactivity outside brake entry, the pause
+on unusable evidence, continuous progress never faulted, phase-bound
+precedence, and `uint32` wrap safety. Two historical expectations were extended
+rather than corrected: the whole-fault-identity latch sweep and the
+phase-timeout cases now state that they are outside brake entry.
+
+**Validation (exit codes recorded).** Native **696/696 in 36 suites**, exit 0
+(baseline at `a049e49` 685 - `test_competition_state` +6, `test_scenario` +5,
+every other suite unchanged; all new tests `RUN_TEST`-registered, zero orphans
+by script audit). `nano_r4` / `bench` / `bench-watchdog`: 3 clean rebuilds
+SUCCESS, **0 warnings**, RAM **7468 / 7668 / 7660** (+40 B each: the new
+`Sourced` phase bound, the run-input flag and the machine's three progress
+members), Flash **76968 / 84480 / 83812** (+496 / +500 / +492 B: the progress
+bound, the new identity and its vocabulary). Telemetry **142/142 OK**, exit 0.
+`git diff --check` clean, exit 0, and all 15 changed tracked files are 100 %
+CRLF. Preserved: S18A reversal/stop-evidence safety (its suites pass
+unchanged), S16 Option D arming (untouched), S14 bench safety, S15 integrity,
+empirical timing still disabled (`kRunTimingModelValidated` false), production
+still unarmable on Provisional calibration.
+
+**Still open.** S18C: P4/H7 (frozen encoder counts leave production
+feed-forward drive requests active - the phase bound ends such a run, but there
+is still no encoder-progress watch), P7/M16 timing model, remaining P8. The
+2026-10-08 audit's **M1 remains present** (`resetMotionChainForNewRun()` still
+resets the ISR-shared decoder with interrupts enabled at
+`src/VehicleRuntime.cpp:1133`, with only the adapter's second
+`resetAndReestablishReference()` masked) and is recorded here as an outstanding
+safety finding rather than cleaned up inside S18B. The other 2026-10-08
+findings (M2-M18, L1-L6) stay open except H3, which this stage repairs. Every
+physical placeholder stays `Provisional`, no stopping distance is claimed, and
+the brake offset that defines brake entry stays unmeasured until the physical
+braking trials set it. Full record: `.agent-work/stages/S18B.md`.
