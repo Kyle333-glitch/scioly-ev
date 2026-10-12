@@ -364,28 +364,75 @@ def _delta(measured: Optional[float], believed: Optional[float]) -> Optional[flo
 def _capture_comparability(metrics: dict[str, Any]) -> Optional[str]:
     """Why this capture's believed endpoint must not be compared, or ``None``.
 
-    Two conditions refuse the comparison outright rather than coloring it:
+    A comparison is eligible only when the whole capture's integrity supports
+    attributing the believed endpoint to the one analyzed run. Each condition
+    below refuses the comparison outright rather than coloring it:
 
     * the capture holds more than one session or more than one run, so a caller
       cannot say which run an external measurement was taken on - the analyzer
       picks the last run, but the *pairing* is not the tool's to assert;
     * the selected run recorded no verified final stop, so there is no endpoint to
       compare - the last sample is not a stop position, and comparing a tape
-      measure against it would invent an endpoint the firmware never verified.
+      measure against it would invent an endpoint the firmware never verified;
+    * the capture contains a suspected unsegmented clock restart (a backwards
+      timestamp that is neither a uint32 wrap nor a few-millisecond
+      re-ordering), so records on either side of the discontinuity cannot be
+      attributed to one continuous capture;
+    * the capture holds an event-only session - a Boot with no samples - which
+      the sample-derived session check cannot see, so the available evidence
+      does not prove one unambiguous capture/session;
+    * the capture was parsed permissively with skipped malformed records, which
+      could conceal Boot, run, event, sample or stop-verification evidence, so
+      session/run attribution cannot be established from the surviving records.
+
+    Unknown integrity is not verified integrity: every applicable reason is
+    reported (joined in a fixed order), and any refusal leaves the numeric
+    deltas unavailable rather than presenting an attributable calibration delta.
+    Descriptive believed values stay visible; only the comparison is refused.
     """
     selection = metrics["capture"]["selection"]
+    reasons: list[str] = []
     if selection["mixed_sessions"] or selection["mixed_runs"]:
-        return (
+        reasons.append(
             "the capture holds more than one run ("
             f"sessions={selection['session_count']}, "
             f"runs={selection['runs_in_session']}); an external measurement cannot "
             "be attributed to the analyzed run"
         )
     if metrics["position"]["end_position_source"] != "verified_final_stop":
-        return (
+        reasons.append(
             "the analyzed run recorded no verified final stop ("
             f"{metrics['position']['end_position_unavailable_reason']})"
         )
+    restart_count = metrics["capture"].get("restart_suspected_count", 0)
+    if restart_count:
+        reasons.append(
+            f"the capture contains {restart_count} suspected clock restart(s) "
+            "(a backwards timestamp that is neither a uint32 wrap nor a "
+            "few-millisecond re-ordering); records on either side of the "
+            "discontinuity cannot be attributed to one continuous capture"
+        )
+    event_only_sessions = [
+        session["index"]
+        for session in metrics["capture"].get("sessions", [])
+        if not session["sample_count"]
+    ]
+    if event_only_sessions:
+        reasons.append(
+            "the capture holds an event-only session "
+            f"(session(s) {event_only_sessions} opened by Boot with no samples); "
+            "the available evidence does not prove one unambiguous capture/session"
+        )
+    parse_errors = metrics["counts"]["parse_errors"]
+    if parse_errors:
+        reasons.append(
+            f"the capture was parsed permissively with {parse_errors} skipped "
+            "malformed record(s) that could conceal Boot, run, event, sample or "
+            "stop-verification evidence; session/run attribution cannot be "
+            "established from the surviving records"
+        )
+    if reasons:
+        return "; ".join(reasons)
     return None
 
 
@@ -398,12 +445,14 @@ def compare_endpoints(
     A blank cell yields a ``None`` delta rather than a zero one, so "not
     measured" can never read as "measured exactly right".
 
-    A delta is computed only when the capture can be attributed to one run and
-    that run recorded a verified final stop (``_capture_comparability``). A
-    capture that cannot be attributed - one holding several runs, or one whose run
-    never verified a stop - keeps the believed numbers visible and reports *why*
-    the comparison was refused, because a delta against the last sample in the
-    file is exactly the confusion this module exists to avoid.
+    A delta is computed only when the whole capture's integrity supports
+    attributing the believed endpoint to the one analyzed run
+    (``_capture_comparability``): one session, one run, a verified final stop,
+    no suspected unsegmented restart, no event-only extra Boot, and no
+    permissively skipped malformed records. A capture that cannot be attributed
+    keeps the believed numbers visible and reports *why* the comparison was
+    refused, because a delta against an unattributable endpoint is exactly the
+    confusion this module exists to avoid.
     """
     rows: list[dict[str, Any]] = []
     matched: set[str] = set()

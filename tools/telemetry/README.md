@@ -215,6 +215,17 @@ rather than a zero that would read as "measured exactly right". A mistyped
 was not analyzed, and runs with no measurement row, are both listed rather than
 silently skipped.
 
+A comparison is eligible only when the whole capture's integrity supports
+attributing the believed endpoint to the one analyzed run: one session, one
+run, a verified final stop, no suspected unsegmented clock restart, no
+event-only extra `Boot` (a session with events but no samples, which the
+sample-derived `mixed_sessions` flag cannot see), and no permissively skipped
+malformed records. Unknown integrity is not verified integrity, so any of
+these refuses the comparison with an explicit reason in
+`comparison_refused_reason` (every applicable reason is kept, in a fixed
+order), and the refused deltas are null - never zero. The descriptive
+believed values stay visible; only the attributable delta is withheld.
+
 ## How a log is read
 
 Telemetry lines are `EVS<version>,...` (one control tick) and `EVE<version>,...`

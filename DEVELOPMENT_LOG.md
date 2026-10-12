@@ -8286,3 +8286,53 @@ raw evidence: .agent-work/reviews/r1d-m8/; checkpoint verification:
 .agent-work/utilities/U1-R1D-checkpoint.md (written after commit). Original
 D54-D62 and S18C/S18R/R1A/R1B/R1C records unchanged. Next eligible action is
 the next R1 stage, only in a new run. STOP after this stage.
+
+## D64 / R1E - 2026-10-12 - Ambiguous endpoint comparisons are refused, not delta'd
+
+R1E repairs the October 8 audit's M12 (endpoint comparison eligibility omits
+known capture ambiguity/damage) in the Python telemetry tooling only.
+endpoints._capture_comparability checked only mixed sample sessions/runs and
+the verified-stop source, so three damaged shapes still wrote comparable=true
+with a numeric delta. Reproduced on HEAD 76bea2c with the real
+`python tools/telemetry/analyze.py` CLI before any edit
+(.agent-work/reviews/r1e-m12/repro/ plus EVIDENCE below): restart_suspected=1
+yet comparable=true with delta -0.4725; a trailing event-only second Boot
+giving session_count=2, mixed_sessions=false yet comparable=true; and a
+permissively skipped malformed record (parse_errors=1) yet comparable=true
+(the third previously source-confirmed only; now CLI-reproduced).
+
+Contract: a comparison is eligible only when the whole capture's integrity
+supports attributing the believed endpoint to the one analyzed run - one
+session, one run, a verified final stop, no suspected unsegmented restart
+(anywhere in the log), no event-only session (a Boot with events but no
+samples, which the sample-derived mixed_sessions flag cannot see), and no
+permissively skipped malformed records. Unknown integrity is not verified
+integrity. Every applicable refusal reason is preserved in
+comparison_refused_reason in a fixed order (mixed sessions/runs, missing
+verified stop, restart, event-only boot, skipped parse errors); any refusal
+leaves end_position_delta_m and run_time_delta_s null, never zero, while the
+descriptive believed values stay visible. Genuine uint32 wraps and benign
+1000->999->1020 reorders stay comparable; the M11 stop-attribution algorithm
+is untouched.
+
+Changed: tools/telemetry/evtelemetry/endpoints.py (eligibility gate only;
+metrics/parse/cli/report untouched - all needed diagnostics already
+existed), README comparability paragraph, new 27-test
+tools/telemetry/tests/test_endpoint_comparability.py (unit + in-process CLI
++ one analyze.py subprocess; failing-before on pristine HEAD is 12
+failures, all M12 gates; 15 compat cases pass before and after).
+
+Validation on the exact staged content: new matrix 27/27 OK, telemetry
+274/274 OK (247 + 27; 4 pre-existing symlink-privilege skips), py_compile
+clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS
+0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to
+baseline; Python-only change is image-neutral), git diff --check clean, each
+command exit 0. M9/M10/M11, R2 (S18R-M1/latency + config checks), R3
+and physical Blocks E/F all remain open/unchanged; no firmware, C++,
+calibration or telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check: .agent-work/stages/R1E.md;
+raw evidence: .agent-work/reviews/r1e-m12/; checkpoint verification:
+.agent-work/utilities/U1-R1E-checkpoint.md (written after commit). Original
+D54-D63 and S18C/S18R/R1A/R1B/R1C/R1D records unchanged. Next eligible action
+is the next R1 stage (R1F: M9/M10), only in a new run. STOP after this stage.
