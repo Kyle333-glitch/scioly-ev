@@ -8195,3 +8195,51 @@ Full ledger, contract, matrix and gate self-check:
 checkpoint verification: .agent-work/utilities/U1-R1B-checkpoint.md
 (written after commit). Original D54-D60 and S18C/S18R/R1A records unchanged.
 Next eligible action is the next R1 stage, only in a new run. STOP after this stage.
+
+## D62 / R1C - 2026-10-11 - Explicit synthetic provenance survives ordinary comments
+
+R1C repairs the October 8 audit's M13 (synthetic provenance suppression and
+inconsistent provenance reporting) in the Python telemetry tooling only. The
+parser honored the first token of ANY `#` comment as provenance and kept only
+the first, so `# capture exported by student` before `# SYNTHETIC fixture`
+produced declared_provenance=CAPTURE with manifest synthetic=false (prose was
+worse: `# I am not using synthetic test data today` declared `I`); and
+report._note_for labelled any declared non-synthetic source synthetic, so
+JSON said false while the SVG claimed SYNTHETIC FIXTURE. Both reproduced on
+HEAD f2152ae with the real `python tools/telemetry/analyze.py` CLI before
+any edit (.agent-work/reviews/r1c-m13/repro/EVIDENCE.md).
+
+Accepted grammar: a `#` line whose first token after the `#`
+(whitespace/comma-delimited, case-insensitive) is exactly SYNTHETIC or
+CAPTURE; every other `#` line is ordinary and declares nothing. SYNTHETIC
+anywhere wins over CAPTURE regardless of order (both orders set
+capture.provenance_conflict, named in summary.txt, still classified
+synthetic); missing stays None, never fabricated CAPTURE; prose containing
+the word never declares. report._note_for now uses the single
+is_synthetic(run_id, path, declared) interpretation shared with the manifest,
+so JSON/text/SVG cannot disagree. Comparison reports make no per-run
+provenance claim (M12 untouched); per-run truth stays in manifest inputs[]
+and summary.txt.
+
+Changed: tools/telemetry/evtelemetry/{parse,report,metrics}.py (grammar,
+precedence, conflict flag, single-interpretation note), README provenance
+bullet, new 25-test tools/telemetry/tests/test_provenance.py (grammar A-M,
+parser paths N, JSON/text/SVG O, manifest P, subprocess CLI A, mixed-input
+Q, rerun-leak R, invalid-input U, fixture compat V, R1A S + R1B T guards;
+failing-before on pristine HEAD is 17 failures + 10 errors from the absent
+grammar/API).
+
+Validation on the exact staged content: new matrix 25/25 OK, telemetry
+213/213 OK (188 + 25; 4 pre-existing symlink-privilege skips), py_compile
+clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS
+0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to
+baseline; Python-only change is image-neutral), git diff --check clean, each
+command exit 0. M8/M12/M9/M10/M11, R2 (S18R-M1/latency + config checks), R3
+and physical Blocks E/F all remain open/unchanged; no firmware, C++,
+calibration or telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check: .agent-work/stages/R1C.md;
+raw evidence: .agent-work/reviews/r1c-m13/; checkpoint verification:
+.agent-work/utilities/U1-R1C-checkpoint.md (written after commit). Original
+D54-D61 and S18C/S18R/R1A/R1B records unchanged. Next eligible action is the
+next R1 stage, only in a new run. STOP after this stage.

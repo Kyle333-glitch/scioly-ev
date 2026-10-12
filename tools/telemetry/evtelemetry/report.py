@@ -147,10 +147,22 @@ def _declared_provenance(metrics: dict[str, Any]) -> Optional[str]:
 
 
 def _provenance_line(metrics: dict[str, Any]) -> Optional[str]:
-    """The provenance warning for a run, with where the claim came from."""
+    """The provenance warning for a run, with where the claim came from.
+
+    The synthetic question has exactly one answer (see ``is_synthetic``): a
+    header ``SYNTHETIC`` declaration or a synthetic run id/name. A declared
+    ``CAPTURE`` is reported as what it is - a claim by the capture, not a
+    verified measurement - and never as a synthetic warning, so the text
+    summary cannot disagree with the JSON manifest or the plot captions.
+    """
     declared = _declared_provenance(metrics)
     by_name = is_synthetic(metrics["run_id"], metrics["source"]["path"])
     if declared and declared.strip().upper().startswith(synthetic.SYNTHETIC_MARKER):
+        if (metrics.get("capture") or {}).get("provenance_conflict"):
+            return (
+                "SYNTHETIC FIXTURE - declared in the capture header, not measured "
+                "(a conflicting CAPTURE declaration was also present and was not honored)"
+            )
         if by_name:
             return "SYNTHETIC FIXTURE - declared in the capture header, not measured"
         return (
@@ -432,7 +444,11 @@ def _samples_x(samples: Sequence[Sample]) -> list[float]:
 
 
 def _note_for(metrics: dict[str, Any]) -> str:
-    if _provenance_line(metrics) or is_synthetic(
+    # One interpretation, shared with the manifest: ``is_synthetic`` with the
+    # declared provenance is the same call ``cli`` uses for ``manifest.json``.
+    # A declared CAPTURE (or any non-synthetic declaration) must therefore
+    # never produce a synthetic plot note while the JSON says synthetic=false.
+    if is_synthetic(
         metrics["run_id"], metrics["source"]["path"], _declared_provenance(metrics)
     ):
         return "SYNTHETIC FIXTURE - generated data, not a measurement"

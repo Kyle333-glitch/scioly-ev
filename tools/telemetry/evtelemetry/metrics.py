@@ -810,6 +810,10 @@ def _capture_section(log: Log, selection: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "provenance_declared": log.declared_provenance,
+        # Whether the capture declared both SYNTHETIC and CAPTURE (in either
+        # order). The classification stays conservative (synthetic); this flag
+        # is how the report can state the conflict instead of hiding one claim.
+        "provenance_conflict": log.provenance_conflict,
         "session_count": len(sessions),
         "sessions": [
             {

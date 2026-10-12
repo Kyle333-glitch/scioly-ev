@@ -234,10 +234,18 @@ The rules:
   something surprising or the tool did.
 - **Anything else is ignored, not an error.** Operator responses (`OK`, `STATUS`,
   `ERR`, ...), the staged `BOOT,...` line, comment lines and monitor noise are
-  counted as ignored lines. A `#` header line that declares provenance
-  (`# SYNTHETIC ...`) is read for that declaration, which then travels with the
-  parsed records: a fixture copied or renamed to a neutral file name still reports
-  as synthetic, and a name may add that warning but never remove one.
+  counted as ignored lines. Only an explicit provenance declaration counts as
+  one: a `#` line whose first token after the `#` - whitespace/comma-delimited,
+  case-insensitive - is exactly `SYNTHETIC` or `CAPTURE`. Every other `#` line
+  is an ordinary comment (`# exported by student`, `# I am not using synthetic
+  test data today`) and declares nothing. A `SYNTHETIC` declaration anywhere in
+  the capture wins over any `CAPTURE` claim regardless of order (a conflict is
+  recorded in `metrics.json` as `capture.provenance_conflict` and named in
+  `summary.txt`); a missing declaration stays undeclared, never a fabricated
+  `CAPTURE`. The declaration travels with the parsed records: a fixture copied
+  or renamed to a neutral file name still reports as synthetic, and a name may
+  add that warning but never remove one. A declared `CAPTURE` is the capture's
+  own claim, not a verified measurement.
 - **Time is unwrapped per lane**, using the same unsigned arithmetic the firmware
   uses, so a `millis()` wrap cannot produce a wrong duration and the legal
   event-before-sample interleaving cannot produce a bogus timestamp jump. Each lane

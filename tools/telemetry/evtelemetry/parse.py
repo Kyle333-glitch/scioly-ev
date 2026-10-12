@@ -74,11 +74,23 @@ __all__ = [
     "read_log",
 ]
 
-# The word a capture header uses to declare itself a generated fixture rather
-# than a recorded session (``synthetic.SYNTHETIC_MARKER`` mirrors it). It is
-# detected from the capture's own bytes, so renaming or copying a fixture cannot
-# erase its provenance: a name may add a warning, never remove one.
+# The explicit provenance grammar a capture header may declare (M13).
+#
+# A declaration is a ``#`` comment line whose first token after the ``#`` -
+# delimited by whitespace or a comma, matched case-insensitively - is exactly
+# one of these two words. ``SYNTHETIC`` (``synthetic.SYNTHETIC_MARKER`` mirrors
+# it) says the capture is a generated fixture rather than a recorded session;
+# ``CAPTURE`` says the capture claims to be a recorded session (so ``# capture
+# exported by student`` IS an explicit CAPTURE declaration - and a later
+# ``SYNTHETIC`` still overrules it). Every other ``#`` line is an ordinary
+# comment and declares nothing: prose (``# I am not using synthetic test data
+# today``) is not provenance, and a declaration word buried inside prose is
+# not a declaration either. It is detected from the capture's
+# own bytes, so renaming or copying a fixture cannot erase its provenance: a
+# name may add a warning, never remove one.
 SYNTHETIC_HEADER_MARKER = "SYNTHETIC"
+CAPTURE_HEADER_MARKER = "CAPTURE"
+_EXPLICIT_DECLARATIONS = frozenset({SYNTHETIC_HEADER_MARKER, CAPTURE_HEADER_MARKER})
 
 _UINT_RE = re.compile(r"^[0-9]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -603,10 +615,18 @@ class Log:
     errors: list[LineError] = field(default_factory=list)
     total_lines: int = 0
     sha256: Optional[str] = None
-    # The capture's own provenance declaration, from its ``#`` header lines
-    # (e.g. ``SYNTHETIC``), or ``None`` when it declared nothing. It travels with
+    # The capture's own provenance declaration, from its explicit ``#`` header
+    # declarations (``SYNTHETIC`` or ``CAPTURE`` under the grammar above), or
+    # ``None`` when it declared nothing. A ``SYNTHETIC`` declaration anywhere in
+    # the capture wins over any ``CAPTURE`` declaration regardless of order, so
+    # an ordinary comment can neither suppress nor invent it. It travels with
     # the parsed records so no report can drop it by looking only at a filename.
     declared_provenance: Optional[str] = None
+    # True when the capture explicitly declared both ``SYNTHETIC`` and
+    # ``CAPTURE`` (in either order). The classification stays conservative
+    # (synthetic) and the report says the conflict existed rather than hiding
+    # one of the declarations.
+    provenance_conflict: bool = False
     # Every backwards step observed inside one lane of one session, as
     # ``{"line_number", "lane", "session_index", "from_ms", "to_ms", "delta_ms"}``.
     # A backwards step within a session is the only wrap this tool reconstructs;
@@ -663,18 +683,24 @@ _BOOT_EVENT = "Boot"
 
 
 def _declared_provenance(raw: str) -> Optional[str]:
-    """The provenance a capture header declares, if any.
+    """The explicit provenance a capture line declares, if any.
 
-    Reads the ``#`` header lines the fixtures carry (``synthetic.py`` writes
-    ``# SYNTHETIC ...``). The marker is detected from the capture's own bytes, so
-    a fixture that is copied, renamed or exported keeps saying it is synthetic.
+    Only the grammar named at ``SYNTHETIC_HEADER_MARKER`` counts: a ``#`` line
+    (after optional leading whitespace) whose first token after the ``#`` -
+    delimited by whitespace or a comma, matched case-insensitively - is exactly
+    ``SYNTHETIC`` or ``CAPTURE``. Anything else (``# exported by student``,
+    ``# I am not using synthetic test data today``, ``# run_id: ...``) is an
+    ordinary comment and returns ``None``. The returned value is
+    the normalized word (``SYNTHETIC`` or ``CAPTURE``), never the raw prose.
     """
     text = raw.lstrip()
     if not text.startswith("#"):
         return None
     body = text[1:].strip()
-    token = body.split(",", 1)[0].split(" ", 1)[0].strip().upper()
-    return token or None
+    token = body.split(",", 1)[0].split(None, 1)[0].strip().upper() if body else ""
+    if token in _EXPLICIT_DECLARATIONS:
+        return token
+    return None
 
 
 # How close to the top of the uint32 range a reading has to be for a rollover to
@@ -787,6 +813,8 @@ def parse_lines(
     session_index = 0
     session_records = 0
     provenance: Optional[str] = None
+    saw_synthetic = False
+    saw_capture = False
 
     for index, raw in enumerate(lines, start=1):
         log.total_lines = index
@@ -800,8 +828,15 @@ def parse_lines(
 
         if record is None:
             declared = _declared_provenance(raw)
-            if declared is not None and provenance is None:
+            if declared == SYNTHETIC_HEADER_MARKER:
+                # Irreversible: a later ordinary comment or CAPTURE claim can
+                # never undo it, and an earlier one can never have blocked it.
+                saw_synthetic = True
                 provenance = declared
+            elif declared == CAPTURE_HEADER_MARKER:
+                saw_capture = True
+                if provenance is None:
+                    provenance = declared
             log.ignored_lines.append(index)
             continue
 
@@ -860,6 +895,7 @@ def parse_lines(
             session_records += 1
 
     log.declared_provenance = provenance
+    log.provenance_conflict = saw_synthetic and saw_capture
     return log
 
 
