@@ -28,6 +28,8 @@ from .parse import Event, Log, Sample
 __all__ = [
     "PROTECTED_OUTPUT_NAMES",
     "ReportError",
+    "reconcile_root_reports",
+    "reconcile_stale_run_dirs",
     "run_report",
     "write_manifest",
     "write_comparison_report",
@@ -667,6 +669,132 @@ def _reconcile(out_dir: str, kept: Sequence[str]) -> list[str]:
         with contextlib.suppress(OSError):
             if not os.listdir(plots_dir):
                 os.rmdir(plots_dir)
+    return removed
+
+
+# Ownership contract for the report root (M15): these four names are the only
+# root files the ``analyze`` command conditionally produces - ``comparison.*``
+# only for two or more runs, ``endpoints.*`` only with ``--measurements``. A
+# rerun that no longer produces one of these pairs removes it, so a stale
+# report cannot masquerade as the current generation's. Any other root file -
+# including ``distribution.json/.txt`` (owned by the ``distribution``
+# subcommand, never by ``analyze``), ``manifest.json`` (rewritten by every
+# generation, so never stale), unknown ``.json``/``.txt``/``.svg`` names, and
+# anything a user planted - is NOT tool-owned and is never deleted. Name
+# matching is case-insensitive for the same cross-machine Windows reason as
+# ``_MANAGED_PLOTS``. A symbolic link is never tool-owned either. Deletion
+# paths are built from these fixed names only; no prior-manifest or caller
+# value is ever turned into a filesystem path, so a corrupt or hostile prior
+# manifest cannot authorize a deletion outside the managed set.
+_MANAGED_ROOT_REPORTS: tuple[str, ...] = (
+    "comparison.json",
+    "comparison.txt",
+    "endpoints.json",
+    "endpoints.txt",
+)
+
+# The fixed temporary suffix ``_write_text_atomic`` writes through. When a
+# managed root slot is reconciled away, its recognisable leftover is removed
+# with it; the suffix alone never authorises deleting any other name, and a
+# ``.partial`` beside a slot the current generation kept is left alone.
+_PARTIAL_SUFFIX = ".partial"
+
+
+def reconcile_root_reports(
+    out_dir: str,
+    *,
+    keep_comparison: bool,
+    keep_endpoints: bool,
+) -> list[str]:
+    """Removes managed root reports the current generation did not produce.
+
+    Call after every current artifact is written and before the manifest
+    claims the tree, so a stale ``comparison`` (from a rerun with fewer than
+    two runs) or stale ``endpoints`` (from a rerun without ``--measurements``)
+    cannot sit beside a manifest that contradicts it. Only the fixed
+    ``_MANAGED_ROOT_REPORTS`` names (plus their ``.partial`` leftovers) are
+    considered; anything else at the root is left alone. Returns the removed
+    file names as found on disk.
+    """
+    removed: list[str] = []
+    candidates: list[str] = []
+    for slot in _MANAGED_ROOT_REPORTS:
+        if slot.startswith("comparison.") and keep_comparison:
+            continue
+        if slot.startswith("endpoints.") and keep_endpoints:
+            continue
+        candidates.append(slot)
+        candidates.append(slot + _PARTIAL_SUFFIX)
+    if not candidates:
+        return removed
+    on_disk: dict[str, str] = {}
+    with contextlib.suppress(OSError):
+        for name in sorted(os.listdir(out_dir)):
+            on_disk.setdefault(name.casefold(), name)
+    for candidate in candidates:
+        actual = on_disk.get(candidate.casefold())
+        if actual is None:
+            continue
+        path = os.path.join(out_dir, actual)
+        if os.path.islink(path):
+            continue
+        if os.path.isfile(path):
+            os.remove(path)
+            removed.append(actual)
+    return removed
+
+
+def _fold_run_dir_name(name: str) -> str:
+    """Folds a ``runs/`` entry the way the analyze preflight folds run ids."""
+    return name.casefold().rstrip(" .")
+
+
+def reconcile_stale_run_dirs(out_dir: str, current_run_dirs: Sequence[str]) -> list[str]:
+    """Reconciles previous generations' run directories the current inputs drop.
+
+    Only immediate children of ``<out>/runs`` whose folded name matches no
+    current run directory are considered, and only their tool-owned managed
+    files (``_REPORT_ARTIFACTS`` plus ``_MANAGED_PLOTS``, via ``_reconcile``)
+    are removed. Unknown files, symbolic links, plain files directly under
+    ``runs/``, and a ``runs`` entry that is itself a symlink are all
+    preserved; a stale directory that still holds unknown content is left in
+    place, and without its metrics report it cannot pose as a current run.
+    The directory itself is removed only when it is left empty.
+
+    A stale entry whose folded name matches a current run is treated as that
+    run's slot and preserved untouched. Deletion targets are confined to the
+    managed report destination: entries are single path components listed
+    from ``runs/`` itself (never manifest or caller paths), every candidate
+    is verified to stay inside it, and links are never followed.
+
+    Returns the removed entries as paths relative to ``runs/``.
+    """
+    removed: list[str] = []
+    runs_dir = os.path.join(out_dir, "runs")
+    if os.path.islink(runs_dir) or not os.path.isdir(runs_dir):
+        return removed
+    try:
+        runs_abs = os.path.abspath(runs_dir)
+        current = {_fold_run_dir_name(os.path.basename(path)) for path in current_run_dirs}
+        entries = sorted(os.listdir(runs_dir))
+    except OSError:
+        return removed
+    for entry in entries:
+        if entry in (".", ".."):
+            continue
+        if _fold_run_dir_name(entry) in current:
+            continue
+        path = os.path.join(runs_dir, entry)
+        if os.path.islink(path) or not os.path.isdir(path):
+            continue
+        if os.path.abspath(path) != os.path.join(runs_abs, entry):
+            continue
+        for label in _reconcile(path, []):
+            removed.append(f"{entry}/{label}")
+        with contextlib.suppress(OSError):
+            if not os.listdir(path):
+                os.rmdir(path)
+                removed.append(entry)
     return removed
 
 

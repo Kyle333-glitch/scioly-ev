@@ -30,6 +30,8 @@ from .parse import TelemetryFormatError, read_log
 from .report import (
     ReportError,
     is_synthetic,
+    reconcile_root_reports,
+    reconcile_stale_run_dirs,
     run_report,
     summarize_distribution,
     write_comparison_report,
@@ -305,16 +307,20 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         print(f"report written to {run_dir}")
         print("")
 
+    wrote_comparison = False
     if len(metrics_by_run) > 1:
         print(summarize_comparison(metrics_by_run))
         write_comparison_report(args.out, metrics_by_run)
+        wrote_comparison = True
 
+    wrote_endpoints = False
     if table is not None:
         endpoints_summary = compare_endpoints(metrics_by_run, table)
         try:
             write_endpoints_report(args.out, endpoints_summary)
         except ReportError as error:
             raise CliError(str(error)) from None
+        wrote_endpoints = True
         print(
             f"endpoint comparison written to {os.path.join(args.out, 'endpoints.txt')} "
             f"({len(endpoints_summary['runs'])} run(s))"
@@ -323,6 +329,21 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         for entry in refused:
             print(f"  no comparison for {entry['run_id']}: {entry['reason']}")
         print("")
+
+    # M15: the new generation owns the root now. Managed root pairs the
+    # current inputs did not produce are removed (fixed slots only), and run
+    # directories no current input maps to are reconciled to their unknown
+    # content or removed when empty. This runs after every current artifact is
+    # written and before the manifest claims the tree, so a manifest never
+    # describes a generation the directory contradicts. A failure before this
+    # point (bad input, preflight collision, unreadable log) writes nothing
+    # and therefore removes nothing.
+    reconcile_root_reports(
+        args.out,
+        keep_comparison=wrote_comparison,
+        keep_endpoints=wrote_endpoints,
+    )
+    reconcile_stale_run_dirs(args.out, run_dirs)
 
     write_manifest(
         args.out,

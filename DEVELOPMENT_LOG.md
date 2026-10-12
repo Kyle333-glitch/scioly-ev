@@ -8141,3 +8141,57 @@ Full ledger, contract, matrix and gate self-check:
 checkpoint verification: .agent-work/utilities/U1-R1A-checkpoint.md
 (written after commit). Original D54-D59 and S18C/S18R records unchanged.
 Next eligible action is R1B (M15), only in a new run. STOP after this stage.
+
+---
+
+## D61 / R1B - 2026-10-11 - Root telemetry reports reconcile to the current generation
+
+**R1B PASS; conditional checkpoint authorized after complete staged review.
+Only October 8 M15 is repaired; every other R1/R2 finding stays open.**
+Entry was main at 64891117e14ad79834b5f9d1cf39ac31457ab667 (U1-R1A),
+23 ahead / 0 behind origin/main, tracked tree clean. Both untracked October
+6/8 audits remain byte-identical (SHA-256 ab74892d... / 81cc805a...) and
+unstaged. No hardware action, upload, calibration promotion or push.
+
+M15 reproduced on entry HEAD in a disposable ignored directory only
+(.agent-work/reviews/r1b-m15/repro/): a two-input analyze wrote
+comparison.json for [AAA, BBB]; a one-input rerun into the same directory
+updated the manifest to [AAA] (exit 0) while comparison.json still
+described [AAA, BBB] and runs/BBB/ survived. Likewise a with-measurements
+run wrote endpoints.json, and a rerun without --measurements left both
+endpoint files beside measurements_source: None. Root cause:
+cli._cmd_analyze never removed root or run-directory outputs the current
+generation did not produce; only per-run files were reconciled (R1A).
+
+Repair (Option C, minimal hybrid): report.py gains _MANAGED_ROOT_REPORTS
+(comparison.json/txt, endpoints.json/txt - the only root files analyze
+conditionally produces) with reconcile_root_reports() removing the pair the
+current generation did not produce, and reconcile_stale_run_dirs()
+reconciling dropped run ids by reusing _reconcile (managed files only) and
+removing the directory only when left empty. Fixed names only, case-folded,
+symlinks never followed, prior manifest never read for deletion;
+distribution.* and all unknown files/dirs preserved. cli.py tracks
+wrote_comparison/wrote_endpoints and reconciles after current artifacts,
+before the manifest, so a manifest never claims a contradicted tree.
+Preflight/parse failures still write (and remove) nothing; a
+mid-publication failure keeps the previous complete manifest (no
+transactional publication claimed).
+
+Validation on the exact staged content: new 25-test matrix
+tools/telemetry/tests/test_root_reconcile.py (21 pass patterns + 2
+privilege-only symlink skips, incl. a subprocess entry-point case;
+failing-before on pristine HEAD is 6 failures + 4 errors from the missing
+API and surviving stale artifacts), telemetry 188/188 OK (163 + 25; 4
+skips), py_compile clean, native 740/740 in 38 suites,
+nano_r4/bench/bench-watchdog 3 SUCCESS 0 warnings at RAM/Flash 7500/77152,
+7700/84664, 7692/84004 (identical to baseline; Python-only change is
+image-neutral), git diff --check clean, each command exit 0. M8/M12/M9/M10/
+M11/M13, R2 (S18R-M1/latency + config checks), R3 and physical Blocks E/F
+all remain open/unchanged; no firmware, C++, calibration or
+telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check:
+.agent-work/stages/R1B.md; raw evidence: .agent-work/reviews/r1b-m15/;
+checkpoint verification: .agent-work/utilities/U1-R1B-checkpoint.md
+(written after commit). Original D54-D60 and S18C/S18R/R1A records unchanged.
+Next eligible action is the next R1 stage, only in a new run. STOP after this stage.

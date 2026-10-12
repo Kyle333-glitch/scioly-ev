@@ -287,6 +287,15 @@ guard that keeps this tool away from `VERIFIED_STATE.md`.
 A run directory holds only the artifacts the current analysis wrote: a rerun
 reconciles the directory (a clean rerun removes the previous `parse_errors.txt`, and
 `--no-plots` removes the previous plots) so a directory never mixes two analyses.
+The report root is reconciled the same way, over a fixed set of names only:
+`comparison.json/.txt` exist only when the current generation compared two or
+more runs, and `endpoints.json/.txt` exist only when it was given
+`--measurements` - a rerun that drops to one run, or drops the measurements
+file, removes the pair it no longer produces, and run directories no current
+input maps to are reconciled to their unknown content (or removed when empty).
+Anything else - unknown files, unknown directories, `distribution.*` (owned by
+the `distribution` subcommand, never by `analyze`), and symlinks - is left
+untouched, and no prior manifest is ever trusted to name a deletion target.
 Every run id is checked for output-path collisions before anything is written -
 including case-only differences and the characters that normalize to `_` - because a
 report tree generated on one machine is read on another. JSON is written by rename
