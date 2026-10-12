@@ -8243,3 +8243,46 @@ raw evidence: .agent-work/reviews/r1c-m13/; checkpoint verification:
 .agent-work/utilities/U1-R1C-checkpoint.md (written after commit). Original
 D54-D61 and S18C/S18R/R1A/R1B records unchanged. Next eligible action is the
 next R1 stage, only in a new run. STOP after this stage.
+
+## D63 / R1D - 2026-10-11 - Telemetry reorders no longer become clock rollovers
+
+R1D repairs the October 8 audit's M8 (benign timestamp reorder reconstructed
+as a uint32 epoch) in the Python telemetry tooling only. parse._unwrap applied
+modulo-uint32 arithmetic to EVERY backwards step, so samples at 1000/999/1020
+reported a 4294967.316 s log duration with matching phase spans, sample
+spacing and million-second plot axes; the parser named the reorder
+(reordered=1, wraps=0) without repairing its interpretation. Reproduced on
+HEAD ce549d5 with the real `python tools/telemetry/analyze.py` CLI before any
+edit (.agent-work/reviews/r1d-m8/repro/EVIDENCE.md).
+
+Contract: a backwards step under 1000 ms is reordered and stays in-epoch with
+its signed delta; only a step across the uint32 top/bottom 120 s windows is a
+genuine wrap advancing the epoch by 2**32; anything else is restart_suspected
+(monotonic unsigned timeline, every elapsed metric across it unavailable with
+its reason, never ~49.7 days). _unwrap takes the already-computed
+classification at both lane call sites. Metrics guards every elapsed consumer
+(phases, phase timing, spacing, armed/run windows, sampling window) via
+sample break lines; reports add suspected-restart clock counts, timing
+unavailable lines and a TIMING UNRELIABLE plot note. Additive JSON keys only;
+wire schema still v3; M9/M10/M11/M12 selection/endpoint behavior untouched.
+
+Changed: tools/telemetry/evtelemetry/{parse,metrics,report}.py, README time
+bullet, new 34-test tools/telemetry/tests/test_timestamp_continuity.py
+(A-X matrix incl. subprocess CLI V; failing-before on pristine HEAD is 13
+failures + 1 error), test_metrics.py reorder expectation + reason-key
+exclusions for the fixed contract.
+
+Validation on the exact staged content: new matrix 34/34 OK, telemetry
+247/247 OK (213 + 34; 4 pre-existing symlink-privilege skips), py_compile
+clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS
+0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to
+baseline; Python-only change is image-neutral), git diff --check clean, each
+command exit 0. M12/M9/M10/M11, R2 (S18R-M1/latency + config checks), R3
+and physical Blocks E/F all remain open/unchanged; no firmware, C++,
+calibration or telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check: .agent-work/stages/R1D.md;
+raw evidence: .agent-work/reviews/r1d-m8/; checkpoint verification:
+.agent-work/utilities/U1-R1D-checkpoint.md (written after commit). Original
+D54-D62 and S18C/S18R/R1A/R1B/R1C records unchanged. Next eligible action is
+the next R1 stage, only in a new run. STOP after this stage.

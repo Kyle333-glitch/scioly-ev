@@ -33,17 +33,27 @@ by a log it does not understand:
   time. Each record carries its ``session_index`` so a consumer can refuse to
   compare two sessions against each other.
 * **Time is unwrapped, per lane and per session.** ``t_ms`` is a raw
-  ``millis()`` reading, so it wraps every ~49.7 days, and the firmware's own
-  arithmetic treats elapsed time as an unsigned difference. Records are
-  unwrapped using exactly that arithmetic so a duration computed here cannot
-  disagree with the firmware because of a wrap. The two record kinds are
-  unwrapped independently: the event lane drains before the sample lane, so an
-  event can legitimately appear *before* an older sample in the byte stream, and
-  a single shared counter would turn that legal interleaving into a bogus
-  timestamp jump. ``t_abs_ms`` is therefore a *per-lane, per-session* timeline:
-  durations within one lane and one session are exact, and a boundary seen by
-  both lanes is compared by its raw ``t_ms`` within the same session (which is
-  the same clock reading) rather than by two independently anchored timelines.
+  ``millis()`` reading, so it wraps every ~49.7 days. Three different things
+  produce a backwards raw reading, and they are *not* all rollovers (see
+  :func:`classify_backwards_step`): a few-millisecond step is a *reordered*
+  reading and stays in the current epoch with its signed (negative) delta, so
+  ``1000 -> 999 -> 1020`` keeps the timeline ``1000, 999, 1020``; only a
+  credible step across the top of the uint32 range - a genuine *wrap* -
+  advances the epoch by 2**32, using the firmware's own unsigned-difference
+  arithmetic so a duration computed here cannot disagree with the firmware
+  because of a rollover. A backwards step that is neither is
+  *restart_suspected*: the timeline is still reconstructed monotonically with
+  the unsigned difference (so ordering invariants hold), but the step is named
+  in ``wrap_observations`` and every elapsed metric across it is reported as
+  unavailable rather than as ~49.7 days that did not happen. The two record
+  kinds are unwrapped independently: the event lane drains before the sample
+  lane, so an event can legitimately appear *before* an older sample in the
+  byte stream, and a single shared counter would turn that legal interleaving
+  into a bogus timestamp jump. ``t_abs_ms`` is therefore a *per-lane,
+  per-session* timeline: durations within one lane and one session are exact,
+  and a boundary seen by both lanes is compared by its raw ``t_ms`` within the
+  same session (which is the same clock reading) rather than by two
+  independently anchored timelines.
 """
 
 from __future__ import annotations
@@ -664,16 +674,29 @@ class Log:
         return not self.samples and not self.events
 
 
-def _unwrap(previous_ms: Optional[int], previous_abs: int, t_ms: int) -> int:
-    """Unsigned-difference time reconstruction, matching the firmware's rule.
+def _unwrap(
+    previous_ms: Optional[int],
+    previous_abs: int,
+    t_ms: int,
+    *,
+    kind: Optional[str] = None,
+) -> int:
+    """Time reconstruction for one lane, given the step's classification.
 
-    Elapsed time is ``t_ms - previous_ms`` in ``uint32`` arithmetic, so a wrap is
-    just a large unsigned delta rather than a negative one. This is the same
-    rule `SOFTWARE_ARCHITECTURE.md` section 4 fixes for the firmware, which is
-    why a duration computed here cannot disagree with the firmware's own.
+    A ``reordered`` step (a few milliseconds backwards) stays in the current
+    epoch with its signed delta: treating it as a rollover would invent a new
+    2**32 ms epoch for what was a 1 ms re-reading of the clock. A genuine
+    ``wrap`` - and, monotonically, a ``restart_suspected`` step - uses the
+    unsigned difference, which is the same rule `SOFTWARE_ARCHITECTURE.md`
+    section 4 fixes for the firmware, so a duration computed here cannot
+    disagree with the firmware's own across a real rollover. A restart step
+    keeps the timeline ordered but is *not* trusted: consumers must refuse
+    elapsed durations across it (see ``metrics.compute_metrics``).
     """
     if previous_ms is None:
         return t_ms
+    if kind == "reordered":
+        return previous_abs + (t_ms - previous_ms)
     delta = (t_ms - previous_ms) % _UINT32_SPAN
     return previous_abs + delta
 
@@ -854,7 +877,12 @@ def parse_lines(
                 )
             record = dataclasses.replace(
                 record,
-                t_abs_ms=_unwrap(previous_ms, sample_previous_abs, record.t_ms),
+                t_abs_ms=_unwrap(
+                    previous_ms,
+                    sample_previous_abs,
+                    record.t_ms,
+                    kind=step["kind"] if step is not None else None,
+                ),
                 session_index=session_index,
             )
             sample_previous_ms = record.t_ms
@@ -886,7 +914,12 @@ def parse_lines(
                 )
             record = dataclasses.replace(
                 record,
-                t_abs_ms=_unwrap(previous_ms, event_previous_abs, record.t_ms),
+                t_abs_ms=_unwrap(
+                    previous_ms,
+                    event_previous_abs,
+                    record.t_ms,
+                    kind=step["kind"] if step is not None else None,
+                ),
                 session_index=session_index,
             )
             event_previous_ms = record.t_ms

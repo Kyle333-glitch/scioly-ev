@@ -324,7 +324,12 @@ class ReproducibilityTest(unittest.TestCase):
             if "duration" in key and not key.endswith("_reason"):
                 self.assertTrue(key.endswith("_s"), key)
         for key, value in metrics["run_window"].items():
-            if key == "note" or key.endswith("_t_abs_ms") or isinstance(value, bool):
+            if (
+                key == "note"
+                or key.endswith("_t_abs_ms")
+                or key.endswith("_reason")
+                or isinstance(value, bool)
+            ):
                 continue
             # `completion` is a named outcome (done/fault/incomplete), not a
             # measurement, so it carries no unit of its own.
@@ -337,6 +342,8 @@ class ReproducibilityTest(unittest.TestCase):
             self.assertTrue(key.endswith("_ms"), key)
         for key in metrics["phase_timing"]:
             if key in ("note", "entry_t_abs_ms", "duration_s", "reversal_observed"):
+                continue
+            if key.endswith("_reason"):
                 continue
             self.assertTrue(key.endswith("_s"), key)
         for key in metrics["position"]:
@@ -456,9 +463,10 @@ class CaptureBoundaryTest(unittest.TestCase):
         self.assertEqual(capture["reordered_reading_count"], 1)
         self.assertEqual(capture["clock_wrap_count"], 0)
         self.assertEqual(capture["restart_suspected_count"], 0)
-        # The interval is still reconstructed as the unsigned difference, which is
-        # what the firmware's own arithmetic does.
-        self.assertIsNotNone(metrics["window"]["log_duration_s"])
+        # The reordered reading stays in the current epoch with its signed
+        # delta, so the window is the readings' own 80 ms, not a new epoch.
+        self.assertEqual(metrics["window"]["log_duration_s"], 0.08)
+        self.assertIsNone(metrics["window"]["duration_unavailable_reason"])
 
     def test_an_unlabelled_restart_refuses_an_elapsed_duration(self) -> None:
         """A big backwards step away from the rollover is not a wrap.

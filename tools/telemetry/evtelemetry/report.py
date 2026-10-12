@@ -251,21 +251,35 @@ def summarize_run(metrics: dict[str, Any]) -> str:
             "report describes the last one and an external measurement cannot be "
             "attributed to it"
         )
-    if capture["clock_wrap_count"] or capture["reordered_reading_count"]:
+    if (
+        capture["clock_wrap_count"]
+        or capture["reordered_reading_count"]
+        or capture["restart_suspected_count"]
+    ):
         lines.append(
             f"clock:             wraps={capture['clock_wrap_count']} "
             f"reordered readings={capture['reordered_reading_count']} "
-            "(a wrap is a uint32 rollover; a reordered reading is a few ms backwards)"
+            f"suspected restarts={capture['restart_suspected_count']} "
+            "(a wrap is a uint32 rollover; a reordered reading is a few ms "
+            "backwards; a suspected restart is neither and its elapsed time "
+            "is unavailable)"
         )
     lines.append(
         f"log window:        {_fmt_int(window['first_t_abs_ms'])} ms .. "
         f"{_fmt_int(window['last_t_abs_ms'])} ms  ({_fmt(window['log_duration_s'])} s)"
     )
+    if window["duration_unavailable_reason"]:
+        lines.append(f"timing:            unavailable ({window['duration_unavailable_reason']})")
     lines.append(
         f"armed window:      {_fmt_int(run_window['armed_first_t_abs_ms'])} ms .. "
         f"{_fmt_int(run_window['armed_last_t_abs_ms'])} ms  "
         f"({_fmt(run_window['armed_duration_s'])} s)"
     )
+    if run_window.get("armed_duration_unavailable_reason"):
+        lines.append(
+            f"                   armed duration unavailable "
+            f"({run_window['armed_duration_unavailable_reason']})"
+        )
     lines.append(
         f"run timeline:      actuated {_fmt_int(run_window['run_start_ms'])} ms  "
         f"final-stop dwell start {_fmt_int(run_window['final_stop_dwell_start_ms'])} ms  "
@@ -451,8 +465,15 @@ def _note_for(metrics: dict[str, Any]) -> str:
     if is_synthetic(
         metrics["run_id"], metrics["source"]["path"], _declared_provenance(metrics)
     ):
-        return "SYNTHETIC FIXTURE - generated data, not a measurement"
-    return f"run {metrics['run_id']} - believed values from the firmware"
+        note = "SYNTHETIC FIXTURE - generated data, not a measurement"
+    else:
+        note = f"run {metrics['run_id']} - believed values from the firmware"
+    # A chart whose x-axis spans a suspected restart would otherwise read as
+    # a confident ~49.7-day timeline. The series are still plotted (no
+    # observation is dropped), but the axis is labelled untrusted.
+    if (metrics.get("window") or {}).get("duration_unavailable_reason"):
+        note += " | TIMING UNRELIABLE: the elapsed axis spans a suspected clock restart"
+    return note
 
 
 def _phase_bands(metrics: dict[str, Any]) -> list[tuple[float, float, str]]:

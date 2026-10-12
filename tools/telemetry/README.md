@@ -246,10 +246,20 @@ The rules:
   or renamed to a neutral file name still reports as synthetic, and a name may
   add that warning but never remove one. A declared `CAPTURE` is the capture's
   own claim, not a verified measurement.
-- **Time is unwrapped per lane**, using the same unsigned arithmetic the firmware
-  uses, so a `millis()` wrap cannot produce a wrong duration and the legal
-  event-before-sample interleaving cannot produce a bogus timestamp jump. Each lane
-  is unwrapped on its own timeline, so cross-lane comparisons use the raw `t_ms`
+- **Time is unwrapped per lane, and a reorder is not a rollover.** A backwards
+  `t_ms` step is classified before it is reconstructed: a few-millisecond step is
+  a *reordered* reading and stays in the current epoch with its signed delta, so
+  `1000 -> 999 -> 1020` keeps the timeline `1000, 999, 1020` and a ~20 ms
+  duration. Only a step across the top of the uint32 range - a genuine *wrap* -
+  advances the epoch by 2**32, using the same unsigned arithmetic the firmware
+  uses, so a real rollover cannot produce a wrong duration and the legal
+  event-before-sample interleaving cannot produce a bogus timestamp jump. A
+  backwards step that is neither is *restart_suspected* (an unlabelled reset or a
+  corrupt reading): the timeline stays monotonic but every elapsed metric across
+  it - log, armed and phase durations, sample-spacing extremes, run times and
+  phase-timing deltas - is reported as unavailable with its reason, never as
+  ~49.7 days, and the charts carry a TIMING UNRELIABLE note. Each lane is
+  unwrapped on its own timeline, so cross-lane comparisons use the raw `t_ms`
   reading within one session.
 - **A capture can hold several boots and several runs, and they are never mixed.**
   A `Boot` event opens a session; within a session, a changed actuation reading

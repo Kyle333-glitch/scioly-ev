@@ -93,7 +93,25 @@ def _stats(values: Sequence[float]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
+def _spans_break(
+    first_line_number: int, last_line_number: int, break_lines: frozenset[int]
+) -> bool:
+    """Whether the sample interval holds a suspected clock restart.
+
+    ``break_lines`` are the line numbers whose step *into* them was classified
+    ``restart_suspected``: a backwards reading that is neither a uint32 wrap
+    nor a few-millisecond re-ordering. Any elapsed difference whose sample
+    range contains such a step would be reconstructed as ~49.7 days that did
+    not happen, so it is unreliable rather than large.
+    """
+    return any(
+        first_line_number < line <= last_line_number for line in break_lines
+    )
+
+
+def _phase_segments(
+    samples: Sequence[Sample], *, break_lines: frozenset[int] = frozenset()
+) -> list[dict[str, Any]]:
     """Consecutive same-phase samples collapsed into segments.
 
     Two different numbers come out of a segment, and they are *not* the same
@@ -113,6 +131,11 @@ def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
       it is marked ``censored``: reporting its observed span as a dwell would
       present a truncated number as a complete one.
 
+    When the samples a span or duration covers hold a suspected clock restart
+    (``break_lines``), that number is ``None`` and the segment is marked
+    ``timing_unreliable``: the unwrapped timeline there is monotonic but
+    untrusted, and a ~49.7-day fabrication is worse than an explicit unknown.
+
     The first segment starts at the log's first sample, which is a boundary of
     the *log*, not necessarily a phase change: the capture may begin mid-phase.
     """
@@ -120,6 +143,7 @@ def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
     for sample in samples:
         if segments and segments[-1]["phase"] == sample.phase:
             segments[-1]["end_ms"] = sample.t_abs_ms
+            segments[-1]["end_line"] = sample.line_number
             segments[-1]["sample_count"] += 1
         else:
             segments.append(
@@ -127,29 +151,43 @@ def _phase_segments(samples: Sequence[Sample]) -> list[dict[str, Any]]:
                     "phase": sample.phase,
                     "start_ms": sample.t_abs_ms,
                     "end_ms": sample.t_abs_ms,
+                    "start_line": sample.line_number,
+                    "end_line": sample.line_number,
                     "sample_count": 1,
                 }
             )
     for index, segment in enumerate(segments):
-        segment["observed_span_s"] = _round(
-            (segment["end_ms"] - segment["start_ms"]) / 1000.0
-        )
         following = segments[index + 1] if index + 1 < len(segments) else None
+        span_broken = _spans_break(segment["start_line"], segment["end_line"], break_lines)
+        duration_broken = following is not None and _spans_break(
+            segment["start_line"], following["start_line"], break_lines
+        )
+        segment["timing_unreliable"] = span_broken or bool(duration_broken)
+        segment["observed_span_s"] = (
+            None
+            if span_broken
+            else _round((segment["end_ms"] - segment["start_ms"]) / 1000.0)
+        )
         segment["censored"] = following is None
         segment["duration_s"] = (
-            _round((following["start_ms"] - segment["start_ms"]) / 1000.0)
-            if following is not None
-            else None
+            None
+            if following is None or duration_broken
+            else _round((following["start_ms"] - segment["start_ms"]) / 1000.0)
         )
+        del segment["start_line"]
+        del segment["end_line"]
     return segments
 
 
-def _phase_section(samples: Sequence[Sample]) -> dict[str, Any]:
-    segments = _phase_segments(samples)
+def _phase_section(
+    samples: Sequence[Sample], *, break_lines: frozenset[int] = frozenset()
+) -> dict[str, Any]:
+    segments = _phase_segments(samples, break_lines=break_lines)
     order: list[str] = []
-    durations: dict[str, float] = {}
-    spans: dict[str, float] = {}
+    durations: dict[str, Optional[float]] = {}
+    spans: dict[str, Optional[float]] = {}
     censored: dict[str, bool] = {}
+    unreliable: dict[str, bool] = {}
     entries: dict[str, int] = {}
     exits: dict[str, int] = {}
     for segment in segments:
@@ -159,15 +197,25 @@ def _phase_section(samples: Sequence[Sample]) -> dict[str, Any]:
             durations[phase] = 0.0
             spans[phase] = 0.0
             censored[phase] = False
+            unreliable[phase] = False
             entries[phase] = segment["start_ms"]
+        if segment["timing_unreliable"]:
+            # Part of this phase's timeline crosses a suspected clock restart:
+            # the phase total is unknown, not the sum of its trustworthy parts.
+            unreliable[phase] = True
         if segment["duration_s"] is None:
             # The phase runs to the end of the capture: nothing bounded it, so it
             # contributes no bounded duration and the phase is marked censored.
             censored[phase] = True
-        else:
+        elif not segment["timing_unreliable"]:
             durations[phase] = _round(durations[phase] + segment["duration_s"])
-        spans[phase] = _round(spans[phase] + (segment["observed_span_s"] or 0.0))
+        if not segment["timing_unreliable"]:
+            spans[phase] = _round(spans[phase] + (segment["observed_span_s"] or 0.0))
         exits[phase] = segment["end_ms"]
+    for phase in order:
+        if unreliable[phase]:
+            durations[phase] = None
+            spans[phase] = None
     return {
         "order": order,
         "segments": segments,
@@ -175,9 +223,13 @@ def _phase_section(samples: Sequence[Sample]) -> dict[str, Any]:
         # to the first sample of the next one. `censored_phases` names the phases
         # whose last segment reached the end of the capture, whose bounded
         # duration is therefore a lower bound (`observed_span_s` only).
+        # `timing_unreliable_phases` names the phases whose timeline crosses a
+        # suspected clock restart: their duration and span are `None` with the
+        # reason in the segment flags, never a ~49.7-day fabrication.
         "durations_s": durations,
         "observed_span_s": spans,
         "censored_phases": [phase for phase in order if censored[phase]],
+        "timing_unreliable_phases": [phase for phase in order if unreliable[phase]],
         "first_entry_t_abs_ms": entries,
         "last_exit_t_abs_ms": exits,
         "segment_count": len(segments),
@@ -243,21 +295,65 @@ def _phase_change_key(change: dict[str, Any]) -> tuple[int, int, str]:
     return (change["session_index"], change["t_ms"], change["phase"])
 
 
-def _phase_timing(phase_section: dict[str, Any]) -> dict[str, Any]:
+def _phase_timing(
+    phase_section: dict[str, Any],
+    samples: Sequence[Sample],
+    break_lines: frozenset[int],
+) -> dict[str, Any]:
     """Braking and reversal *state* timings, and nothing more.
 
     Every number here is a difference between firmware phase boundaries. None of
     them is a stopping distance, and none of them may be read as one: the vehicle
     layer's own state machine decides when a phase ends, and that decision is not
     a measurement of where the vehicle came to rest.
+
+    A dwell whose phase timeline is unreliable, or a delta whose boundary
+    interval crosses a suspected clock restart, is ``None`` with the reason in
+    ``timing_unavailable_reason`` - never a ~49.7-day fabrication.
     """
     entries: dict[str, int] = phase_section["first_entry_t_abs_ms"]
-    durations: dict[str, float] = phase_section["durations_s"]
+    durations: dict[str, Optional[float]] = phase_section["durations_s"]
 
-    def delta_ms(later: Optional[int], earlier: Optional[int]) -> Optional[float]:
+    entry_line: dict[str, int] = {}
+    for sample in samples:
+        entry_line.setdefault(sample.phase, sample.line_number)
+
+    def delta_ms(
+        later_phase: str, earlier_phase: str
+    ) -> Optional[float]:
+        later = entries.get(later_phase)
+        earlier = entries.get(earlier_phase)
         if later is None or earlier is None:
             return None
+        if _spans_break(
+            entry_line[earlier_phase], entry_line[later_phase], break_lines
+        ):
+            return None
         return _round((later - earlier) / 1000.0)
+
+    unreliable = bool(phase_section["timing_unreliable_phases"])
+    deltas = {
+        "forward_decel_to_brake_zero_s": delta_ms("BrakeZeroSpeed", "ForwardDecel"),
+        "brake_zero_to_reverse_s": delta_ms("Reverse", "BrakeZeroSpeed"),
+        "forward_decel_to_reverse_s": delta_ms("Reverse", "ForwardDecel"),
+        "final_approach_to_final_brake_s": delta_ms("FinalBrake", "FinalApproach"),
+    }
+    if any(
+        phase in phase_section["timing_unreliable_phases"]
+        for phase in ("BrakeZeroSpeed", "Reverse")
+    ) or any(
+        _spans_break(
+            entry_line[earlier], entry_line[later], break_lines
+        )
+        for earlier, later in (
+            ("ForwardDecel", "BrakeZeroSpeed"),
+            ("BrakeZeroSpeed", "Reverse"),
+            ("ForwardDecel", "Reverse"),
+            ("FinalApproach", "FinalBrake"),
+        )
+        if earlier in entry_line and later in entry_line
+    ):
+        unreliable = True
 
     decel = entries.get("ForwardDecel")
     brake_zero = entries.get("BrakeZeroSpeed")
@@ -275,13 +371,19 @@ def _phase_timing(phase_section: dict[str, Any]) -> dict[str, Any]:
         "duration_s": {
             phase: durations.get(phase) for phase in PHASE_TIMING_PROBE_PHASES
         },
-        "forward_decel_to_brake_zero_s": delta_ms(brake_zero, decel),
+        "forward_decel_to_brake_zero_s": deltas["forward_decel_to_brake_zero_s"],
         "brake_zero_dwell_s": durations.get("BrakeZeroSpeed"),
-        "brake_zero_to_reverse_s": delta_ms(reverse, brake_zero),
-        "forward_decel_to_reverse_s": delta_ms(reverse, decel),
+        "brake_zero_to_reverse_s": deltas["brake_zero_to_reverse_s"],
+        "forward_decel_to_reverse_s": deltas["forward_decel_to_reverse_s"],
         "reverse_dwell_s": durations.get("Reverse"),
-        "final_approach_to_final_brake_s": delta_ms(final_brake, entries.get("FinalApproach")),
+        "final_approach_to_final_brake_s": deltas["final_approach_to_final_brake_s"],
         "reversal_observed": reverse is not None,
+        "timing_unavailable_reason": (
+            "a suspected clock restart crosses the analyzed run's phase timeline; "
+            "phase-boundary intervals across it are unavailable"
+            if unreliable
+            else None
+        ),
     }
 
 
@@ -310,22 +412,36 @@ def _drops_section(records: Sequence[Record]) -> dict[str, Any]:
     }
 
 
-def _adjacent_steps(samples: Sequence[Sample]) -> dict[str, Any]:
-    """The spacing between consecutive samples, on the unwrapped clock."""
+def _adjacent_steps(
+    samples: Sequence[Sample], *, break_lines: frozenset[int] = frozenset()
+) -> dict[str, Any]:
+    """The spacing between consecutive samples, on the unwrapped clock.
+
+    Steps that cross a suspected clock restart are counted in
+    ``unreliable_step_count`` and excluded from the min/max: the unwrapped
+    difference there is monotonic but untrusted, and reporting it as the
+    maximum gap would present ~49.7 days as a sampling fact. A reordered step
+    stays: its small (possibly negative) signed difference is the honest
+    same-epoch spacing.
+    """
+    pairs = list(zip(samples, samples[1:]))
+    unreliable = sum(1 for _, later in pairs if later.line_number in break_lines)
     steps = [
         later.t_abs_ms - earlier.t_abs_ms
-        for earlier, later in zip(samples, samples[1:])
+        for earlier, later in pairs
+        if later.line_number not in break_lines
     ]
     zero = sum(1 for step in steps if step == 0)
     return {
-        "count": len(steps),
+        "count": len(pairs),
         "min_ms": min(steps) if steps else None,
         "max_ms": max(steps) if steps else None,
         "zero_ms_count": zero,
         "over_1s_count": sum(1 for step in steps if step > 1000),
         "raw_t_ms_backward_count": sum(
-            1 for earlier, later in zip(samples, samples[1:]) if later.t_ms < earlier.t_ms
+            1 for earlier, later in pairs if later.t_ms < earlier.t_ms
         ),
+        "unreliable_step_count": unreliable,
     }
 
 
@@ -372,7 +488,11 @@ def _verified_stop_sample(samples: Sequence[Sample]) -> Optional[Sample]:
     )
 
 
-def _position_section(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str, Any]:
+def _position_section(
+    samples: Sequence[Sample],
+    events: Sequence[Event],
+    break_lines: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
     usable = [sample for sample in samples if sample.is_usable_position]
     unusable = [sample for sample in samples if not sample.is_usable_position]
     positions = [float(sample.position_m) for sample in usable]  # type: ignore[arg-type]
@@ -427,11 +547,16 @@ def _position_section(samples: Sequence[Sample], events: Sequence[Event]) -> dic
     previous_usable = (
         usable[stop_index - 1] if stop_index is not None and stop_index > 0 else None
     )
-    sampling_window_ms = (
-        verified.t_abs_ms - previous_usable.t_abs_ms
-        if verified is not None and previous_usable is not None
-        else None
-    )
+    sampling_window_ms = None
+    if verified is not None and previous_usable is not None:
+        if _spans_break(
+            previous_usable.line_number, verified.line_number, break_lines
+        ):
+            # The confirming sample and its predecessor straddle a suspected
+            # restart: the window between them has no elapsed meaning.
+            sampling_window_ms = None
+        else:
+            sampling_window_ms = verified.t_abs_ms - previous_usable.t_abs_ms
     sampling_window_m = (
         abs(float(verified.position_m) - float(previous_usable.position_m))  # type: ignore[arg-type]
         if verified is not None
@@ -658,7 +783,11 @@ def _configuration_check_section(samples: Sequence[Sample]) -> dict[str, Any]:
     }
 
 
-def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str, Any]:
+def _run_window(
+    samples: Sequence[Sample],
+    events: Sequence[Event],
+    break_lines: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
     """The armed window, the run's own timeline, and the internal Run Time.
 
     The internal Run Time is the firmware's own metric: the unsigned difference
@@ -708,20 +837,47 @@ def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str,
 
     internal_run_time_s = None
     final_stop_verification_completed_s = None
+    internal_run_time_unavailable_reason = None
     if verified is not None:
-        internal_run_time_s = _round(
-            ((verified.dwell_start_ms - verified.run_start_ms) % _UINT32_SPAN) / 1000.0
-        )
-        final_stop_verification_completed_s = _round(
-            ((verified.stop_verified_ms - verified.run_start_ms) % _UINT32_SPAN) / 1000.0
-        )
+        if actuated is not None and _spans_break(
+            actuated.line_number, verified.line_number, break_lines
+        ):
+            # The run's own timeline readings straddle a suspected restart:
+            # the unsigned difference would be ~49.7 days that did not happen.
+            internal_run_time_unavailable_reason = (
+                "a suspected clock restart falls between the run's actuation and "
+                "its verified final stop; the firmware's own timeline readings "
+                "across it have no elapsed meaning"
+            )
+        else:
+            internal_run_time_s = _round(
+                ((verified.dwell_start_ms - verified.run_start_ms) % _UINT32_SPAN)
+                / 1000.0
+            )
+            final_stop_verification_completed_s = _round(
+                ((verified.stop_verified_ms - verified.run_start_ms) % _UINT32_SPAN)
+                / 1000.0
+            )
+
+    armed_duration_s: Optional[float] = None
+    armed_duration_unavailable_reason: Optional[str] = None
+    if armed_first is not None and armed_last is not None:
+        first_armed = armed_samples[0]
+        last_armed = armed_samples[-1]
+        if _spans_break(first_armed.line_number, last_armed.line_number, break_lines):
+            armed_duration_unavailable_reason = (
+                "a suspected clock restart falls inside the armed window; an "
+                "elapsed duration across it would be reconstructed as about "
+                "49.7 days that did not happen"
+            )
+        else:
+            armed_duration_s = _round((armed_last - armed_first) / 1000.0)
 
     return {
         "armed_first_t_abs_ms": armed_first,
         "armed_last_t_abs_ms": armed_last,
-        "armed_duration_s": _round((armed_last - armed_first) / 1000.0)
-        if armed_first is not None and armed_last is not None
-        else None,
+        "armed_duration_s": armed_duration_s,
+        "armed_duration_unavailable_reason": armed_duration_unavailable_reason,
         "done_t_abs_ms": done,
         "fault_t_abs_ms": fault,
         "run_start_ms": run_start_ms,
@@ -741,6 +897,7 @@ def _run_window(samples: Sequence[Sample], events: Sequence[Event]) -> dict[str,
         ),
         "stop_confirmed_t_abs_ms": verified.t_abs_ms if verified is not None else None,
         "internal_run_time_s": internal_run_time_s,
+        "internal_run_time_unavailable_reason": internal_run_time_unavailable_reason,
         "final_stop_verification_completed_s": final_stop_verification_completed_s,
         "note": (
             "the armed window is the firmware's own armed flag, not a physical start or "
@@ -941,8 +1098,19 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
     """
     samples, run_events, events, selection = _select_run(log)
     session_records = sorted([*samples, *events], key=lambda record: record.order)
-    phase_section = _phase_section(samples)
-    timing = _phase_timing(phase_section)
+    # Sample steps into these lines were classified `restart_suspected`: a
+    # backwards reading that is neither a uint32 wrap nor a few-millisecond
+    # re-ordering. Elapsed differences across them are unavailable everywhere
+    # below - never a ~49.7-day fabrication.
+    sample_break_lines = frozenset(
+        observation["line_number"]
+        for observation in log.wrap_observations
+        if observation["kind"] == "restart_suspected"
+        and observation["lane"] == "sample"
+        and observation["session_index"] == selection["selected_session_index"]
+    )
+    phase_section = _phase_section(samples, break_lines=sample_break_lines)
+    timing = _phase_timing(phase_section, samples, sample_break_lines)
 
     from_samples = _phase_changes_from_samples(samples)
     from_events = _phase_changes_from_events(events)
@@ -999,8 +1167,8 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         if unsegmented_restart
         else None
     )
-    position = _position_section(samples, run_events)
-    run_window = _run_window(samples, run_events)
+    position = _position_section(samples, run_events, sample_break_lines)
+    run_window = _run_window(samples, run_events, sample_break_lines)
 
     return {
         "run_id": run_id,
@@ -1043,7 +1211,9 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
             "over_100ms_count": sum(1 for sample in samples if sample.dt_ms > 100),
             "note": "the measured interval each tick was given, as the tick itself reported it",
         },
-        "adjacent_sample_spacing": _adjacent_steps(samples),
+        "adjacent_sample_spacing": _adjacent_steps(
+            samples, break_lines=sample_break_lines
+        ),
         "drops": _drops_section(session_records),
         "phases": phase_section,
         "transitions": {
