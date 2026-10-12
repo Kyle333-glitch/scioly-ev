@@ -8087,3 +8087,57 @@ Full ledger, contract, and October 8 dispositions:
 .agent-work/utilities/U1-S18C-RESUME-checkpoint.md. Original D54-D58 and
 S18C.md (BLOCKED) unchanged. Next eligible action is independent cumulative
 S18 review; no next stage started here. STOP after this stage.
+
+## D60 / R1A - 2026-10-11 - Telemetry report cleanup preserves files the analyzer never owned
+
+**R1A PASS; conditional checkpoint authorized after complete staged review.
+Only October 8 M14 is repaired; every other R1/R2 finding stays open.**
+Entry was main at fed18e7665bec8468408d0f4ec1e24076a931433 (S18C-RESUME),
+22 ahead / 0 behind origin/main, tracked tree clean. Both untracked October
+6/8 audits remain byte-identical and unstaged. No hardware action, upload,
+calibration promotion or push.
+
+M14 reproduced on entry HEAD in a disposable ignored directory only
+(.agent-work/reviews/r1a-m14/repro/): a normal analyze run wrote the six
+plot SVGs, a planted plots/student-note.svg (SHA-256 a927c2d5...0f46f) and
+a control notes.txt were added, and a --no-plots rerun deleted the student
+file alongside the six managed plots (exit 0). Root cause:
+report.py::_reconcile() extended its deletion candidates with every .svg
+found by listdir, treating the extension as proof of analyzer ownership -
+against its own documented contract.
+
+Repair (Option A, strictly enumerated set): new _MANAGED_PLOTS constant
+holds the only seven SVGs run_plots() can write (empty.svg or the six
+charts); _reconcile() considers only _REPORT_ARTIFACTS + _MANAGED_PLOTS.
+Unknown names of any extension/case are never deleted; matching is
+case-insensitive (Windows-folded report trees); symlinks are never
+tool-owned (a link at a managed name, or a symlinked plots/ dir, disables
+cleanup for that entry); deletion paths derive from the fixed constants
+only, so hostile kept/manifest values (traversal, absolute, duplicate,
+out-of-directory) authorize nothing. Legacy unknown files are retained;
+stale managed-slot names reconcile. Post-repair the same CLI procedure
+keeps student-note.svg byte-identical (same SHA) while still reconciling
+managed stale plots, and regeneration restores charts beside user files.
+
+New regressions: tools/telemetry/tests/test_report_cleanup.py, 21 tests
+(A-L matrix: original data-loss in-process AND via a python
+tools/telemetry/analyze.py subprocess, regeneration, repeated --no-plots,
+mixed types, unknown names, known stale transitions both directions,
+empty/missing dirs, legacy ambiguity, manifest safety, Windows casefold,
+user-byte preservation, CLI error handling; 2 symlink cases skip where the
+OS denies link creation). Failing-before in a pristine-HEAD worktree: 8
+failures + 1 error; post-repair: 21 pass, 2 privilege skips.
+
+Validation on the exact staged content: telemetry 163/163 OK (142 + 21),
+py_compile clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog
+3 SUCCESS 0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004
+(identical to baseline; Python-only change is image-neutral), git diff
+--check clean, each command exit 0. M15/M8/M12/M9/M10/M11/M13, R2
+(S18R-M1/latency + config checks), R3 and physical Blocks E/F all remain
+open/unchanged; no firmware, C++, calibration or telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check:
+.agent-work/stages/R1A.md; raw evidence: .agent-work/reviews/r1a-m14/;
+checkpoint verification: .agent-work/utilities/U1-R1A-checkpoint.md
+(written after commit). Original D54-D59 and S18C/S18R records unchanged.
+Next eligible action is R1B (M15), only in a new run. STOP after this stage.

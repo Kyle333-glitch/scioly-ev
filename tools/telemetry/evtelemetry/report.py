@@ -593,35 +593,80 @@ def run_plots(metrics: dict[str, Any], log: Log) -> dict[str, str]:
 # longer produces, without ever touching a file this tool did not write.
 _REPORT_ARTIFACTS: tuple[str, ...] = ("metrics.json", "summary.txt", "parse_errors.txt")
 
+# Ownership contract for the ``plots/`` directory (M14): these seven names are
+# the only SVGs ``run_plots()`` can write - ``empty.svg`` for an empty log, or
+# the six charts for a non-empty one. A rerun may delete one of these names
+# when the current analysis did not produce it. Any other file in ``plots/`` -
+# including any other ``.svg`` name, at any letter case - is NOT tool-owned and
+# is never deleted. A ``.svg`` extension alone never proves ownership. In
+# particular ``--no-plots`` removes the previous generation's managed plots but
+# leaves every unmanaged file (for example ``plots/student-note.svg``) alone.
+# Name matching is case-insensitive because a report tree written on one
+# machine is read on another and Windows folds letter case: ``POSITION.SVG``
+# occupies the same managed slot as ``position.svg``. A symbolic link is never
+# tool-owned either: a link at a managed name, or a ``plots`` entry that is
+# itself a link, disables cleanup for that entry rather than removing it.
+_MANAGED_PLOTS: tuple[str, ...] = (
+    "plots/empty.svg",
+    "plots/position.svg",
+    "plots/velocity.svg",
+    "plots/effort.svg",
+    "plots/control_dt.svg",
+    "plots/raw_inputs.svg",
+    "plots/phase_timeline.svg",
+)
+
 
 def _reconcile(out_dir: str, kept: Sequence[str]) -> list[str]:
     """Removes this tool's own artifacts that the current run did not write.
 
     A clean rerun must not leave the previous run's ``parse_errors.txt`` beside a
     metrics table with no errors, and ``--no-plots`` must not leave the previous
-    plots behind: both would attribute an old result to new bytes. Only the known
-    artifact names are considered, and only their removal is reported - anything
-    else in the directory is left alone.
+    plots behind: both would attribute an old result to new bytes. Only the
+    known artifact names (``_REPORT_ARTIFACTS`` plus ``_MANAGED_PLOTS``) are
+    considered, and only their removal is reported - anything else in the
+    directory is left alone. Deletion paths are built from those fixed names
+    only; entries of ``kept`` are used for membership checks and never turned
+    into filesystem paths, so a manifest or caller value cannot authorize a
+    deletion outside the managed set.
     """
     removed: list[str] = []
-    keep = set(kept)
-    candidates = list(_REPORT_ARTIFACTS)
+    keep_folded = {str(entry).casefold() for entry in kept}
     plots_dir = os.path.join(out_dir, "plots")
-    if os.path.isdir(plots_dir):
-        candidates.extend(
-            f"plots/{name}"
-            for name in sorted(os.listdir(plots_dir))
-            if name.endswith(".svg")
-        )
-    for relative in candidates:
-        if relative in keep:
+    plots_is_link = os.path.islink(plots_dir)
+    plots_is_dir = not plots_is_link and os.path.isdir(plots_dir)
+    # Actual on-disk names keyed by folded name, so a managed slot is found
+    # whatever letter case the filesystem stored. Unmanaged names never enter
+    # the candidate list however they are cased.
+    on_disk: dict[str, str] = {}
+    if plots_is_dir:
+        with contextlib.suppress(OSError):
+            for name in sorted(os.listdir(plots_dir)):
+                on_disk.setdefault(name.casefold(), name)
+    for relative in list(_REPORT_ARTIFACTS) + list(_MANAGED_PLOTS):
+        if relative.casefold() in keep_folded:
             continue
-        path = os.path.join(out_dir, *relative.split("/"))
+        head, _, tail = relative.partition("/")
+        if head == "plots":
+            if not plots_is_dir:
+                continue
+            actual = on_disk.get(tail.casefold())
+            if actual is None:
+                continue
+            path = os.path.join(plots_dir, actual)
+            label = f"{head}/{actual}"
+        else:
+            path = os.path.join(out_dir, relative)
+            label = relative
+        if os.path.islink(path):
+            continue
         if os.path.isfile(path):
             os.remove(path)
-            removed.append(relative)
-    if os.path.isdir(plots_dir) and not os.listdir(plots_dir):
-        os.rmdir(plots_dir)
+            removed.append(label)
+    if plots_is_dir:
+        with contextlib.suppress(OSError):
+            if not os.listdir(plots_dir):
+                os.rmdir(plots_dir)
     return removed
 
 
