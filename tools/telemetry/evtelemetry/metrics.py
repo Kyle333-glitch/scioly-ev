@@ -21,13 +21,14 @@ looks like a measurement.
 
 from __future__ import annotations
 
+import dataclasses
 import statistics
 from typing import Any, Iterable, Optional, Sequence
 
 from . import schema
 from .parse import Event, Log, Record, Sample
 
-__all__ = ["compute_metrics", "PHASE_TIMING_PROBE_PHASES"]
+__all__ = ["compute_metrics", "select_run", "SelectedRun", "PHASE_TIMING_PROBE_PHASES"]
 
 # The phases whose *state* timings describe braking and reversal. These are
 # firmware state boundaries, not measurements: how long the policy stayed in a
@@ -1023,6 +1024,152 @@ def _run_starts(samples: Sequence[Sample]) -> list[int]:
     return starts
 
 
+def _event_at_or_after_actuation(actuation_ms: int, t_ms: int) -> bool:
+    """Whether a raw reading falls at or after an actuation reading, wrap-aware.
+
+    Both readings come from the same session's ``millis()`` clock, so the
+    firmware's own unsigned-difference arithmetic applies: the event belongs to
+    the actuated run when ``(t_ms - actuation_ms) mod 2**32`` is in the first
+    half of the range. A raw ``>=`` comparison says the same thing only when no
+    uint32 wrap falls between the two readings; across a genuine wrap it places
+    a pre-wrap event after every post-wrap sample, or drops a post-wrap event
+    that precedes the first post-wrap sample tick. The boundary is inclusive:
+    an event stamped exactly at the actuation reading is the run's own.
+    """
+    return ((t_ms - actuation_ms) % _UINT32_SPAN) < (_UINT32_SPAN // 2)
+
+
+@dataclasses.dataclass(frozen=True)
+class SelectedRun:
+    """The one selected run every run-specific consumer must describe.
+
+    This is the shared selection contract (R1F: M9/M10). Metrics, phase bands,
+    event markers and SVG series all derive from the same ``samples`` and
+    ``events`` tuples, so an excluded earlier-run or earlier-boot record cannot
+    appear in a selected-run chart merely because it exists in the log, and an
+    excluded prior-run event cannot count toward selected-run faults,
+    transitions, windows or markers.
+
+    Field scope:
+
+    * ``samples`` / ``events`` are RUN-SPECIFIC: the selected run's records.
+    * ``session_samples`` / ``session_events`` are SESSION-SPECIFIC: every
+      record of the analyzed session, including earlier runs. The session
+      window and drop diagnostics use these.
+    * Whole-capture integrity (other sessions, wraps, restarts, parse errors)
+      stays on ``log`` itself and is never shrunk to this view.
+
+    The start boundary is the run's actuation reading (``run_start_ms``), not
+    the first sample tick: a legitimately attributable actuation or
+    announcement event that precedes the first sample is the run's own and is
+    kept. The end boundary is open: the selected run is the last run of the
+    session, so every at-or-after-actuation session event is a member,
+    including one stamped after the last sample. When no sample carries an
+    actuation reading the run boundaries are unknown: the whole session is the
+    run, every session event is a member, and ``run_start_source`` says so
+    rather than inventing a start.
+    """
+
+    session_index: int
+    run_start_ms: Optional[int]
+    run_start_source: str
+    samples: tuple[Sample, ...]
+    events: tuple[Event, ...]
+    session_samples: tuple[Sample, ...]
+    session_events: tuple[Event, ...]
+    event_membership_rule: str
+    event_window_uncertain: Optional[str]
+
+
+def select_run(log: Log) -> SelectedRun:
+    """The selected run as an immutable view both metrics and plots consume.
+
+    The selection rule is unchanged: the last session that contains samples is
+    the session, and within it the last actuated run is the run. What changes
+    (R1F) is that the selected *event* membership is defined here, once, with
+    an epoch-aware actuation boundary - instead of each consumer re-deriving
+    (or ignoring) it with raw timestamp comparisons.
+    """
+    sample_sessions = sorted({sample.session_index for sample in log.samples})
+    event_sessions = sorted({event.session_index for event in log.events})
+    if sample_sessions:
+        selected = sample_sessions[-1]
+    elif event_sessions:
+        selected = event_sessions[-1]
+    else:
+        selected = 0
+
+    session_samples = tuple(
+        sample for sample in log.samples if sample.session_index == selected
+    )
+    session_events = tuple(
+        event for event in log.events if event.session_index == selected
+    )
+
+    starts = _run_starts(session_samples)
+    selected_run_start_ms = starts[-1] if starts else None
+    run_first_index = 0
+    if len(starts) > 1 and selected_run_start_ms is not None:
+        run_first_index = next(
+            index
+            for index, sample in enumerate(session_samples)
+            if sample.run_start_ok and sample.run_start_ms == selected_run_start_ms
+        )
+    run_samples = session_samples[run_first_index:]
+
+    unsegmented_restart = any(
+        observation["kind"] == "restart_suspected"
+        and observation["session_index"] == selected
+        for observation in log.wrap_observations
+    )
+    event_window_uncertain: Optional[str] = None
+    if unsegmented_restart:
+        # A backwards step that is neither a wrap nor a re-ordering sits inside
+        # the analyzed session: raw readings across it have no elapsed meaning
+        # (R1D), so an unsigned actuation comparison across it is flagged
+        # rather than trusted silently. Membership below is still computed;
+        # the flag says the boundary evidence is incomplete.
+        event_window_uncertain = (
+            "a suspected clock restart falls inside the analyzed session; raw "
+            "timestamp comparisons across it have no elapsed meaning, so the "
+            "actuation boundary is uncertain there"
+        )
+
+    if len(starts) > 1 and selected_run_start_ms is not None:
+        run_events = tuple(
+            event
+            for event in session_events
+            if _event_at_or_after_actuation(selected_run_start_ms, event.t_ms)
+        )
+        event_membership_rule = "at_or_after_actuation_unsigned"
+        run_start_source = "actuation_reading"
+    else:
+        # One run (or no actuation evidence at all): there is no cross-run
+        # boundary to get wrong, so every session event is a member. When no
+        # sample carries an actuation reading the run interval itself is
+        # unknown, and that is recorded instead of invented.
+        run_events = session_events
+        event_membership_rule = (
+            "all_session_events_single_run"
+            if starts else "no_actuation_evidence_whole_session"
+        )
+        run_start_source = (
+            "actuation_reading" if starts else "no_actuation_evidence"
+        )
+
+    return SelectedRun(
+        session_index=selected,
+        run_start_ms=selected_run_start_ms,
+        run_start_source=run_start_source,
+        samples=run_samples,
+        events=run_events,
+        session_samples=session_samples,
+        session_events=session_events,
+        event_membership_rule=event_membership_rule,
+        event_window_uncertain=event_window_uncertain,
+    )
+
+
 def _select_run(
     log: Log,
 ) -> tuple[list[Sample], list[Event], list[Event], dict[str, Any]]:
@@ -1039,47 +1186,34 @@ def _select_run(
     boot and more than one run. The selection is deterministic either way, but a
     consumer comparing a capture against an external measurement has to know that
     the bytes it is reading do not describe one attributable run.
+
+    The membership itself comes from :func:`select_run` so metrics and plots
+    share one record set; this wrapper keeps the historical tuple shape.
     """
+    view = select_run(log)
+    run_samples = list(view.samples)
+    run_events = list(view.events)
+    events = list(view.session_events)
+
     sample_sessions = sorted({sample.session_index for sample in log.samples})
-    event_sessions = sorted({event.session_index for event in log.events})
-    if sample_sessions:
-        selected = sample_sessions[-1]
-    elif event_sessions:
-        selected = event_sessions[-1]
-    else:
-        selected = 0
-
-    samples = [sample for sample in log.samples if sample.session_index == selected]
-    events = [event for event in log.events if event.session_index == selected]
-
-    starts = _run_starts(samples)
-    selected_run_start_ms = starts[-1] if starts else None
-    run_first_index = 0
-    if len(starts) > 1 and selected_run_start_ms is not None:
-        run_first_index = next(
-            index
-            for index, sample in enumerate(samples)
-            if sample.run_start_ok and sample.run_start_ms == selected_run_start_ms
-        )
-    run_samples = samples[run_first_index:]
-    if run_first_index:
-        run_events = [
-            event for event in events if event.t_ms >= run_samples[0].t_ms
-        ]
-    else:
-        run_events = events
-
     selection = {
         "rule": "last_run_in_last_session_with_samples",
-        "selected_session_index": selected,
+        "selected_session_index": view.session_index,
         "session_count": log.session_count,
         "sample_session_count": len(sample_sessions),
         "mixed_sessions": len(sample_sessions) > 1,
-        "runs_in_session": len(starts),
-        "selected_run_start_ms": selected_run_start_ms,
-        "mixed_runs": len(starts) > 1,
+        "runs_in_session": len(_run_starts(view.session_samples)),
+        "selected_run_start_ms": view.run_start_ms,
+        "mixed_runs": len(_run_starts(view.session_samples)) > 1,
         "excluded_sample_count": len(log.samples) - len(run_samples),
         "excluded_event_count": len(log.events) - len(events),
+        "selected_run_sample_count": len(run_samples),
+        "selected_run_event_count": len(run_events),
+        "excluded_run_sample_count": len(view.session_samples) - len(run_samples),
+        "excluded_run_event_count": len(view.session_events) - len(run_events),
+        "run_start_source": view.run_start_source,
+        "event_membership_rule": view.event_membership_rule,
+        "event_window_uncertain": view.event_window_uncertain,
         "note": (
             "one capture is analyzed as one run: the last run of the last session "
             "with samples. Records from other sessions or runs are excluded, and "
@@ -1097,6 +1231,11 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
     report.
     """
     samples, run_events, events, selection = _select_run(log)
+    # Scope contract (R1F): `samples`/`run_events` are the RUN-SPECIFIC
+    # selected record set every run metric, band and marker must describe.
+    # `events` is the SESSION-SPECIFIC set (selected session, all runs) used
+    # only for the session window and drop diagnostics. Whole-capture
+    # integrity (other sessions, wraps, restarts, parse errors) stays on `log`.
     session_records = sorted([*samples, *events], key=lambda record: record.order)
     # Sample steps into these lines were classified `restart_suspected`: a
     # backwards reading that is neither a uint32 wrap nor a few-millisecond
@@ -1113,7 +1252,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
     timing = _phase_timing(phase_section, samples, sample_break_lines)
 
     from_samples = _phase_changes_from_samples(samples)
-    from_events = _phase_changes_from_events(events)
+    from_events = _phase_changes_from_events(run_events)
     sample_keys = {_phase_change_key(change) for change in from_samples}
     event_keys = {_phase_change_key(change) for change in from_events}
     only_samples = sample_keys - event_keys
@@ -1181,7 +1320,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         "capture": _capture_section(log, selection),
         "counts": {
             "samples": len(samples),
-            "events": len(events),
+            "events": len(run_events),
             "ignored_lines": len(log.ignored_lines),
             "parse_errors": len(log.errors),
         },
@@ -1226,7 +1365,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
                     "armed": event.armed,
                     "fault": event.fault,
                 }
-                for event in events
+                for event in run_events
             ],
             "phase_changes_from_samples": from_samples,
             "phase_changes_from_events": from_events,
@@ -1254,7 +1393,7 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         "velocity": _velocity_section(samples),
         "effort": _effort_section(samples),
         "raw_inputs": _raw_inputs_section(samples),
-        "faults": _faults_section(samples, events),
+        "faults": _faults_section(samples, run_events),
         "authorization": _authorization_section(samples),
         "configuration_checks": _configuration_check_section(samples),
         "phase_timing": timing,

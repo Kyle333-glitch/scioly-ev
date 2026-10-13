@@ -276,6 +276,14 @@ The rules:
   A `Boot` event opens a session; within a session, a changed actuation reading
   marks a new run. The analyzer describes the last run of the last session with
   samples, reports everything it excluded, and sets `mixed_sessions`/`mixed_runs`.
+  Metrics, phase bands, event markers and charts all describe that same selected
+  record set: selected-run plots never include excluded earlier-run samples, and
+  selected-run counts never include excluded earlier-run events. The event
+  boundary is the run's actuation reading (compared wrap-aware), not the first
+  sample tick, so an attributable actuation event preceding the first sample is
+  kept. Session-wide facts (the session window, drop diagnostics) and
+  whole-capture integrity (other sessions, wraps, restarts, parse errors) stay
+  separate and are never shrunk to the selected run.
   An endpoint comparison is refused (with its reason, in `endpoints.json`/`.txt`)
   when the capture cannot be attributed to one run, or when that run recorded no
   verified final stop.

@@ -8336,3 +8336,54 @@ raw evidence: .agent-work/reviews/r1e-m12/; checkpoint verification:
 .agent-work/utilities/U1-R1E-checkpoint.md (written after commit). Original
 D54-D63 and S18C/S18R/R1A/R1B/R1C/R1D records unchanged. Next eligible action
 is the next R1 stage (R1F: M9/M10), only in a new run. STOP after this stage.
+
+## D65 / R1F - 2026-10-13 - Selected-run metrics, charts and events describe one run
+
+R1F repairs the October 8 audit's M9 (metrics selection not applied to
+charts) and M10 (earlier-run events in last-run metrics) in the Python
+telemetry tooling only. report.run_plots iterated the whole log.samples
+while bands/markers came from selected metrics (a two-boot capture with
+selected count 1 plotted two 2-point series spanning 0-100 m), and
+compute_metrics fed the full session event list to counts/transitions/faults
+(a run-1 event at 1100 ms contaminated a run actuated at 1800) while the
+run_events filter compared raw t_ms from the first sample tick (dropping a
+legitimate Armed@1550 actuation event, wrap-unsafe). Reproduced on entry
+HEAD 2ee5ea8 with the supported analyze.py CLI before any edit
+(.agent-work/reviews/r1f-m9-m10/: BEFORE.txt, prerepair-failing.txt from a
+git-archive-HEAD extract; CLI exit 0 throughout - content defects, not
+status).
+
+Contract: one frozen SelectedRun view from metrics.select_run(), consumed
+by both metrics and plots. Selected events in a multi-run session are the
+at-or-after-actuation session events under unsigned mod-2**32 comparison
+(start-inclusive, end open); single-run or no-actuation sessions keep every
+session event, with run_start_source=no_actuation_evidence instead of an
+invented start, and an in-session suspected restart sets
+event_window_uncertain. RUN-SPECIFIC (counts, transitions, phases, faults,
+series, bands, markers) vs SESSION-SPECIFIC (window, drops) vs
+WHOLE-CAPTURE (capture sessions/wraps/restarts, parse errors, R1E gates)
+are separated and documented; run_plots refuses a metrics/log mismatch
+rather than drawing it.
+
+Changed: tools/telemetry/evtelemetry/metrics.py (shared helper +
+run-scoped consumers), tools/telemetry/evtelemetry/report.py
+(selected-run series + mismatch refusal), README selection paragraph, new
+31-test tools/telemetry/tests/test_selected_run_membership.py (real
+parser/metrics/report + one analyze.py subprocess; three-defect
+failing-before on pristine HEAD).
+
+Validation on the exact staged content: new matrix 31/31 OK, telemetry
+305/305 OK (274 + 31; 4 pre-existing symlink-privilege skips), py_compile
+clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS
+0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to
+R1E baseline; Python-only change is image-neutral), git diff --check clean,
+each command exit 0. M11 endpoint attribution remains OPEN and untouched;
+R2/R3 and physical Blocks E/F unchanged; no firmware, C++, calibration
+or telemetry-data change.
+
+Full ledger, contract, matrix and gate self-check: .agent-work/stages/R1F.md;
+raw evidence: .agent-work/reviews/r1f-m9-m10/; checkpoint verification:
+.agent-work/utilities/U1-R1F-checkpoint.md (written after commit). Original
+D54-D64 and S18C/S18R/R1A/R1B/R1C/R1D/R1E records unchanged. Next eligible
+action is the next R1 stage (R1G: M11), only in a new run. STOP after this
+stage.

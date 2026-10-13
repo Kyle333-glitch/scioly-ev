@@ -23,6 +23,7 @@ import os
 from typing import Any, Optional, Sequence
 
 from . import schema, svgplot, synthetic
+from .metrics import select_run
 from .parse import Event, Log, Sample
 
 __all__ = [
@@ -500,12 +501,30 @@ def _events_as_records(metrics: dict[str, Any]) -> list[dict[str, Any]]:
 def run_plots(metrics: dict[str, Any], log: Log) -> dict[str, str]:
     """The SVG charts for one run, keyed by relative file name.
 
-    Every chart plots only what the log contains. The phase bands are drawn from
-    the sample train's own phase column, so a reader can see when the policy
-    believed it was braking, and the raw-input chart deliberately carries the
-    words "raw ADC counts" in its axis label rather than an invented unit.
+    Every chart plots only the selected run's records (R1F: M9). The series
+    come from the same shared selection view the metrics describe, the phase
+    bands are drawn from the selected sample train's own phase column, and the
+    event markers come from the metrics' selected-run transitions - so a chart
+    can no longer combine all-runs samples with selected-run bands and
+    markers. The raw-input chart deliberately carries the words "raw ADC
+    counts" in its axis label rather than an invented unit.
     """
-    samples = log.samples
+    view = select_run(log)
+    recorded = metrics["capture"]["selection"]
+    if (
+        view.session_index != recorded["selected_session_index"]
+        or (view.run_start_ms or None) != recorded.get("selected_run_start_ms")
+        or len(view.samples) != metrics["counts"]["samples"]
+        or len(view.events) != len(metrics["transitions"]["events"])
+    ):
+        # The metrics and the log disagree about which run is selected: plotting
+        # one run's series under another run's bands and markers is exactly the
+        # M9 defect, so refuse instead of drawing it.
+        raise ReportError(
+            "the metrics and the log describe different selected runs; refusing "
+            "to plot"
+        )
+    samples = list(view.samples)
     if not samples:
         empty = svgplot.Chart(
             title=f"{metrics['run_id']} - empty log",
