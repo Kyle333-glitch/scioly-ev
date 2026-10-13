@@ -108,7 +108,13 @@ def _boot(t_ms: int = 0) -> str:
 
 
 def _verified(t_ms: int, pos_m: float) -> str:
-    """A sample carrying the run's verified final stop."""
+    """The verification-tick sample: t_ms equals its own stop_verified_ms.
+
+    Producer contract (R1G/M11): the firmware stamps finalStopVerifiedAtMs =
+    nowMs on the verification cycle and the same tick carries t_ms = nowMs,
+    so only a tick-matched record represents where the run stopped. A later
+    Done sample repeating the stamp is latched state, not a stop position.
+    """
     return _sample(
         t_ms,
         phase="Done",
@@ -116,7 +122,7 @@ def _verified(t_ms: int, pos_m: float) -> str:
         run_start_ok="1",
         dwell_start_ms="3100",
         dwell_start_ok="1",
-        stop_verified_ms="6100",
+        stop_verified_ms=str(t_ms),
         stop_verified_ok="1",
         pos_m=f"{pos_m:.4f}",
         rem_m="0.5000",
@@ -380,6 +386,7 @@ class SessionRunAttributionTest(unittest.TestCase):
             _verified(60, 2.5),
         ]
         # The verified stop carries run 480; restamp it into the second run.
+        # Tick-matched (R1G/M11): the verification tick's own t_ms is its stamp.
         lines[-1] = _sample(
             60,
             phase="Done",
@@ -387,7 +394,7 @@ class SessionRunAttributionTest(unittest.TestCase):
             run_start_ok="1",
             dwell_start_ms="3100",
             dwell_start_ok="1",
-            stop_verified_ms="6100",
+            stop_verified_ms="60",
             stop_verified_ok="1",
             pos_m="2.5000",
             rem_m="0.5000",

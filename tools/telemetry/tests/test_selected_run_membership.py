@@ -609,8 +609,9 @@ class OutputAgreement(unittest.TestCase):
             run_plots(metrics_a, _parse(lines_b))
 
     def test_endpoint_semantics_unchanged_single_run(self) -> None:
-        # M11 stays open: this pins that the selection repair did not move the
-        # endpoint source-selection algorithm on a clean single run.
+        # R1G/M11: a tick-matched verification sample (t_ms equals its own
+        # stop_verified_ms, per the firmware producer contract) stays a
+        # verified endpoint; the selection repair did not move this.
         lines = [
             "# CAPTURE bench session",
             _boot(0),
@@ -624,7 +625,7 @@ class OutputAgreement(unittest.TestCase):
                 run_start_ok="1",
                 dwell_start_ms="3100",
                 dwell_start_ok="1",
-                stop_verified_ms="6100",
+                stop_verified_ms="60",
                 stop_verified_ok="1",
                 rem_m="0.5000",
                 authz="AuthorizedStop",

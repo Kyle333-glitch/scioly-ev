@@ -471,22 +471,39 @@ def _stopped_leg(phases: set[str]) -> str:
 
 
 def _verified_stop_sample(samples: Sequence[Sample]) -> Optional[Sample]:
-    """The first sample at which the run's final stop was verified.
+    """The sample observed at the run's verified final-stop instant.
 
-    This is the only sample that represents *where the run stopped*. It exists
-    when the tick carries the run's own timeline and `stop_verified_ok`, which the
-    firmware sets once the Complete Stop dwell has confirmed; a capture that ends
-    while the dwell was still open has no such sample, so its endpoint is not a
-    verified stop and is reported as such.
+    Producer contract (`CompetitionStateMachine.h`, `VehicleRuntime.cpp`): the
+    verification cycle stamps `finalStopVerifiedAtMs = nowMs` and the same
+    tick's sample carries `t_ms = nowMs`, so the tick that verified the stop
+    is the one record whose raw `t_ms` equals its own `stop_verified_ms`.
+    The flag and timestamp latch into every later Done sample while the
+    position keeps reporting the live run-axis estimate, so a later sample
+    carrying the flag is evidence that verification *occurred*, never evidence
+    that its position was observed *at verification*. Only a usable sample in
+    the analyzed (selected) run with the run's timeline flags
+    (`run_start_ok`, `dwell_start_ok`, `stop_verified_ok`) whose raw `t_ms`
+    equals its own `stop_verified_ms` represents *where the run stopped*.
+
+    A capture that ends while the dwell is still open, that dropped the
+    verification tick, or that started after it has no such sample, so its
+    endpoint is not a verified stop and is reported as such. No tolerance,
+    interpolation or cross-sample pairing is applied: the association is
+    within one record, on the producer's own clock, so uint32 wrap needs no
+    window and cross-run/cross-session pairing is impossible (callers pass
+    only the selected run's samples).
     """
-    return next(
-        (
-            sample
-            for sample in samples
-            if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok
-        ),
-        None,
-    )
+    candidates = [
+        sample
+        for sample in samples
+        if sample.run_start_ok
+        and sample.dwell_start_ok
+        and sample.stop_verified_ok
+        and sample.t_ms == sample.stop_verified_ms
+    ]
+    if not candidates:
+        return None
+    return candidates[0]
 
 
 def _position_section(
@@ -518,27 +535,84 @@ def _position_section(
         else None
     )
 
+    # Every selected sample carrying the latched timeline (flag set), whether or
+    # not it is the verification tick: evidence that verification *occurred*.
+    latched = [
+        sample
+        for sample in samples
+        if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok
+    ]
+    latched_stamps = sorted({sample.stop_verified_ms for sample in latched})
+
     # The endpoint is the verified final stop, and nothing else. The last sample in
     # the file is a different fact: after the stop the vehicle may be handled or
     # retrieved, which moves it, and a capture that ends mid-run has no stop at all.
     # Substituting one for the other is how an analysis reported a different
     # position than the one the run stopped at, so both are reported, separately
-    # named, with the source that produced each.
+    # named, with the source that produced each. A latched flag without the
+    # verification-tick sample is UNAVAILABLE, never the later position: matching
+    # values do not prove a late sample was taken at verification.
     if stop_position is not None:
         end_position = stop_position
         end_source: Optional[str] = "verified_final_stop"
         end_reason: Optional[str] = None
-    elif latest_position is not None:
-        end_position = latest_position
-        end_source = "latest_usable_sample"
-        end_reason = (
-            "no verified final stop was recorded (the run's final-stop dwell never "
-            "verified), so this is the last usable position, not a stop position"
-        )
-    else:
+    elif not latched:
+        if latest_position is not None:
+            end_position = latest_position
+            end_source = "latest_usable_sample"
+            end_reason = (
+                "no verified final stop was recorded (the run's final-stop dwell never "
+                "verified), so this is the last usable position, not a stop position"
+            )
+        else:
+            end_position = None
+            end_source = None
+            end_reason = "no usable position sample was recorded"
+    elif len(latched_stamps) > 1:
         end_position = None
         end_source = None
-        end_reason = "no usable position sample was recorded"
+        end_reason = (
+            "the selected run carries contradictory stop-verification timestamps "
+            f"({', '.join(str(stamp) for stamp in latched_stamps)} ms); no single "
+            "verification instant can be attributed, so the verified stop position "
+            "is unavailable (the latest usable position remains a later observation, "
+            "not a verified stop)"
+        )
+    else:
+        stamp = latched_stamps[0]
+        first_latched = min(sample.t_abs_ms for sample in latched)
+        tick_match_unusable = next(
+            (
+                sample
+                for sample in samples
+                if sample.run_start_ok
+                and sample.dwell_start_ok
+                and sample.stop_verified_ok
+                and sample.t_ms == sample.stop_verified_ms
+            ),
+            None,
+        )
+        if tick_match_unusable is not None:
+            # A record exists at the verification instant but carries no usable
+            # position: the instant is known, the position there is not.
+            end_position = None
+            end_source = None
+            end_reason = (
+                f"the run recorded stop verification at {stamp} ms but the "
+                f"verification-instant sample at {stamp} ms carries no usable "
+                "position, so the verified stop position is unavailable (the latest "
+                "usable position remains a later observation, not a verified stop)"
+            )
+        else:
+            end_position = None
+            end_source = None
+            end_reason = (
+                f"the run recorded stop verification at {stamp} ms but no usable "
+                "sample was observed at that instant "
+                f"(first verified sample at {first_latched} ms); the verified stop "
+                "position is unavailable (the latest usable position remains a later "
+                "observation, not a verified stop)"
+            )
 
     # Sampling uncertainty: the stop is confirmed by a sample, and the vehicle kept
     # moving between that sample and the one before it. The endpoint is therefore
@@ -620,7 +694,8 @@ def _position_section(
         "believed_target_source": believed_target_source,
         "note": (
             "position is the firmware's run-axis estimate, metres from the Start "
-            "Point; `end_position_m` is the verified final stop, `last_m` is the "
+            "Point; `end_position_m` is the verified final stop (the usable sample "
+            "whose t_ms equals its own stop_verified_ms), `last_m` is the "
             "last usable tick"
         ),
     }

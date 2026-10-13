@@ -400,10 +400,21 @@ def _capture_comparability(metrics: dict[str, Any]) -> Optional[str]:
             "be attributed to the analyzed run"
         )
     if metrics["position"]["end_position_source"] != "verified_final_stop":
-        reasons.append(
-            "the analyzed run recorded no verified final stop ("
-            f"{metrics['position']['end_position_unavailable_reason']})"
-        )
+        # R1G/M11: verification may have latched with no verification-tick
+        # position. That run verified a stop but has no attributable stop
+        # position - which is not the same as never verifying - so the reason
+        # says which one, with the position section's precise attribution.
+        if metrics["run_window"]["final_stop_dwell_verified"]:
+            reasons.append(
+                "the analyzed run recorded stop verification but no verified "
+                "stop position is available ("
+                f"{metrics['position']['end_position_unavailable_reason']})"
+            )
+        else:
+            reasons.append(
+                "the analyzed run recorded no verified final stop ("
+                f"{metrics['position']['end_position_unavailable_reason']})"
+            )
     restart_count = metrics["capture"].get("restart_suspected_count", 0)
     if restart_count:
         reasons.append(

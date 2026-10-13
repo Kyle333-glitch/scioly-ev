@@ -8387,3 +8387,65 @@ raw evidence: .agent-work/reviews/r1f-m9-m10/; checkpoint verification:
 D54-D64 and S18C/S18R/R1A/R1B/R1C/R1D/R1E records unchanged. Next eligible
 action is the next R1 stage (R1G: M11), only in a new run. STOP after this
 stage.
+
+## D66 / R1G - 2026-10-13 - Verified stop position requires verification-tick evidence
+
+R1G repairs the October 8 audit's M11 (a latched stop-verification flag
+does not identify the endpoint sample) in the Python telemetry tooling
+only. metrics._verified_stop_sample took the first usable sample carrying
+stop_verified_ok and reported its position as verified_final_stop; the
+firmware latches that flag and timestamp into every later Done sample
+while the position keeps reporting the live run-axis estimate, so a first
+received Done long after verification (dropped tick, late capture start,
+handling/retrieval movement) was misattributed to the earlier instant.
+Reproduced on entry HEAD b9eb452 with the supported analyze.py CLI before
+any edit (.agent-work/reviews/r1g-m11/: FinalBrake near 5 m, verification
+3100 ms with no sample at 3100, first Done 6000 ms at 8 m reported as
+verified 8 m with comparison permitted; BEFORE.txt, prerepair-failing.txt
+from a git-archive-HEAD extract; CLI exit 0 throughout - content defect,
+not status). Firmware read for interpretation only
+(CompetitionStateMachine.h FinalBrake/Done latch, VehicleRuntime
+snapshot/buildSample, TelemetryRecord/Format schema v3): no latched
+endpoint-position field exists, and the verification cycle stamps
+finalStopVerifiedAtMs = nowMs on the same tick that carries t_ms = nowMs,
+so the only attributable endpoint is the usable selected-run sample whose
+raw t_ms equals its own stop_verified_ms (exact within-record equality, no
+tolerance, no interpolation, no cross-sample pairing).
+
+Contract: verified_final_stop only for that tick-matched sample; a latched
+flag without its tick yields end_position_m=None with a precise reason
+(missing tick naming stamp and first-observed verified time; unusable tick
+position; contradictory stamps), the later observation preserved in last_m
+(value equality never promotes), run_window timeline and internal Run Time
+untouched (the timestamp latch is trustworthy as a time), and
+endpoints.compare_endpoints refuses without verified-position evidence with
+null deltas (distinguishing "recorded stop verification but no verified
+stop position is available" from "recorded no verified final stop").
+
+Changed: tools/telemetry/evtelemetry/metrics.py (tick-matched verified
+sample + unavailable-reason taxonomy), tools/telemetry/evtelemetry/
+endpoints.py (R1G refusal wording), README verification-instant paragraph,
+three existing fixtures made producer-faithful with identical intent
+(test_endpoint_comparability _verified helper + one restamp,
+test_selected_run_membership endpoint pin, test_metrics second-run slice
+from the real verification tick), new 30-test
+tools/telemetry/tests/test_verified_stop_attribution.py (real
+parser/metrics/endpoints/report + one analyze.py subprocess; 15/30 failing
+before on pristine HEAD, 30/30 after).
+
+Validation on the exact staged content: new matrix 30/30 OK, telemetry
+335/335 OK (305 + 30; 4 pre-existing symlink-privilege skips), py_compile
+clean, native 740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS
+0 warnings at RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to
+R1F baseline; Python-only change is image-neutral), git diff --check clean,
+each command exit 0. M11 closed; R1A/B/C/D/E/F preserved. This does NOT
+qualify telemetry for physical calibration: the independent cumulative R1
+review is still required and is not started here. R2/R3 and physical
+Blocks E/F unchanged; no firmware, C++, calibration or telemetry-data
+change.
+
+Full ledger, contract, matrix and gate self-check: .agent-work/stages/R1G.md;
+raw evidence: .agent-work/reviews/r1g-m11/ (repro.py, BEFORE.txt,
+AFTER.txt, prerepair-failing.txt, pristine/). Original D54-D65 records
+unchanged. Next eligible action is the independent cumulative R1 review,
+only in a new run. STOP after this stage.

@@ -496,7 +496,26 @@ class CaptureBoundaryTest(unittest.TestCase):
         first_run = self.lines
         # A completed second run, appended to the same session: a fresh actuation
         # reading and the run timeline that goes with it.
-        tail = _samples(self.lines)[-6:]
+        # R1G/M11: the restamped run must stay producer-faithful - it has to
+        # include the verification tick itself (the sample whose t_ms equals
+        # its own stop_verified_ms), not only later Done ticks repeating the
+        # stamp. The last six samples are all post-verification Dones, so the
+        # slice starts at the verification tick: six samples either way.
+        all_samples = _samples(self.lines)
+
+        def _fields(line: str) -> dict[str, str]:
+            return dict(
+                token.split("=", 1) for token in line.split(",")[1:] if "=" in token
+            )
+
+        verify_at = next(
+            index
+            for index, line in enumerate(all_samples)
+            if _fields(line).get("stop_verified_ok") == "1"
+            and _fields(line).get("t_ms") == _fields(line).get("stop_verified_ms")
+        )
+        tail = all_samples[verify_at : verify_at + 6]
+        restamped_stamp = str(30000)
         second_run = [
             _restamp(
                 [line],
@@ -504,7 +523,7 @@ class CaptureBoundaryTest(unittest.TestCase):
                     "t_ms": str(30000 + index * 20),
                     "run_start_ms": "30000",
                     "dwell_start_ms": "33000",
-                    "stop_verified_ms": "36000",
+                    "stop_verified_ms": restamped_stamp,
                 },
             )[0]
             for index, line in enumerate(tail)

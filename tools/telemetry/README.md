@@ -123,7 +123,15 @@ Metrics cover, per run:
 - **position**: believed run-axis position, min/max, net travel, remaining
   distance, and the **believed endpoint**, which is the position at the run's
   *verified final stop* (`end_position_source: verified_final_stop`) - not the last
-  sample in the file, which may be a vehicle being handled after the run. When the
+  sample in the file, which may be a vehicle being handled after the run. The
+  verified stop is the usable sample whose raw `t_ms` equals its own
+  `stop_verified_ms` (the verification tick on the firmware's own clock): the
+  flag and timestamp latch into every later `Done` sample, so a later sample
+  carrying them is proof verification *occurred*, never proof its position was
+  observed *at verification*. When the verification tick itself is missing
+  (dropped, or the capture started after it), the endpoint is unavailable
+  (`end_position_source` null with the reason) even if a later sample has the
+  same value - value equality never promotes a late sample. When the
   run never verified a stop, the last usable sample is reported as exactly that
   (`end_position_source: latest_usable_sample`) with the reason, and the two are
   never substituted for one another. `last_m` is the last usable tick,
