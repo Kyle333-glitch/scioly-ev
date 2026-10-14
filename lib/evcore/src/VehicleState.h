@@ -99,4 +99,16 @@ struct FaultState {
     uint32_t raisedAtMs = 0;
 };
 
+// Selects the fault of record for operator-event attribution (R3/L2): the run
+// policy's fault first, else the safety authority's latch. The precedence
+// mirrors what the control tick itself reports - `safetyState.detectedFault`
+// prefers the run's fault over the cycle's - so an event's `fault` field and
+// the tick snapshot that surrounds it cannot disagree about which fault is
+// current. A historical fault a reset just cleared is therefore never
+// reported as current: the caller reads this after the reset took effect,
+// while the discarded fault travels in the event's `detail`, not its `fault`.
+inline FaultCode currentFaultOfRecord(FaultCode runFault, FaultCode authorityFault) {
+    return runFault != FaultCode::None ? runFault : authorityFault;
+}
+
 }  // namespace ev

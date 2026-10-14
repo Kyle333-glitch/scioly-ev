@@ -254,8 +254,11 @@ the Bottle Line), and the three per-phase bottle strategy ceilings are `Provisio
 placeholders, so `validateRunPhaseConfig()` refuses the run policy. The serial
 interface can report `status`, `checks`, `version`, the held configuration and the
 run's current execution plan (`plan`), and can ask to `announce` or `arm` - but with
-the placeholder configuration every arming intent is refused, and the refusal names
-the check that failed. No command
+the placeholder configuration every arming intent is refused: a failed
+configuration check names the check that failed, while a run with no usable
+execution plan is refused with the named `ExecutionPlanNotEstablished` state
+refusal (S16) instead - a missing plan is a state of the run, not a failed
+value check, and the two refusals stay in their own vocabularies. No command
 commands an effort or a direction, and none starts a run. The watchdog is
 deliberately disabled in the vehicle image; its bench qualification passed
 (H0W, D28), and enabling it in production is a separate, deliberate change.

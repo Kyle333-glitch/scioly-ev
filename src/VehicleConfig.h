@@ -3,6 +3,7 @@
 #include <CompetitionStateMachine.h>
 #include <ConfigurationChecks.h>
 #include <DriverFault.h>
+#include <FirmwareIdentity.h>
 #include <Motion.h>
 #include <MotionProfile.h>
 #include <NearZeroVerifier.h>
@@ -14,6 +15,12 @@
 #include <VehicleCalibration.h>
 #include <VelocityController.h>
 #include <VelocityEstimator.h>
+
+#if defined(EV_BUILD_IDENTITY_AVAILABLE)
+// Generated per build by scripts/ev_build_identity.py into the build
+// directory (never committed): EV_BUILD_REVISION, EV_BUILD_DIRTY.
+#include "EvBuildIdentity.h"
+#endif
 
 // ---------------------------------------------------------------------------
 // The vehicle layer's configuration - and the honest provenance of every value
@@ -56,11 +63,61 @@ namespace vehicleConfig {
 // telemetry snapshot reports it, so overrun is visible rather than assumed away.
 constexpr uint32_t kControlPeriodMs = 20U;
 
-// The firmware identity, as the operator interface reports it (`VERSION,fw=...`)
-// and as a serial log identifies the build it came from. A compile-time literal
-// with no comma in it: the response formatter writes it verbatim into a
-// comma-separated line.
-constexpr const char* kFirmwareId = "ev-nano-r4-p7b";
+// The firmware identity, as the operator interface reports it (`VERSION,...`
+// with the shared identity fragment, and `BOOT,...` with the same fields) and
+// as a serial log identifies the build it came from.
+//
+// This is deliberately NOT a constant string: a constant cannot tell two
+// materially different images apart (R3/L3). The identity a device reports is
+// composed by `firmwareIdentity()` below from four independent facts: the
+// stable family name, the source revision plus dirty state supplied per build
+// by the build script, the image variant supplied per environment by the
+// build flags, and a fingerprint over the calibration/configuration values
+// this build carries. `VERSION`/`BOOT` render it through
+// `ev::appendFirmwareIdentity()`; see `lib/evcore/src/FirmwareIdentity.h`
+// for the field contract and what the identity does not claim (in
+// particular: a revision names the source, never the flashed binary).
+constexpr const char* kFirmwareFamily = ev::kFirmwareFamily;
+
+// The source revision this image was built from: the short commit hash the
+// build script recorded, or `unknown` when no revision metadata reached the
+// build (a host-test binary, a source archive without version control).
+// Unknown is honest, never fatal: the build succeeds and says so.
+inline const char* buildRevision() {
+#if defined(EV_BUILD_IDENTITY_AVAILABLE)
+    return EV_BUILD_REVISION;
+#else
+    return ev::kFirmwareRevisionUnknown;
+#endif
+}
+
+// True when the tree the image was built from had uncommitted changes - or
+// when no revision metadata was available at all, in which case cleanness
+// cannot be shown and must not be claimed. A dirty build never masquerades
+// as a clean committed image.
+inline bool buildIsDirty() {
+#if defined(EV_BUILD_IDENTITY_AVAILABLE)
+    return EV_BUILD_DIRTY != 0;
+#else
+    return true;
+#endif
+}
+
+// The image variant this environment builds. It comes from the
+// per-environment `EV_FIRMWARE_VARIANT` build define (`platformio.ini`), not
+// from probing the running image, and an undefined define reads as Unknown
+// rather than as any real image.
+inline ev::FirmwareVariant firmwareVariant() {
+#if defined(EV_FIRMWARE_VARIANT) && (EV_FIRMWARE_VARIANT == 0)
+    return ev::FirmwareVariant::Production;
+#elif defined(EV_FIRMWARE_VARIANT) && (EV_FIRMWARE_VARIANT == 1)
+    return ev::FirmwareVariant::Bench;
+#elif defined(EV_FIRMWARE_VARIANT) && (EV_FIRMWARE_VARIANT == 2)
+    return ev::FirmwareVariant::BenchWatchdog;
+#else
+    return ev::FirmwareVariant::Unknown;
+#endif
+}
 
 // How old a control-path sample may be and still be used. Three control cycles,
 // chosen as a starting policy.
@@ -650,6 +707,178 @@ inline ev::RunTimingPlanInputs runTimingPlanInputs(const ev::RunAxisGeometry& ge
         // same `Sourced` value the sequencer verifies a stop against, from the same
         // builder, so the plan cannot reserve a dwell the run does not hold.
         reversalStopVerification().dwellS, provisionalValue(kPlannedMaxRunDurationS));
+}
+
+// ---------------------------------------------------------------------------
+// Build identity: the configuration fingerprint (R3/L3)
+// ---------------------------------------------------------------------------
+//
+// `firmwareIdentity()` (below) reports which calibration/configuration this
+// image carries, so two images built from the same source with different
+// tuning report different identities. The fingerprint is a 32-bit FNV-1a
+// fold (`ev::FingerprintFold`) over the VALUE bytes plus the PROVENANCE byte
+// of every `Sourced` number the configuration builders produce - the same
+// coverage `allPromotedValuesCiteEvidence()` audits - plus the plain policy
+// scalars, capabilities and model flag that equally change what the firmware
+// does. Evidence pointers are deliberately NOT folded: they are addresses,
+// not values, and would make identical builds hash differently.
+//
+// What this covers, exactly: the 3 calibration values; the 5 safety limits;
+// the 3 controller gains plus effort mode, effort ceiling, integral bound
+// and step; both profile legs (cruise, ceiling, accel, decel, brake offset,
+// direction); both near-zero verifications (threshold, dwell, gap); the
+// reversal timeout; all 9 phase timeouts plus final-approach distance,
+// minimum cruise, the 3 strategy ceilings and the 3 bottle distances; the 2
+// execution-plan dependencies; the 2 rule-derived bounds (complete-stop
+// dwell, maximum optional delay); the tick polarity and driver-fault
+// polarity; the cadence/staleness policy scalars; the timing-model flag; and
+// both sensing capabilities. `kFirmwareConfigSchema` is bumped if this set
+// ever changes.
+//
+// Residual limitations (stated, not fixed): the fingerprint covers values,
+// not the toolchain that compiled them, not the platform release, and not
+// the evidence the values cite - so it distinguishes configurations, never
+// binaries. A revision still names the source, never the flashed image.
+namespace identity {
+
+inline void mixSourced(ev::FingerprintFold& fold, const ev::Sourced<double>& value) {
+    fold.mixDouble(value.value);
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixSourced(ev::FingerprintFold& fold, const ev::Sourced<uint16_t>& value) {
+    fold.mixUint16(value.value);
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixSourced(ev::FingerprintFold& fold, const ev::Sourced<uint32_t>& value) {
+    fold.mixUint32(value.value);
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixDirection(ev::FingerprintFold& fold,
+                         const ev::Sourced<ev::MotionDirection>& value) {
+    fold.mixUint8(static_cast<uint8_t>(value.value));
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixEffortMode(ev::FingerprintFold& fold,
+                          const ev::Sourced<ev::MotorMode>& value) {
+    fold.mixUint8(static_cast<uint8_t>(value.value));
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixFaultPolarity(ev::FingerprintFold& fold,
+                             const ev::Sourced<ev::DriverFaultPolarity>& value) {
+    fold.mixUint8(static_cast<uint8_t>(value.value));
+    fold.mixUint8(static_cast<uint8_t>(value.source));
+}
+
+inline void mixLimits(ev::FingerprintFold& fold, const ev::MotionProfileLimits& limits) {
+    mixSourced(fold, limits.cruiseVelocityMps);
+    mixSourced(fold, limits.velocityCeilingMps);
+    mixSourced(fold, limits.accelLimitMps2);
+    mixSourced(fold, limits.decelLimitMps2);
+    mixSourced(fold, limits.brakeOffsetM);
+    mixDirection(fold, limits.positiveCommandDirection);
+}
+
+inline void mixNearZero(ev::FingerprintFold& fold, const ev::NearZeroConfig& config) {
+    mixSourced(fold, config.velocityThresholdMps);
+    mixSourced(fold, config.dwellS);
+    mixSourced(fold, config.maxUpdateGapMs);
+}
+
+}  // namespace identity
+
+// The fingerprint this build's calibration/configuration folds to.
+// Computed on demand (microseconds at boot-line rates), so it is always the
+// values in force rather than a build-time snapshot that could go stale.
+inline uint32_t calibrationFingerprint() {
+    ev::FingerprintFold fold;
+    const ev::VehicleCalibration calibrationValues = calibration();
+    identity::mixSourced(fold, calibrationValues.distancePerEncoderTickM);
+    identity::mixSourced(fold, calibrationValues.forwardBrakeOffsetM);
+    identity::mixSourced(fold, calibrationValues.reverseBrakeOffsetM);
+
+    const ev::SafetyLimits limits = safetyLimits();
+    identity::mixSourced(fold, limits.maxEffortPermille);
+    identity::mixSourced(fold, limits.maxForwardVelocityMps);
+    identity::mixSourced(fold, limits.maxReverseVelocityMps);
+    identity::mixSourced(fold, limits.maxRunDurationS);
+    identity::mixSourced(fold, limits.minBatteryV);
+
+    const ev::VelocityControllerConfig controller = controllerConfig();
+    identity::mixSourced(fold, controller.feedForwardPermillePerMps);
+    identity::mixSourced(fold, controller.proportionalPermillePerMps);
+    identity::mixSourced(fold, controller.integralPermillePerMpsSecond);
+    identity::mixEffortMode(fold, controller.positiveEffortMode);
+    identity::mixSourced(fold, controller.maxEffortPermille);
+    fold.mixUint16(controller.maxIntegralPermille);
+    fold.mixDouble(controller.maxIntegrationStepS);
+
+    const ev::DirectionalMotionProfileLimits profile = profileLimits();
+    identity::mixLimits(fold, profile.forward);
+    identity::mixLimits(fold, profile.reverse);
+
+    const ev::NearZeroConfig reversalStop = reversalStopVerification();
+    const ev::NearZeroConfig finalStop = finalStopVerification();
+    identity::mixNearZero(fold, reversalStop);
+    identity::mixNearZero(fold, finalStop);
+
+    const ev::RunPhaseConfig phase = runPhaseConfig();
+    identity::mixSourced(fold, phase.maximumOptionalDelayS);
+    identity::mixSourced(fold, phase.approachTimeoutS);
+    identity::mixSourced(fold, phase.captureTimeoutS);
+    identity::mixSourced(fold, phase.pushTimeoutS);
+    identity::mixSourced(fold, phase.reverseTimeoutS);
+    identity::mixSourced(fold, phase.finalApproachTimeoutS);
+    identity::mixSourced(fold, phase.finalStopTimeoutS);
+    identity::mixSourced(fold, phase.travelStallTimeoutS);
+    identity::mixSourced(fold, phase.encoderProgressTimeoutS);
+    identity::mixSourced(fold, phase.finalApproachDistanceM);
+    identity::mixSourced(fold, phase.minimumPlannedCruiseMps);
+    identity::mixSourced(fold, phase.approachCeilingMps);
+    identity::mixSourced(fold, phase.captureCeilingMps);
+    identity::mixSourced(fold, phase.pushCeilingMps);
+    identity::mixSourced(fold, phase.bottleEvidence.contactLeadDistanceM);
+    identity::mixSourced(fold, phase.bottleEvidence.captureAdvanceDistanceM);
+    identity::mixSourced(fold, phase.bottleEvidence.pushMarginDistanceM);
+
+    const ev::ReversalConfig reversal = reversalConfig();
+    identity::mixSourced(fold, reversal.reversalTimeoutS);
+
+    const ev::RunExecutionDependencies planDependencies = runExecutionDependencies();
+    identity::mixSourced(fold, planDependencies.contactWindowToleranceM);
+    identity::mixSourced(fold, planDependencies.forwardStopMarginBeyondBottleLineM);
+
+    identity::mixDirection(fold, positiveTicksDirection());
+    identity::mixFaultPolarity(fold, plannedDriverFaultPolarity());
+    fold.mixUint8(static_cast<uint8_t>(plannedDriverFaultCapability()));
+    fold.mixUint8(static_cast<uint8_t>(plannedBatteryVoltageCapability()));
+
+    const ev::VelocityEstimatorConfig estimator = estimatorConfig();
+    fold.mixUint32(estimator.windowMs);
+    fold.mixUint32(estimator.noEdgeTimeoutMs);
+    fold.mixUint32(kControlPeriodMs);
+    fold.mixUint32(kMaxSampleAgeMs);
+    fold.mixUint32(kStopEvidenceMaxAgeMs);
+    fold.mixUint8(kRunTimingModelValidated ? 1U : 0U);
+    return fold.done();
+}
+
+// The complete device-reported build identity: family, source revision,
+// dirty state, image variant and configuration fingerprint. Rendered by
+// `VERSION`/`BOOT` through `ev::appendFirmwareIdentity()`.
+inline ev::FirmwareIdentity firmwareIdentity() {
+    ev::FirmwareIdentity identity;
+    identity.family = ev::kFirmwareFamily;
+    identity.revision = buildRevision();
+    identity.dirty = buildIsDirty();
+    identity.variant = firmwareVariant();
+    identity.configFingerprint = calibrationFingerprint();
+    identity.configSchema = ev::kFirmwareConfigSchema;
+    return identity;
 }
 
 // ---------------------------------------------------------------------------

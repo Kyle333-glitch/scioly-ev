@@ -22,7 +22,7 @@ forward direction has been defined mechanically.
 - Wheels off the floor; drivetrain unloaded.
 - Bench supply for the motor rail with a **low** current limit (record it), plus
   a meter. The MCU is powered as it will be in the vehicle.
-- The firmware image identity recorded (`VERSION,fw=...`, `git rev-parse HEAD`).
+- The firmware image identity recorded (`VERSION` with `rev=`/`dirty=`/`variant=`/`cfg=`, `git rev-parse HEAD`).
 
 ## Setup, step A0 - wiring continuity, power off
 

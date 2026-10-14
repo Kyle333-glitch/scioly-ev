@@ -394,10 +394,17 @@ or what remains provisional about the numbers it justified.
   and the figure may not be used as a calibration. Removed by: P-H14 step 4 (H4) -
   tape-measured travel, five runs each direction, spread and mean within the
   pre-registered tolerance.
-- **A "Measured" promotion requires a citation** (`Sourced::citesEvidence()`), and
-  `MeasuredValuesCiteEvidence` reports false while placeholders remain. This is a
-  deliberate limit: it is the check that stops a provisional number from
-  authorizing motion while looking like a measured one.
+- **A "Measured" promotion requires a citation** (`Sourced::citesEvidence()`).
+  `MeasuredValuesCiteEvidence` passes vacuously while every value is a
+  placeholder - a placeholder is not a claim about the vehicle and needs no
+  citation - and it bites on the first promotion that names no evidence
+  (`src/VehicleConfig.h`). What keeps the vehicle unarmable today is therefore
+  not that check but the separate measurement gates (`CalibrationMeasured`,
+  `SafetyLimitsValid`, `ControllerConfigValid` and the rest), which fail on
+  the placeholders themselves. This is a deliberate division: the citation
+  check stops a promoted number from authorizing motion while looking measured,
+  and the measurement gates stop a provisional number from authorizing motion
+  at all.
 - **The maximum run duration is now enforced, but only once it is measured (S10).**
   The vehicle layer evaluates a run-scoped elapsed bound every control tick
   (`lib/evcore/src/RunDurationGuard.h`) and faults a run that passes it
@@ -557,7 +564,12 @@ or what remains provisional about the numbers it justified.
   belong to the image whose hash that record names, not to the current source
   (D22's greeting observations belong to the D22 image; D23's source was never
   flashed; the H0 repeat's are the `cfd288d4...` vehicle image and the
-  `71f42e40...` bench image). **Every handoff before D31 left the vehicle image
+  `71f42e40...` bench image). Since R3 the device reports its own identity for
+  this check - `VERSION`/`BOOT` carry `rev=` (source revision), `dirty=`
+  (uncommitted tree), `variant=` (production/bench/bench-watchdog) and `cfg=`
+  (configuration fingerprint) - so a capture says which image produced it; a
+  revision still names the source, never the flashed binary, and the record's
+  hash remains the authority. **Every handoff before D31 left the vehicle image
   running; D31 left the bench image** (`b6b1c455...`) - the image whose own
   documentation says it must never be mistaken for the vehicle image, and which
   contains `bench drive`, a command that applies effort outside a run. The board is

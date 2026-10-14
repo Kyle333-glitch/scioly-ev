@@ -85,9 +85,9 @@ void VehicleRuntime::begin(uint32_t nowMs) {
     greeter_.requestGreeting(nowMs);
 
     // 8. The session's own boundary record. It is the first record of a session
-    //    (`TelemetryRecord.h`) and it is queued, not written: nothing here waits
-    //    for a port.
-    pushOperatorEvent(ev::TelemetryEventCode::Boot, ev::kTelemetryMissingField);
+    // (`TelemetryRecord.h`) and it is queued, not written: nothing here waits
+    // for a port.
+    pushOperatorEvent(ev::TelemetryEventCode::Boot, ev::kTelemetryMissingField, nowMs);
 
     // 9. Start the schedule last: the first control tick is one period away, and
     //    until then the loop does no control work.
@@ -727,7 +727,11 @@ void VehicleRuntime::stageBootLine() {
     serialTransport::LineTransport& transport = serialTransport::port();
     ev::BoundedText text(transport.workingBuffer(), ev::kSerialLineCapacity);
     text.appendText("BOOT");
-    text.field("fw").appendText(vehicleConfig::kFirmwareId);
+    // The same shared identity fragment `VERSION` reports, so a greeting and
+    // a version query from one session cannot disagree about which build is
+    // running (R3/L3). At ~200 characters the line stays far inside the
+    // shared serial capacity.
+    ev::appendFirmwareIdentity(vehicleConfig::firmwareIdentity(), text);
     text.field("schema").appendUnsigned(ev::kTelemetrySchemaVersion);
     text.field("cadence_ms").appendUnsigned(vehicleConfig::kControlPeriodMs);
     text.field("watchdog").appendBool(kWatchdogEnablementRequested);
@@ -772,11 +776,11 @@ void VehicleRuntime::serviceSerial(uint32_t nowMs) {
             break;  // one command per pass: the rest of the window waits
         }
         if (event == ev::LineEvent::LineTooLong) {
-            rejectWithoutCommand(ev::CommandError::LineTooLong);
+            rejectWithoutCommand(ev::CommandError::LineTooLong, nowMs);
             break;  // the refusal is this pass' one answer
         }
         if (event == ev::LineEvent::InvalidCharacter) {
-            rejectWithoutCommand(ev::CommandError::InvalidCharacter);
+            rejectWithoutCommand(ev::CommandError::InvalidCharacter, nowMs);
             break;  // the refusal is this pass' one answer
         }
         // EmptyLine: a bare terminator (including the `\n` of a `\r\n` pair) is
@@ -789,17 +793,17 @@ void VehicleRuntime::serviceSerial(uint32_t nowMs) {
 }
 
 // A rejection that has no command to name: the line never became one.
-void VehicleRuntime::rejectWithoutCommand(ev::CommandError error) {
+void VehicleRuntime::rejectWithoutCommand(ev::CommandError error, uint32_t nowMs) {
     ++commandsRejected_;
     const char* reason = ev::commandErrorName(error);
     respondRefusal(ev::OperatorCommandId::None, reason);
-    pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason);
+    pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason, nowMs);
 }
 
 void VehicleRuntime::handleCommandLine(const char* line, uint16_t length, uint32_t nowMs) {
     const ev::CommandParseResult parsed = ev::parseOperatorCommand(line, length);
     if (!parsed.ok) {
-        rejectWithoutCommand(parsed.error);
+        rejectWithoutCommand(parsed.error, nowMs);
         return;
     }
 
@@ -811,7 +815,7 @@ void VehicleRuntime::handleCommandLine(const char* line, uint16_t length, uint32
         ++commandsRejected_;
         const char* reason = ev::commandRefusalName(admissible.refusal);
         respondRefusal(id, reason);
-        pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason, nowMs);
         return;
     }
 
@@ -828,7 +832,7 @@ void VehicleRuntime::handleCommandLine(const char* line, uint16_t length, uint32
             respondLine(ev::formatConfigSetRefusal(
                 supplied.error, serialTransport::port().workingBuffer(), ev::kSerialLineCapacity));
             pushOperatorEvent(ev::TelemetryEventCode::CommandRejected,
-                              ev::telemetryConfigErrorName(supplied.error));
+                              ev::telemetryConfigErrorName(supplied.error), nowMs);
             return;
         }
     }
@@ -865,7 +869,7 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             return;
 
         case ev::OperatorCommandId::Version:
-            respondLine(ev::formatVersionLine(vehicleConfig::kFirmwareId,
+            respondLine(ev::formatVersionLine(vehicleConfig::firmwareIdentity(),
                                               serialTransport::port().workingBuffer(), capacity));
             return;
 
@@ -903,12 +907,13 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             return;
 
         case ev::OperatorCommandId::ConfigSet:
-            applyConfigSet(request.fields);
+            applyConfigSet(request.fields, nowMs);
             return;
 
         case ev::OperatorCommandId::ConfigClear:
             heldConfig_ = ev::RunConfigFields{};
-            pushOperatorEvent(ev::TelemetryEventCode::ConfigCleared, ev::kTelemetryMissingField);
+            pushOperatorEvent(ev::TelemetryEventCode::ConfigCleared, ev::kTelemetryMissingField,
+                              nowMs);
             respondLine(ev::formatOperatorAck(ev::OperatorCommandId::ConfigClear,
                                               serialTransport::port().workingBuffer(), capacity));
             return;
@@ -918,7 +923,7 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             return;
 
         case ev::OperatorCommandId::Arm:
-            applyArm();
+            applyArm(nowMs);
             return;
 
         case ev::OperatorCommandId::Disarm:
@@ -940,7 +945,8 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
 
         case ev::OperatorCommandId::TelemetryOn:
             telemetrySession_.enable();
-            pushOperatorEvent(ev::TelemetryEventCode::TelemetryEnabled, ev::kTelemetryMissingField);
+            pushOperatorEvent(ev::TelemetryEventCode::TelemetryEnabled, ev::kTelemetryMissingField,
+                              nowMs);
             respondLine(ev::formatTelemetryAck(ev::OperatorCommandId::TelemetryOn, telemetryView(),
                                                serialTransport::port().workingBuffer(), capacity));
             return;
@@ -957,7 +963,7 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
             return;
 
         case ev::OperatorCommandId::TelemetryRate:
-            applyTelemetryRate(request.telemetryRateHz);
+            applyTelemetryRate(request.telemetryRateHz, nowMs);
             return;
     }
 }
@@ -969,7 +975,7 @@ void VehicleRuntime::applyCommand(const ev::OperatorRequest& request, uint32_t n
 // out-of-range or non-finite value is ever stored; the announced grid and the
 // cross-field geometry checks still belong to `validateRunConfig()` through the
 // policy, which `config show` and `announce` run.
-void VehicleRuntime::applyConfigSet(const ev::RunConfigFields& supplied) {
+void VehicleRuntime::applyConfigSet(const ev::RunConfigFields& supplied, uint32_t nowMs) {
     if (supplied.hasLevel) {
         heldConfig_.hasLevel = true;
         heldConfig_.levelIndex = supplied.levelIndex;
@@ -987,7 +993,7 @@ void VehicleRuntime::applyConfigSet(const ev::RunConfigFields& supplied) {
         heldConfig_.bottleLineDistanceM = supplied.bottleLineDistanceM;
     }
 
-    pushOperatorEvent(ev::TelemetryEventCode::ConfigSet, ev::kTelemetryMissingField);
+    pushOperatorEvent(ev::TelemetryEventCode::ConfigSet, ev::kTelemetryMissingField, nowMs);
     respondLine(ev::formatConfigSetAck(heldConfig_, heldVerdict(),
                                        serialTransport::port().workingBuffer(),
                                        ev::kSerialLineCapacity));
@@ -1034,7 +1040,7 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
         respondLine(ev::formatAnnounceRefusal(verdict, serialTransport::port().workingBuffer(),
                                               ev::kSerialLineCapacity));
         pushOperatorEvent(ev::TelemetryEventCode::AnnounceRefused,
-                          ev::announceRefusalName(verdict.refusal));
+                          ev::announceRefusalName(verdict.refusal), nowMs);
         return;
     }
 
@@ -1053,7 +1059,7 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
                                  ? kReasonDelayNotPermitted
                                  : ev::kOperatorReasonChecksFailed;
         respondRefusal(ev::OperatorCommandId::Announce, reason);
-        pushOperatorEvent(ev::TelemetryEventCode::AnnounceRefused, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::AnnounceRefused, reason, nowMs);
         return;
     }
 
@@ -1089,7 +1095,7 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     // Both are facts about the plan just adopted - nothing here fabricates a stop
     // when the plan refused, and the `plan` query remains the live view.
     pushOperatorEvent(ev::TelemetryEventCode::AnnounceAccepted,
-                      ev::runExecutionPlanStatusName(executionPlan.status));
+                      ev::runExecutionPlanStatusName(executionPlan.status), nowMs);
     ev::ExecutionPlanEcho planEcho;
     planEcho.status = executionPlan.status;
     if (executionPlan.valid) {
@@ -1099,13 +1105,13 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
                                      ev::kSerialLineCapacity));
 }
 
-void VehicleRuntime::applyArm() {
+void VehicleRuntime::applyArm(uint32_t nowMs) {
     const ev::ArmVerdict verdict = ev::armVerdictFor(configurationChecks_);
     if (!verdict.ok) {
         respondLine(ev::formatArmRefusal(verdict, serialTransport::port().workingBuffer(),
                                          ev::kSerialLineCapacity));
         pushOperatorEvent(ev::TelemetryEventCode::ArmRefused,
-                          ev::configurationCheckName(verdict.firstFailedCheck));
+                          ev::configurationCheckName(verdict.firstFailedCheck), nowMs);
         return;
     }
 
@@ -1120,7 +1126,7 @@ void VehicleRuntime::applyArm() {
         const char* reason =
             ev::commandRefusalName(ev::CommandRefusal::ExecutionPlanNotEstablished);
         respondRefusal(ev::OperatorCommandId::Arm, reason);
-        pushOperatorEvent(ev::TelemetryEventCode::ArmRefused, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::ArmRefused, reason, nowMs);
         return;
     }
 
@@ -1128,7 +1134,8 @@ void VehicleRuntime::applyArm() {
     // the operator sees that as a refusal rather than as an armed vehicle.
     if (!authority_.arm(verdict.readiness)) {
         respondRefusal(ev::OperatorCommandId::Arm, ev::kOperatorReasonChecksFailed);
-        pushOperatorEvent(ev::TelemetryEventCode::ArmRefused, ev::kOperatorReasonChecksFailed);
+        pushOperatorEvent(ev::TelemetryEventCode::ArmRefused, ev::kOperatorReasonChecksFailed,
+                          nowMs);
         return;
     }
 
@@ -1206,19 +1213,22 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     const char* clearedFault = report.clearedFault == ev::FaultCode::None
                                    ? ev::kTelemetryMissingField
                                    : ev::telemetryFaultName(report.clearedFault);
-    pushOperatorEvent(ev::TelemetryEventCode::ChainReset, clearedFault);
+    // Stamped with this command's clock and the live (post-reset) fault of
+    // record: both latches were just cleared, so the `fault` field reports
+    // the current clear state while `detail` keeps what was discarded (R3/L2).
+    pushOperatorEvent(ev::TelemetryEventCode::ChainReset, clearedFault, nowMs);
     respondLine(ev::formatOperatorAck(ev::OperatorCommandId::Reset,
                                      serialTransport::port().workingBuffer(),
                                      ev::kSerialLineCapacity));
 }
 
-void VehicleRuntime::applyTelemetryRate(double requestedRateHz) {
+void VehicleRuntime::applyTelemetryRate(double requestedRateHz, uint32_t nowMs) {
     const uint16_t cadenceHz = static_cast<uint16_t>(1000U / vehicleConfig::kControlPeriodMs);
     const ev::TelemetryRateVerdict verdict = ev::telemetryStrideForRate(requestedRateHz, cadenceHz);
     if (!verdict.ok) {
         const char* reason = ev::telemetryRateRefusalName(verdict.refusal);
         respondRefusal(ev::OperatorCommandId::TelemetryRate, reason);
-        pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason);
+        pushOperatorEvent(ev::TelemetryEventCode::CommandRejected, reason, nowMs);
         return;
     }
 
@@ -1252,14 +1262,24 @@ void VehicleRuntime::respondRefusal(ev::OperatorCommandId id, const char* reason
 // An event the sample train cannot show: an operator's action or its outcome. The
 // transitions that a sample *can* show (arming, a fault, a phase change) are left
 // to the detector, so a reader never sees the same transition twice.
-void VehicleRuntime::pushOperatorEvent(ev::TelemetryEventCode code, const char* detail) {
+//
+// Stamped from the action's own clock (`nowMs` of the command being applied),
+// not from the last control tick's snapshot: several commands between ticks
+// would otherwise share one stale time (R3/L2). The fault field is the live
+// fault of record (`currentFaultCode()`), so a fault a reset just cleared is
+// reported as cleared history in `detail`, never as a current fault. Phase
+// and armed state are live reads for the same reason. The representation is
+// unchanged (`TelemetryEvent`, `EVE3`): corrected values, compatible schema -
+// and wrap-safe by construction, since the stamp is copied, never differenced.
+void VehicleRuntime::pushOperatorEvent(ev::TelemetryEventCode code, const char* detail,
+                                       uint32_t nowMs) {
     ev::TelemetryEvent event;
-    event.tMs = telemetry_.nowMs;
+    event.tMs = nowMs;
     event.phase = run_.phase();
     event.armed = authority_.isArmed();
     event.event = code;
     event.detail = detail;
-    event.fault = telemetry_.fault;
+    event.fault = currentFaultCode();
     telemetrySession_.pushEvent(event);
 }
 

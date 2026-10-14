@@ -35,10 +35,15 @@
 //   tick (`benchConsole::beginPass`, which asks `ev::benchApplyVerdict()`); the
 //   write itself is applied **after** the pass, after the tick has written the
 //   authority's own command. That ordering is the backstop: a bench command cannot
-//   outlive the bench code, because the next pass's tick writes the de-energized
-//   production command regardless - and while the bench owns the driver its write is
-//   the pass's only one, so the pins are not commanded asleep and awake once per
-//   control period.
+//   outlive the bench code, because the production side keeps writing the
+//   de-energized state behind it - the tick's own stage-9 write on passes where
+//   a tick runs and the bench does not own the pass, and `beginPass()`/
+//   `applyOutput()`'s direct de-energized write on the pass the instrument
+//   stops holding the driver (its expiry, stall latch or revocation), which
+//   covers exactly the passes the tick does not: tickless passes, and passes
+//   the bench owns (whose tick write is deliberately skipped). And while the
+//   bench owns the driver its write is the pass's only one, so the pins are
+//   not commanded asleep and awake once per control period.
 //
 //   It also carries H0W Step 3's deliberate hang hook, below. It is a compile-time
 //   constant on purpose: a hang that any serial line could trigger is a hang that a

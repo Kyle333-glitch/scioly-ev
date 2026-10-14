@@ -490,20 +490,32 @@ void test_telemetry_responses_report_the_realized_state(void) {
     TEST_ASSERT_EQUAL_STRING("OK,cmd=telemetry rate,stride=17,rate_hz=2.9412", buffer);
 }
 
-// The version line carries the schema number next to the firmware identity,
-// because a log and a firmware are only comparable when both are known.
+// The version line carries the full build identity next to the schema
+// number, because a log and a firmware are only comparable when both are
+// known (R3/L3): family, source revision, dirty state, image variant and
+// configuration fingerprint - never a bare constant across builds.
 void test_version_line_reports_identity_and_schema(void) {
     char buffer[ev::kSerialLineBufferBytes];
 
-    TEST_ASSERT_TRUE(ev::formatVersionLine("ev-nano-r4-p7b", buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=ev-nano-r4-p7b,telemetry_schema=3", buffer);
-
-    TEST_ASSERT_TRUE(ev::formatVersionLine(nullptr, buffer, ev::kSerialLineCapacity) > 0U);
-    TEST_ASSERT_EQUAL_STRING("VERSION,fw=-,telemetry_schema=3", buffer);
+    ev::FirmwareIdentity identity;
+    identity.family = ev::kFirmwareFamily;
+    identity.revision = "d5b2651";
+    identity.dirty = false;
+    identity.variant = ev::FirmwareVariant::Bench;
+    identity.configFingerprint = 0x9F3AC2E1U;
+    identity.configSchema = ev::kFirmwareConfigSchema;
+    TEST_ASSERT_TRUE(ev::formatVersionLine(identity, buffer, ev::kSerialLineCapacity) > 0U);
+    TEST_ASSERT_EQUAL_STRING(
+        "VERSION,fw=ev-nano-r4,rev=d5b2651,dirty=0,variant=bench,cfg=9f3ac2e1,cfg_schema=1,"
+        "telemetry_schema=3",
+        buffer);
 
     // The schema number is the telemetry schema's, not a second copy of it.
     TEST_ASSERT_TRUE(strstr(buffer, "telemetry_schema=3") != nullptr);
     TEST_ASSERT_EQUAL_UINT8(3U, ev::kTelemetrySchemaVersion);
+
+    // The line stays far inside the widest response this module produces.
+    TEST_ASSERT_TRUE(strlen(buffer) < ev::kOperatorResponseWorstCaseChars);
 }
 
 // Every field of a plan line, in the order the contract fixes it. The column order

@@ -59,24 +59,127 @@ it was derived from. If the relation is not linear over the range, say so and
 record the deviation - a single slope is then an approximation with a stated
 valid range.
 
+The promotion carries the normal evidence, not just the arithmetic: the H5
+series it came from (capture under `data/evidence/`), the `VERIFIED_STATE.md`
+row, and the log entry - a `Measured` value without a citation fails
+`MeasuredValuesCiteEvidence` and the vehicle cannot be armed on it
+(`Sourced::citesEvidence()`). An uncited slope is a placeholder no matter how
+carefully it was computed.
+
+## Provenance contract for everything below (R3/M6)
+
+Five different things, five different labels. The labels are the
+`ValueSource` vocabulary (`lib/evcore/src/Units.h`), and the rule is that a
+computation never becomes a measurement by acquiring a citation:
+
+1. **Provisional placeholder.** Exists so the types are complete. Authorizes
+   nothing. Needs no citation. This is what every gain below starts as, and
+   what the P/I pair stays until the closed-loop experiment in P-H7 Part L
+   (or an authorized equivalent) evaluates it.
+2. **Analytically derived candidate.** Computed offline from measured inputs
+   under a pre-registered rule, with the derivation arithmetic and the input
+   series recorded alongside. Cited as a derivation (`ValueSource::Derived`
+   exists for exactly such numbers), never relabelled `Measured`. The P/I
+   bootstrap pair of part 2 lives here: evidence-backed as a computation,
+   untested as a controller.
+3. **Experimentally estimated parameter.** A quantity observed in a physical
+   experiment that evaluated that configuration: the feed-forward slope from
+   H5's open-loop regression (part 1), a timeout from the longest bounded
+   trial actually recorded plus the pre-registered margin (P-H14 Step 10).
+   Promotable to `Measured` with the trial record cited - but only for
+   quantities with a defined safe direction (a bound), and only flagged as
+   untested on the run path until the run path confirms them.
+4. **Physically validated controller configuration.** A gain set that met the
+   pre-registered closed-loop criterion (§Acceptance) where the regulator
+   runs, with repetitions, spread and supply-voltage sensitivity recorded.
+   This - and only this - is what promotes P/I to `Measured`.
+5. **Physically observed vehicle performance.** What the vehicle did on the
+   course (tape, stopwatch, marks), recorded independently of what the
+   firmware believed. Never derived from a log alone.
+
+What `Measured` means for a gain, then: the pair ran in closed loop against
+the fixed profile, met the criterion at every step in every repetition at
+both supply voltages, and the promotion cites the loaded records - the
+`VERIFIED_STATE.md` row, the captures, the log entry. A cited formula, a
+pre-registered safety margin, or an honest "adequacy untested" flag changes
+nothing about that: none of them ran the pair.
+
+What prohibits a promotion: a formula alone; a bootstrap never executed in
+closed loop; a single trial; pooled battery states; synthetic or uncaptured
+data; a missing capture; a changed configuration without re-validation. The
+independent check is a second reviewer walking the
+capture-derivation-promotion chain plus the holdout series (H10, and H7 Part
+A holdout targets) that never enters tuning. Physical-test permission is
+separately authorized per trial (human in the loop, kill switch, current
+limit); this document grants none.
+
 ## Setup, part 2 - the P/I bootstrap (the bench cannot tune the loop)
 
 The fixed profile cannot be run *through the regulator* on the bench, so part 2
-establishes a **conservative bootstrap**, not a tuning result:
+establishes a **conservative candidate**, not a tuning result and not a
+measurement:
 
 1. From H5's recorded effort-to-velocity relation, derive a deliberately
    conservative initial pair under a **pre-registered bootstrap rule** (recorded
    before the derivation is applied): a small proportional fraction of the
    measured feed-forward slope, and integral action at or near zero. Record the
    derivation arithmetic and the raw H5 series it came from.
-2. Promote the pair as `Measured` **with that citation**, and record explicitly
-   that this is a **bootstrap**: the values are evidence-backed, but their
-   closed-loop adequacy is untested until the loaded runs of P-H7 Part L, which
-   refine or confirm them. A value promoted without a named capture is not a
-   bootstrap - it is the fabrication the promotion procedure exists to prevent.
+2. Record the pair as a **Provisional candidate with that derivation cited**
+   (the offline candidate record - the trial-record `derived` field of
+   `INTERACTIVE-CALIBRATION-DESIGN.md` section 5.2 - not a promotion): the
+   values are evidence-backed as a computation, but their closed-loop adequacy
+   is untested until the loaded runs of P-H7 Part L, which refine or confirm
+   them. A value promoted without a named capture is not a bootstrap - it is
+   the fabrication the promotion procedure exists to prevent - and a computed
+   pair promoted **as `Measured` before any closed-loop test is the same
+   fabrication with a citation attached**: no formula, however conservative
+   and however honestly flagged, measures a gain pair or establishes its
+   closed-loop adequacy. The previous revision of this section instructed
+   exactly that promotion; it was wrong, and it is removed here (R3/M6).
 3. The anti-windup values (`kPlannedMaxIntegralPermille`,
    `kPlannedMaxIntegrationStepS`) are policy bounds, recorded as policy, and
    bounded by part 3's characterization when it runs.
+
+### Why the bootstrap cannot self-qualify, and what is blocked
+
+The controller's configuration check is `Measured`-only
+(`validateVelocityControllerConfig()`), and the run path that could supply
+the missing closed-loop evidence requires arming, which requires that same
+check. No bench command runs the regulator (C1 above), so the pair cannot be
+evaluated off the run path with the instruments that exist today. Promoting
+the pair as `Measured` to break that circle does not resolve it - it
+relables the circle as evidence.
+
+The honest state, until a closed-loop experiment exists, is therefore:
+
+- the P/I pair stays `Provisional` (a cited derived candidate);
+- `ControllerConfigValid` fails, and the production image stays unarmable -
+  which is the gate working, not an obstacle to work around;
+- P-H7 Part L, H8, and every armed run built on them are **blocked on the
+  gain bootstrap**, alongside their other unmeasured dependencies (strategy
+  ceilings, plan dependencies, timeouts).
+
+Two candidate resolutions, both future work, neither executed here:
+
+a. a bounded closed-loop bench capability - the bench-only speed target of
+   `INTERACTIVE-CALIBRATION-DESIGN.md` section 5.4 option 2 - built as a
+   reviewed escalation with the same abort/ownership rules, validating
+   candidates unloaded before Part L refines them loaded; or
+b. a reviewed provenance contract admitting a narrower claim than full
+   `Measured` for an unloaded-validated pair, with the loaded Part L
+   refinement still mandatory before competition tuning.
+
+What does NOT resolve it: rewording the promotion, citing the formula more
+thoroughly, or flagging the values as a bootstrap while marking them
+`Measured`. Do not solve a bootstrap cycle by changing the meaning of
+`Measured`.
+
+Block F prerequisites missing for all of the above, in order: H1A/H1B (hand
+and meter), H2 (hand-driven encoder), H3 Step 0 (B2 bounded-expiry and
+latched-abort demonstration) and H3 polarity/smallest-effort, H4 scale, H5
+effort-to-speed relation - plus the R2 invalid-feedback bound (S18R-M1)
+before bounded powered running. No powered trial in this protocol may run
+until those are recorded.
 
 ## Setup, part 3 - integral limiting (the windup candidate) - executed in P-H7 Part L
 
@@ -101,7 +204,8 @@ chosen from the recorded behaviour, not adopted because it appears in
 Supply voltage, load condition (unloaded for the bench parts; loaded for the
 P-H7 Part L series), profile, capture rate, temperature, and the firmware image
 except the one gain being changed - each candidate is a rebuild, so record the
-flashed image identity (`VERSION,fw=`, `git rev-parse HEAD`) with its series.
+flashed image identity (`VERSION` with its `rev=`/`dirty=`/`variant=`/`cfg=`
+fields, plus `git rev-parse HEAD`) with its series.
 
 ## Varied
 
@@ -145,11 +249,13 @@ de-energize.
 ## Acceptance / decision rule
 
 Part 1 is accepted when the feed-forward relation repeats and the slope is
-recorded; its promotion is a real (open-loop) measurement. The P/I pair is
-accepted as a **bootstrap** when it cites its H5 series and the pre-registered
-derivation and is recorded as unrefined. A **candidate gain set** is accepted
-when it meets the **pre-registered** closed-loop criterion at every step of the
-profile in every repetition and at both supply voltages (or with a recorded
+recorded; its promotion is a real (open-loop) measurement, with the H5
+series, the `VERIFIED_STATE.md` row and the log entry cited. The P/I pair is
+accepted as a **candidate** when it cites its H5 series and the pre-registered
+derivation and is recorded as a Provisional derived candidate - unrefined,
+unpromoted, and unarmable. A **candidate gain set** is accepted when it meets
+the **pre-registered** closed-loop criterion at every step of the profile in
+every repetition and at both supply voltages (or with a recorded
 sensitivity), with no sustained oscillation and with the pinned-effort duration
 recorded either way - and that acceptance happens in **P-H7 Part L**, where the
 regulator is in the loop. On acceptance there, set
@@ -164,11 +270,15 @@ data or the mechanism - not to loosen the criterion after seeing the results.
 ## If it passes
 
 - #8 (control gains / tuning values) promoted in two parts: the feed-forward from
-  H5's open-loop relation, and the P/I **bootstrap** (citation above), recorded
-  as a bootstrap until P-H7 Part L refines it from loaded closed-loop records.
-- Record explicitly that the bootstrap was set without a closed loop, and that
-  the loaded verification is P-H7 Part L, H7 and H10; the gains may need
-  revisiting there for reasons that are measured, not assumed.
+  H5's open-loop relation (a real measurement, cited), and the P/I **candidate**
+  (derivation cited, Provisional) - recorded as a candidate until P-H7 Part L
+  evaluates it in closed loop and promotes it from loaded records.
+- Record explicitly that the candidate was set without a closed loop, that it
+  authorizes nothing, and that the loaded verification is P-H7 Part L, H7 and
+  H10; the gains may need revisiting there for reasons that are measured, not
+  assumed. Until the closed-loop experiment exists, Part L and everything
+  armed downstream of it stay blocked (see "Why the bootstrap cannot
+  self-qualify" above).
 - Log in `DEVELOPMENT_LOG.md`.
 
 ## If it fails or is inconclusive

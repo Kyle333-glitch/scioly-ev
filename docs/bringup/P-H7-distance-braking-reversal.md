@@ -17,7 +17,9 @@ and the end-to-end accuracy check.
 
 - H4 passed (measured rollout) and H6's amended parts completed: the
   feed-forward measured from H5's open-loop relation and the conservative P/I
-  bootstrap promoted (see `P-H6-ff-pi-tuning.md`). The closed-loop tuning itself
+  candidate recorded (Provisional with its derivation cited - see
+  `P-H6-ff-pi-tuning.md`; it is promoted only by the closed-loop experiment,
+  so the first armed run waits for that resolution). The closed-loop tuning itself
   cannot happen on the bench; it happens in part L below, and the loaded response
   is expected to differ - measure it, do not assume it.
 - **H1A bench test 3 recorded, and the `Brake` question answered.** The run's
@@ -86,10 +88,23 @@ it is not to pretend a distance-targeted run exists before the numbers do:
 3. **Write the measured values** into `src/VehicleConfig.h` with
    `ValueSource::Measured` - both brake offsets are consumed, each by its own
    direction's profile - and re-run the configuration checks.
-4. **Part L - loaded tracking re-check**, then, only now, a run may be announced
-   and armed.
-5. **Part A - distance-targeted accuracy** through the real run path; then
-   **part C - reversal**; then the end-to-end accuracy check.
+4. **Announce and arm - once every arming gate is `Measured`, not just the
+   scale and offsets.** The run path refuses while any calibration value is
+   provisional, and that includes the items this protocol does not measure:
+   the controller gains (P-H6's P/I pair stays Provisional until a closed-loop
+   experiment evaluates it - the bounded bench capability of P-H6 resolution
+   (a), after which this Part L refines the pair loaded - so the first armed
+   run waits for that resolution), the strategy ceilings and plan dependencies
+   (P-H8), the phase timeouts (P-H14 Step 10), and the stop-verification
+   values. A run announced on scale and offsets alone is still refused, and
+   that refusal is the gate working.
+5. **Part L - loaded tracking re-check**, on the now-armed run path (the
+   regulator is in the loop here - B2 cannot run it - which is why this part
+   cannot precede the announcement); then **part A - distance-targeted
+   accuracy** through the real run path; then **part C - reversal**; then the
+   end-to-end accuracy check. Part L re-promotes the gains with the loaded
+   records substituted for whatever citation armed the run: the loaded numbers
+   are the ones the competition run uses.
 
 Record this bootstrap explicitly. A number measured off the run path and then used
 by the run path must be identified as such, and the distance-targeted accuracy
