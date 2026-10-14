@@ -8507,3 +8507,198 @@ finding inventory: .agent-work/stages/R1U-FINDING-LEDGER.md; checkpoint:
 .agent-work/utilities/U1-R1U-checkpoint.md (after commit). Original D54-D66
 records unchanged. STOP after R1U checkpoint. NO R2/R3/R4, NO hardware, NO
 firmware upload, NO calibration promotion, NO push.
+
+## D68 / R2 - 2026-10-14 - Remaining EV safety and configuration integrity
+
+R2 (`work/r2`, commit `6894bf1f6f1e8a98f86df8eb35a88851d945fd2b`, software
+PASS) closes the five remaining safety and configuration audit findings in
+scope as one host-tested software contract:
+
+1. **M18 (`lib/evcore/src/VelocityController.h`):** explicit non-finite
+   controller arithmetic refusal (`VelocityControlStatus::ArithmeticNotFinite`).
+   Any cycle whose feed-forward, error, proportional, integral, or demanded
+   term overflows to `+/-inf` or `NaN` is refused before clamping, rounding,
+   or application, returning `Disabled` (0 permille) with zeroed diagnostic
+   terms and a preserved integral. Precedence: configuration >
+   `InvalidTarget` > `InvalidMeasurement` > `ArithmeticNotFinite` >
+   time/regulation statuses. Finite saturation and zero-gain behavior are
+   unchanged, and no gain cap was invented.
+2. **M3 (`lib/evcore/src/ReversalSequencer.h`,
+   `lib/evcore/src/CompetitionStateMachine.h`):** strict timeout-versus-dwell
+   headroom inequalities in the seconds domain (`reversalTimeoutS >
+   verification.dwellS`, `ReversalConfigError::TimeoutWithoutDwellHeadroom`;
+   `finalStopTimeoutS > stopVerification.dwellS`,
+   `RunPhaseConfigError::FinalStopTimeoutWithoutDwellHeadroom`). Impossible
+   configurations are refused before arming rather than accepted and forced
+   to lose the timeout-before-verification evaluation order.
+3. **S18R-M1 (`lib/evcore/src/EncoderProgressMonitor.h`,
+   `src/VehicleRuntime.cpp`):** sustained-invalid-feedback software bound.
+   Every accepted-powered cycle without verified expected-direction progress
+   evidence (frozen count, wrong-sign advance, or invalid sample) consumes
+   one shared `encoderProgressTimeoutS` allowance accumulated by control
+   `dtMs` (saturating, stamp-free, wrap-safe) and latches
+   `FaultCode::EncoderFeedbackLost` at the bound. Only genuine
+   expected-direction tick advance resets the allowance; unpowered cycles
+   freeze; placeholder bound/polarity still pause; direction flips and
+   software reset cannot renew an active allowance. In the composed runtime,
+   derived-estimate staleness revokes accepted power within the 60 ms
+   freshness window (`requiredDataFresh`), and frozen counts under power
+   fault at the 0.5 s software bound with same-cycle `Disable` at the driver
+   boundary. The 0.5 s duration itself remains an unvalidated placeholder
+   (P-H5/H7/H9), and mock I/O proves the software command only, never
+   physical GPIO/PWM electrical disable timing.
+4. **M2 (`src/main.cpp`, `src/bench/BenchMain.cpp`,
+   `src/WatchdogCheckpoint.h`):** truthful watchdog refresh timestamp. The
+   main loop and bench loop re-read `millis()` at `watchdog.endOfPass(...)`
+   so `lastRefreshMs` and `worstRefreshGapMs` measure the refresh event's
+   own clock reading rather than the pass-start reading. Production watchdog
+   enablement remains disabled (`kWatchdogEnablementRequested == false`).
+5. **L4 (`lib/evcore/src/ControlScheduler.h`):** defined scheduler wait
+   calculation at `INT32_MIN`. The not-due wait is formed with unsigned
+   `nextDeadlineMs_ - nowMs` instead of negating the signed difference,
+   eliminating signed-overflow undefined behavior at `INT32_MIN` while
+   keeping half-range eligibility identical.
+
+Validation on `work/r2`: native 776/776 in 38 suites (+36 new regressions,
+pre-repair defects reproduced in `.agent-work/reviews/r2/BEFORE.md`);
+`nano_r4`/`bench`/`bench-watchdog` builds SUCCESS with 0 warnings (RAM
+7500/7700/7692 B, Flash 77880/85400/84732 B); telemetry 388 discovered (384
+pass, 4 pre-existing privilege skips); `git diff --check` clean. Tracked
+contract note: `docs/r2-safety-contract.md`; stage record:
+`.agent-work/stages/R2.md`. No hardware operation, no upload, no calibration
+promotion, no push.
+
+## D69 / R3 - 2026-10-14 - Calibration provenance, firmware identity and diagnostic integrity
+
+R3 (`work/r3`, commit `195af882f0a44037722a339252b8826061e58c0b`, software
+PASS) closes the five S18R provenance, documentation, identity, and
+diagnostic findings in scope:
+
+1. **M6 (`docs/bringup/P-H6-ff-pi-tuning.md`,
+   `docs/bringup/P-H14-calibration-checklist.md`, `docs/bringup/README.md`):**
+   calibration provenance and bootstrap procedure repaired. The H6 gain
+   bootstrap no longer instructs promoting computed P/I pairs as
+   `ValueSource::Measured` before a closed-loop test. Analytically derived
+   P/I candidates remain `Provisional` with their derivation cited; only a
+   closed-loop experiment meeting pre-registered criteria (P-H7 Part L or an
+   authorized bounded closed-loop bench capability) promotes P/I gains to
+   `Measured`. Because `ControllerConfigValid` requires all three gains to
+   be `Measured` and no current bench command runs the regulator, the
+   production arm gate remains closed and first armed runs wait for that
+   resolution.
+2. **L6 (`README.md`, `VERIFIED_STATE.md`, `docs/limitations.md`,
+   `docs/bringup/*.md`, `src/bench/BenchMain.cpp`):** safety and evidence
+   documentation reconciled against live source (README arm-refusal
+   vocabulary including `ExecutionPlanNotEstablished`, P-H7 run-path sequence
+   after all arming gates are `Measured`, `limitations.md` vacuous-pass note
+   for `MeasuredValuesCiteEvidence` vs measurement gates and firmware
+   identity guidance, `VERIFIED_STATE.md` session-dated validation counts,
+   `BenchMain.cpp` three-writer de-energize backstop prose, and bring-up
+   `VERSION`/`BOOT` identity references).
+3. **L3 (`lib/evcore/src/FirmwareIdentity.h`, `src/VehicleConfig.h`,
+   `lib/evcore/src/OperatorResponse.h`, `src/VehicleRuntime.cpp`,
+   `scripts/ev_build_identity.py`, `platformio.ini`):** reproducible firmware
+   build identity replacing the constant `kFirmwareId`. `VERSION` and `BOOT`
+   share `ev::appendFirmwareIdentity()` reporting `fw=ev-nano-r4`,
+   `rev=<short-sha|unknown>`, `dirty=<0|1>`,
+   `variant=<production|bench|bench-watchdog|unknown>`, `cfg=<8-hex FNV-1a
+   fingerprint>`, and `cfg_schema=1`. Generated per build into `$BUILD_DIR/
+   generated/EvBuildIdentity.h` (clean-removed, never committed); missing git
+   metadata or uncommitted tracked changes report `dirty=1` and never
+   masquerade as a clean release build. `rev=` identifies the source
+   revision, never a cryptographic attestation of the flashed binary.
+4. **L1 (`lib/evcore/src/BenchLineAccounting.h`,
+   `src/bench/BenchConsole.h`):** centralized, truthful bench command
+   accounting. Every answered line at the bench console is counted once at
+   dispatch as `Accepted`, `Refused`, or `Forwarded` (`lines_accepted`,
+   `lines_refused`, `lines_forwarded` in `bench health`). Non-bench lines
+   forwarded to `VehicleRuntime::handleCommandLine()` are counted only as
+   `Forwarded` on the bench side while production's own counters record
+   their acceptance or rejection, eliminating omissions and double-counting.
+5. **L2 (`src/VehicleRuntime.cpp`, `src/VehicleRuntime.h`,
+   `lib/evcore/src/VehicleState.h`):** truthful operator-event timestamp and
+   fault attribution. Every `pushOperatorEvent(..., nowMs)` call stamps the
+   action's own `nowMs` rather than the cached control-tick timestamp
+   `telemetry_.nowMs`, and records the live fault of record via
+   `currentFaultCode()` (`ev::currentFaultOfRecord(run_.faultCode(),
+   authority_.latchedFault().code)`). `ChainReset` reports post-reset
+   `fault=None` while preserving the cleared fault name in `detail`. The
+   `EVE3` wire schema is unchanged and remains compatible with the R1U
+   telemetry parser.
+
+Validation on `work/r3`: native 803/803 in 42 suites (+63 new R3 cases across
+4 new suites, failing-before evidence recorded in
+`.agent-work/reviews/r3/`); `nano_r4`/`bench`/`bench-watchdog` clean
+rebuilds SUCCESS with 0 warnings (RAM 7500/7708/7692 B, Flash
+78828/86388/85784 B); telemetry 388 discovered (384 pass, 4 pre-existing
+skips); `git diff --check` clean. Stage record: `.agent-work/stages/R3.md`.
+No calibration value promoted, no arm-gate weakened, no hardware operation,
+no upload, no push.
+
+## D70 / R23I - 2026-10-14 - R2 and R3 integration and combined validation
+
+R23I integrates `work/r2` (`6894bf1f6f1e8a98f86df8eb35a88851d945fd2b`) and
+`work/r3` (`195af882f0a44037722a339252b8826061e58c0b`) onto the R1UV-accepted
+R1U base (`d5b265164c3bc8966f6e709ac632a498dfd13e84`; independent audit
+`.agent-work/reviews/R1UV.md` verified PASS WITH NONBLOCKING LIMITATIONS) in
+an isolated integration worktree (`integration/r2-r3`).
+
+Combined behavior and overlap resolution:
+
+- `src/VehicleRuntime.cpp`: preserved R2's stage-4 comment explaining why
+  `sampleFresh` is `true` by construction at the interrupt-sampled encoder
+  boundary and how `requiredDataFresh` + `feedbackMonitor_` compose
+  (S18R-M1), alongside R3's L3 shared `ev::appendFirmwareIdentity()` in
+  `stageBootLine()`/`formatVersionLine()` and R3's L2 action-timestamp
+  (`nowMs`) threading and live `currentFaultCode()` attribution across all
+  16 `pushOperatorEvent` call sites.
+- `src/bench/BenchMain.cpp`: preserved R3's L6 header comment documenting
+  all three de-energize writers across tick and tickless/bench-owned passes,
+  alongside R2's M2 `watchdog.endOfPass(outcome.refreshable(), millis())`
+  refresh-time re-read in `loop()`.
+- All 44 unique paths across R2 (16 files) and R3 (30 files, 2 shared) merge
+  cleanly with zero dropped hunks, zero signature or enum collisions, and
+  unchanged `EVS3`/`EVE3` telemetry wire schemas.
+- Added 7 combined R2+R3 integration regression tests (4 in
+  `test/test_r3_diagnostics/test_main.cpp`, 3 in
+  `test/test_scenario/test_main.cpp`) exercising M18 arithmetic refusal
+  during an active run, S18A+S18R-M1 reversal feedback supervision under
+  alternating invalid/frozen reverse samples, M3 impossible timeout/dwell
+  rejection at the scenario arm gate, M2+L1 end-of-pass watchdog refresh
+  clock behavior, M6+L2 provisional P/I candidate arm-gate refusal with
+  action-stamped operator events, L1+L2 bench forwarded command single
+  accounting with action-stamped production events, and L3 deterministic
+  configuration fingerprinting across `VERSION` and `BOOT`.
+
+Combined validation on the committed integration tree:
+
+- Native: **846/846 passed across 42 test suites** (740 R1U baseline + 36 R2
+  + 63 R3 + 7 R23I combined regressions), exit 0.
+- Telemetry: **388 discovered, 384 passed, 4 skipped** (pre-existing Windows
+  symlink-privilege skips), exit 0; Python syntax checks (`compileall`)
+  clean.
+- Clean firmware builds (`pio run -t clean` then `pio run` for `nano_r4`,
+  `bench`, `bench-watchdog`): all 3 **SUCCESS with 0 compiler warnings**
+  (`nano_r4` RAM 7500 B / Flash 79548 B; `bench` RAM 7708 B / Flash 87124 B;
+  `bench-watchdog` RAM 7692 B / Flash 86512 B), with per-environment
+  `EV_FIRMWARE_VARIANT` (0/1/2) and clean-tree `EvBuildIdentity.h`
+  (`dirty=0`, short commit SHA) verified.
+- `git diff --check` clean.
+
+Readiness and boundaries preserved:
+
+- Derived P/I controller gains remain `Provisional`; production remains
+  locked (`ControllerConfigValid == false`, `armed() == false`).
+- The R1UV software audit is software-only evidence, not hardware evidence.
+- R2's 0.5-second encoder feedback timeout remains an unvalidated
+  placeholder (P-H5/H7/H9), and mock GPIO/driver tests do not prove physical
+  electrical disable timing.
+- R3's firmware build identity identifies source revision and configuration
+  values, not a cryptographic flashed-binary attestation.
+- Unpowered Block E remains software-eligible but unexecuted here; powered
+  Block F, physical calibration, full competition runs, and competition
+  release remain BLOCKED/NOT READY pending physical qualification.
+- Stage record: `.agent-work/stages/R23I.md`; review artifact:
+  `.agent-work/reviews/R23IR.md`; evidence: `.agent-work/reviews/r23i/` and
+  `.agent-work/reviews/r23ir/`. No hardware operation, no serial access, no
+  upload, no calibration promotion, no Git push.

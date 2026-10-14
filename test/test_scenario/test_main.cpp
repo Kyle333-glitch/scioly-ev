@@ -2998,6 +2998,126 @@ void test_a_reset_after_a_feedback_fault_starts_a_clean_run(void) {
     expectTraceInvariants(harness);
 }
 
+// --- R23I: combined R2+R3 scenario regressions -------------------------------
+
+void test_r23i_arithmetic_refusal_during_run_disables_output_and_is_not_reported_as_ok_motion(void) {
+    // M18 + S18R-M1 composition in the full composed chain: when finite
+    // measured gains overflow intermediate regulator arithmetic during an
+    // active travel phase, the regulator refuses with `ArithmeticNotFinite`,
+    // presents `Disabled` (0 permille) to `SafetyAuthority`, and the actuator
+    // boundary receives a non-powered command (`NormalStop`, `Disabled`) -
+    // never a saturated powered drive and never `VelocityControlStatus::Ok`.
+    evscenario::ScenarioFixtures extreme = fixtures();
+    const double huge = 1.0e308;
+    extreme.controller = ev::VelocityControllerConfig(
+        evscenario::measuredValue(huge), evscenario::measuredValue(huge),
+        evscenario::measuredValue(0.0),
+        evscenario::measuredPositiveMode(ev::MotorMode::DriveForward),
+        evscenario::measuredPermille(evscenario::kFixtureMaxEffortPermille),
+        evscenario::kFixtureMaxIntegralPermille,
+        evscenario::kFixtureMaxIntegrationStepS);
+    // Raise velocity ceilings above 1.8 m/s so `shapedTargetVelocityMps`
+    // exceeds 1.8 m/s and `1e308 * shapedTargetVelocityMps > DBL_MAX`
+    // overflows to +inf while `huge` remains a finite `double`.
+    extreme.limits.maxForwardVelocityMps = evscenario::measuredValue(2.5);
+    extreme.limits.maxReverseVelocityMps = evscenario::measuredValue(2.5);
+    extreme.profile.forward.cruiseVelocityMps = evscenario::measuredValue(2.5);
+    extreme.profile.forward.velocityCeilingMps = evscenario::measuredValue(2.5);
+    extreme.profile.reverse.cruiseVelocityMps = evscenario::measuredValue(2.5);
+    extreme.profile.reverse.velocityCeilingMps = evscenario::measuredValue(2.5);
+    extreme.phase.approachCeilingMps = evscenario::measuredValue(2.5);
+    extreme.phase.captureCeilingMps = evscenario::measuredValue(2.5);
+    extreme.phase.pushCeilingMps = evscenario::measuredValue(2.5);
+    ScenarioHarness harness(extreme);
+    announceAndArm(harness);
+    NominalDriver driver;
+    // Step into Approach until `shapedTargetVelocityMps > 1.85`, where
+    // `1e308 * shapedTargetVelocityMps` overflows to +inf and triggers
+    // `ArithmeticNotFinite`.
+    bool sawArithmeticRefusal = false;
+    for (uint32_t cycle = 0U; cycle < 150U; ++cycle) {
+        const CycleRecord& record = harness.step(driver.next(harness));
+        if (record.regulatorStepped && record.shapedTargetVelocityMps > 1.85) {
+            sawArithmeticRefusal = true;
+            TEST_ASSERT_EQUAL_INT(
+                static_cast<int>(ev::VelocityControlStatus::ArithmeticNotFinite),
+                static_cast<int>(record.controlStatus));
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                                  static_cast<int>(record.presentedEffort.mode));
+            TEST_ASSERT_EQUAL_UINT16(0U, record.presentedEffort.magnitudePermille);
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                                  static_cast<int>(record.commandedMode));
+            TEST_ASSERT_EQUAL_UINT16(0U, record.commandedPermille);
+            TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::ActuationClass::Drive),
+                                  static_cast<int>(record.commandedClass));
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(sawArithmeticRefusal,
+                             "the scenario never stepped the regulator above 1.05 m/s");
+    expectTraceInvariants(harness);
+}
+
+void test_r23i_reversal_cannot_bypass_feedback_supervision_when_reverse_drive_freezes(void) {
+    // S18A + S18R-M1 composition: a run that lawfully completes the forward
+    // leg, verifies a near-zero stop, and earns reversal permission is still
+    // supervised by `EncoderProgressMonitor` on the reverse leg. If counts
+    // freeze or samples fail to advance once reverse drive is authorized,
+    // the monitor faults `EncoderFeedbackLost` at the bound and revokes
+    // accepted power in the same cycle; reversal permission never exempts
+    // the reverse leg from feedback supervision.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Reverse, driver),
+                             "the run never reached Reverse");
+    TEST_ASSERT_TRUE_MESSAGE(stepUntilDriveAuthorized(harness, driver),
+                             "Reverse never authorized drive");
+    // Now withhold progress with alternating frozen-fresh and invalid samples
+    // under reverse power: the shared allowance drains without renewal and
+    // faults `EncoderFeedbackLost`.
+    uint32_t stepCount = 0U;
+    CycleRecord lastRecord = harness.trace().back();
+    while (harness.phase() != ev::RunPhase::Fault && stepCount < 100U) {
+        CycleScript stall;
+        stall.encoderAdvanceTicks = 0;
+        stall.sensorSampleFresh = (stepCount % 2U == 0U);
+        lastRecord = harness.step(stall);
+        ++stepCount;
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Fault),
+                          static_cast<int>(lastRecord.phase));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(lastRecord.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(lastRecord.commandedMode));
+    expectTraceInvariants(harness);
+}
+
+void test_r23i_impossible_timeout_dwell_configurations_cannot_arm_the_scenario_harness(void) {
+    // M3 + arm gate composition in the full scenario harness: if either
+    // `reversalTimeoutS <= verification.dwellS` or
+    // `finalStopTimeoutS <= stopVerification.dwellS`, the state machine's
+    // `announceRun()` refuses (`PolicyIsNotUsable`) and the harness's
+    // `configurationBuildChecksPass()` and `arm()` both refuse.
+    evscenario::ScenarioFixtures badReversal = fixtures();
+    badReversal.reversal.reversalTimeoutS =
+        evscenario::measuredValue(badReversal.reversal.verification.dwellS.value);
+    ScenarioHarness reversalHarness(badReversal);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
+                          static_cast<int>(reversalHarness.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_FALSE(reversalHarness.configurationBuildChecksPass());
+    TEST_ASSERT_FALSE(reversalHarness.arm());
+
+    evscenario::ScenarioFixtures badFinalStop = fixtures();
+    badFinalStop.phase.finalStopTimeoutS =
+        evscenario::measuredValue(badFinalStop.phase.stopVerification.dwellS.value);
+    ScenarioHarness finalStopHarness(badFinalStop);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunStartStatus::PolicyConfigNotUsable),
+                          static_cast<int>(finalStopHarness.announce(evscenario::validRunConfig())));
+    TEST_ASSERT_FALSE(finalStopHarness.configurationBuildChecksPass());
+    TEST_ASSERT_FALSE(finalStopHarness.arm());
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -3055,5 +3175,8 @@ int main(int, char**) {
     RUN_TEST(test_a_feedback_fault_yields_to_a_concurrent_driver_fault);
     RUN_TEST(test_a_dropout_in_the_terminal_phase_ends_in_the_phase_timeout);
     RUN_TEST(test_a_reset_after_a_feedback_fault_starts_a_clean_run);
+    RUN_TEST(test_r23i_arithmetic_refusal_during_run_disables_output_and_is_not_reported_as_ok_motion);
+    RUN_TEST(test_r23i_reversal_cannot_bypass_feedback_supervision_when_reverse_drive_freezes);
+    RUN_TEST(test_r23i_impossible_timeout_dwell_configurations_cannot_arm_the_scenario_harness);
     return UNITY_END();
 }

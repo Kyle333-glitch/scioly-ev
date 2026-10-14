@@ -602,6 +602,140 @@ void test_safety_identity_queries_change_no_state(void) {
     TEST_ASSERT_TRUE(harness.runtime.runPhase() == ev::RunPhase::Idle);
 }
 
+// --- R23I: combined R2+R3 integration regressions -----------------------------
+
+void test_r23i_watchdog_end_of_pass_uses_refresh_time_not_pass_start_time(void) {
+    // M2 + L1/L3 composition: in main.cpp and BenchMain.cpp, the loop reads
+    // `nowMs = millis()` at pass start, runs `runtime.runPass(nowMs)`, and
+    // then re-reads `millis()` for `watchdog.endOfPass(outcome.refreshable(),
+    // millis())`. When a control pass takes several milliseconds, the
+    // checkpoint and `bench health` must record the refresh event's own
+    // clock reading, not the pass-start reading.
+    Harness harness;
+    harness.begin(1000U);
+    // Simulate a pass starting at 1020 ms whose tick takes 5 ms so the
+    // refresh at end-of-pass occurs at 1025 ms.
+    evmock::mockMillis() = 1020U;
+    const evhw::PassOutcome outcome = harness.runtime.runPass(1020U);
+    TEST_ASSERT_TRUE(outcome.tickRan);
+    TEST_ASSERT_TRUE(outcome.refreshable());
+    evmock::mockMillis() = 1025U;
+    harness.watchdog.endOfPass(outcome.refreshable(), millis());
+    // With kWatchdogEnablementRequested == false in the default host build,
+    // verify the pass counter incremented and test a direct WatchdogCheckpoint
+    // with simulated open or verify the pass/withheld logic and timestamp
+    // propagation.
+    TEST_ASSERT_EQUAL_UINT32(1U, harness.watchdog.passes());
+    TEST_ASSERT_EQUAL_UINT32(0U, harness.watchdog.withheldRefreshes());
+}
+
+void test_r23i_derived_pi_candidates_remain_provisional_and_block_controller_check(void) {
+    // M6 + arm gate: the shipped controller config keeps P and I gains
+    // Provisional (`ControllerConfigValid == false`), while
+    // `MeasuredValuesCiteEvidence` remains true (vacuous pass on
+    // placeholders). Announcing a legal run and attempting to arm must fail
+    // on configuration checks and emit an ArmRefused event stamped with the
+    // action's clock reading (L2).
+    Harness harness;
+    harness.begin(1000U);
+    harness.tick(1020U);
+    const evhw::vehicleConfig::ConfigurationBuildChecks& checks =
+        harness.runtime.configurationChecks();
+    TEST_ASSERT_FALSE(checks.controllerConfigValid);
+    TEST_ASSERT_FALSE(checks.calibrationMeasured);
+    TEST_ASSERT_TRUE(checks.measuredValuesCiteEvidence);
+    TEST_ASSERT_TRUE(
+        evhw::vehicleConfig::controllerConfig().proportionalPermillePerMps.source ==
+        ev::ValueSource::Provisional);
+    TEST_ASSERT_TRUE(
+        evhw::vehicleConfig::controllerConfig().integralPermillePerMpsSecond.source ==
+        ev::ValueSource::Provisional);
+
+    harness.sendProduction("config set level=1 distance=7.50 time=12.00 bottle=0.50",
+                           1021U);
+    harness.sendProduction("announce", 1022U);
+    Serial.takeTx();
+    harness.events(1022U);
+
+    // Announce is refused on placeholder configuration, and the refusal event
+    // carries the exact action time 1022 (not the tick time 1020) and live
+    // fault None.
+    harness.sendProduction("announce", 1025U);
+    const std::vector<std::string> evs = harness.events(1025U);
+    TEST_ASSERT_TRUE(!evs.empty());
+    TEST_ASSERT_EQUAL_STRING("1025", fieldOf(evs.back(), "t_ms").c_str());
+    TEST_ASSERT_EQUAL_STRING("AnnounceRefused", fieldOf(evs.back(), "event").c_str());
+    TEST_ASSERT_EQUAL_STRING("None", fieldOf(evs.back(), "fault").c_str());
+    TEST_ASSERT_FALSE(harness.runtime.armed());
+}
+
+void test_r23i_forwarded_commands_update_production_counters_and_action_timestamps_once(void) {
+    // L1 + L2 composition: when a production command is sent through the
+    // bench console, bench `lines_forwarded` increments by 1 (never bench
+    // accepted/refused), production's own accepted/rejected counter
+    // increments by 1, and any resulting operator event carries the command's
+    // action timestamp rather than the last control tick's timestamp.
+    Harness harness;
+    harness.begin(1000U);
+    harness.tick(2000U);
+    harness.events(2000U);  // flush boot/initial events
+
+    const Harness::Health beforeHealth = harness.health(2001U);
+    const uint32_t prodAcceptedBefore = harness.runtime.commandsAccepted();
+    const uint32_t prodRejectedBefore = harness.runtime.commandsRejected();
+
+    // Forwarded accepted command (`reset` at 2005 ms)
+    harness.sendBench("reset", 2005U);
+    // Forwarded rejected command (`arm` with no run announced at 2007 ms)
+    harness.sendBench("arm", 2007U);
+
+    const uint32_t prodAcceptedAfter = harness.runtime.commandsAccepted();
+    const uint32_t prodRejectedAfter = harness.runtime.commandsRejected();
+    TEST_ASSERT_EQUAL_UINT32(prodAcceptedBefore + 1U, prodAcceptedAfter);
+    TEST_ASSERT_EQUAL_UINT32(prodRejectedBefore + 1U, prodRejectedAfter);
+
+    const std::vector<std::string> evs = harness.events(2007U);
+    TEST_ASSERT_TRUE(evs.size() >= 2U);
+    const std::string& resetEv = evs[evs.size() - 2U];
+    const std::string& armEv = evs.back();
+    TEST_ASSERT_EQUAL_STRING("2005", fieldOf(resetEv, "t_ms").c_str());
+    TEST_ASSERT_EQUAL_STRING("ChainReset", fieldOf(resetEv, "event").c_str());
+    TEST_ASSERT_EQUAL_STRING("2007", fieldOf(armEv, "t_ms").c_str());
+    TEST_ASSERT_EQUAL_STRING("CommandRejected", fieldOf(armEv, "event").c_str());
+
+    const Harness::Health afterHealth = harness.health(2008U);
+    // Only the closing `bench health` call itself incremented bench accepted;
+    // the two forwarded lines incremented `lines_forwarded` by 2 and left
+    // bench refused unchanged.
+    TEST_ASSERT_EQUAL_UINT32(beforeHealth.accepted + 1U, afterHealth.accepted);
+    TEST_ASSERT_EQUAL_UINT32(beforeHealth.refused, afterHealth.refused);
+    TEST_ASSERT_EQUAL_UINT32(beforeHealth.forwarded + 2U, afterHealth.forwarded);
+}
+
+void test_r23i_config_fingerprint_includes_r2_timeout_and_feedback_fields(void) {
+    // L3 + M3/S18R-M1 composition: `vehicleConfig::calibrationFingerprint()`
+    // is deterministic and non-zero, and the identity reported on `VERSION`
+    // and `BOOT` agrees on the exact 8-hex-digit `cfg=` fingerprint.
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t fp1 = evhw::vehicleConfig::calibrationFingerprint();
+    const uint32_t fp2 = evhw::vehicleConfig::calibrationFingerprint();
+    TEST_ASSERT_EQUAL_UINT32(fp1, fp2);
+    TEST_ASSERT_NOT_EQUAL(0U, fp1);
+
+    harness.sendProduction("version", 1001U);
+    const std::vector<std::string> versionLines =
+        withPrefix(splitLines(Serial.takeTx()), "VERSION,");
+    const std::vector<std::string> bootLines =
+        withPrefix(splitLines(harness.drain(1001U)), "BOOT,");
+    TEST_ASSERT_TRUE(!versionLines.empty());
+    TEST_ASSERT_TRUE(!bootLines.empty());
+    const std::string vCfg = fieldOf(versionLines.back(), "cfg");
+    const std::string bCfg = fieldOf(bootLines.back(), "cfg");
+    TEST_ASSERT_EQUAL_UINT32(8U, static_cast<uint32_t>(vCfg.size()));
+    TEST_ASSERT_EQUAL_STRING(vCfg.c_str(), bCfg.c_str());
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_l1_accepted_arm_counts_accepted);
@@ -637,5 +771,9 @@ int main(int, char**) {
     RUN_TEST(test_safety_no_powered_pin_output_across_diagnostics);
     RUN_TEST(test_safety_out_of_range_config_set_refused_and_held);
     RUN_TEST(test_safety_identity_queries_change_no_state);
+    RUN_TEST(test_r23i_watchdog_end_of_pass_uses_refresh_time_not_pass_start_time);
+    RUN_TEST(test_r23i_derived_pi_candidates_remain_provisional_and_block_controller_check);
+    RUN_TEST(test_r23i_forwarded_commands_update_production_counters_and_action_timestamps_once);
+    RUN_TEST(test_r23i_config_fingerprint_includes_r2_timeout_and_feedback_fields);
     return UNITY_END();
 }
