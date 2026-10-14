@@ -136,8 +136,11 @@ Metrics cover, per run:
   (`end_position_source: latest_usable_sample`) with the reason, and the two are
   never substituted for one another. `last_m` is the last usable tick,
   `after_stop_travel_m` is how far the estimate moved after the stop, and
-  `end_position_sampling_window_m`/`_ms` bound how far it could have moved between
-  the two samples around the confirming one. `believed_target_m` is reconstructed
+  `end_position_sampling_window_m`/`_ms` report the observed adjacent-sample step
+  around the confirming one (the position and interval difference to the previous
+  usable sample). That window is a sampling delta, not a physical error bound:
+  motion can occur and return between samples, and quantization and reference
+  errors remain. `believed_target_m` is reconstructed
   with the sign of the leg the run stopped on - `position + remaining` forward,
   `position - remaining` in reverse (`MotionPlan::remainingDistanceTo`), recorded in
   `believed_target_source`;
@@ -279,7 +282,16 @@ The rules:
   phase-timing deltas - is reported as unavailable with its reason, never as
   ~49.7 days, and the charts carry a TIMING UNRELIABLE note. Each lane is
   unwrapped on its own timeline, so cross-lane comparisons use the raw `t_ms`
-  reading within one session.
+  reading within one session. A late pre-wrap record arriving after its lane
+  already rolled over is read as a reordered reading in the previous epoch, not
+  as a second wrap. When the two lanes start on opposite sides of a rollover
+  with no bridging evidence, or when one lane holds an unbridged gap of half
+  the uint32 range or more, their relative alignment cannot be established:
+  cross-lane elapsed durations are then unavailable with an explicit reason
+  (still no fabricated ~49.7 days), lane-local observations stay available, and
+  single-lane monotonic captures of any ordinary length keep working. A phase
+  change across a benign reorder reports no negative duration: the affected
+  segment is marked timing-unreliable instead.
 - **A capture can hold several boots and several runs, and they are never mixed.**
   A `Boot` event opens a session; within a session, a changed actuation reading
   marks a new run. The analyzer describes the last run of the last session with
@@ -293,8 +305,18 @@ The rules:
   whole-capture integrity (other sessions, wraps, restarts, parse errors) stay
   separate and are never shrunk to the selected run.
   An endpoint comparison is refused (with its reason, in `endpoints.json`/`.txt`)
-  when the capture cannot be attributed to one run, or when that run recorded no
-  verified final stop.
+  when the capture cannot be attributed to one run, when that run recorded no
+  verified final stop, when the run's verification evidence contradicts itself
+  (conflicting stamps, conflicting same-tick positions, verification claimed
+  mid-drive, or an impossible dwell timeline - the endpoint is then unavailable
+  rather than first-candidate-wins, and input order cannot change an eligible
+  delta), or when the capture's chronology is uncertain (suspected restart or
+  unalignable cross-lane epochs). Descriptive believed values stay visible;
+  only the attributable deltas are withheld. Per-row fixture provenance
+  (`synthetic`, the declared provenance, conflicts, and a plain-text warning)
+  travels in `endpoints.json` and `comparison.json`, and the `.txt` exports
+  name synthetic runs and untrusted CAPTURE claims, so a copied root export
+  still reads as a fixture and never as calibration evidence.
 - **`ovf` parses to "no value"**, not to infinity, so a bug in a record cannot
   enter a mean as a huge measurement.
 - **A hand-measurement file is read literally or refused.** Header names are
@@ -327,20 +349,50 @@ output-integrity cases (run-id collisions, stale artifacts, provenance, `synth`
 without `--force`), and the end-to-end workflow including reproducibility and the
 guard that keeps this tool away from `VERIFIED_STATE.md`.
 
-## Output ownership
+## Output ownership and publication
 
 A run directory holds only the artifacts the current analysis wrote: a rerun
 reconciles the directory (a clean rerun removes the previous `parse_errors.txt`, and
 `--no-plots` removes the previous plots) so a directory never mixes two analyses.
-The report root is reconciled the same way, over a fixed set of names only:
-`comparison.json/.txt` exist only when the current generation compared two or
-more runs, and `endpoints.json/.txt` exist only when it was given
-`--measurements` - a rerun that drops to one run, or drops the measurements
-file, removes the pair it no longer produces, and run directories no current
-input maps to are reconciled to their unknown content (or removed when empty).
-Anything else - unknown files, unknown directories, `distribution.*` (owned by
-the `distribution` subcommand, never by `analyze`), and symlinks - is left
-untouched, and no prior manifest is ever trusted to name a deletion target.
+The report root is reconciled the same way, over a fixed set of managed names
+only: `comparison.json/.txt` exist only when the current generation compared two or
+more runs, `endpoints.json/.txt` exist only when it was given `--measurements`,
+and each run owns `metrics.json`, `summary.txt`, `parse_errors.txt` (when the
+parse left errors) and the seven plot slots `plots/empty.svg`, `plots/position.svg`,
+`plots/velocity.svg`, `plots/effort.svg`, `plots/control_dt.svg`,
+`plots/raw_inputs.svg`, `plots/phase_timeline.svg`. A rerun that drops to one run,
+or drops the measurements file, removes the pair it no longer produces, and run
+directories no current input maps to are reconciled to their unknown content (or
+removed when empty). Anything else - unknown files, unknown directories,
+`distribution.*` (owned by the `distribution` subcommand, never by `analyze`),
+and links - is left untouched, and no prior manifest is ever trusted to name a
+deletion target: deletion paths are built from the fixed managed names only.
+
+The destination is a dedicated analyzer output directory, not a shared folder:
+the managed names above are reserved slots, and unrelated bytes occupying one
+will be replaced or removed by a successful generation. Before any mutation the
+tool validates that the output root, its ancestors, and every managed slot are
+regular files and directories - never a symbolic link, Windows junction, or
+other reparse point - and refuses path traversal, absolute-path escapes, and
+source files colliding with the destination. Junctions are detected via
+`os.path.isjunction`/`islink` plus reparse-point metadata, because `islink`
+alone does not classify Windows junctions; cleanup never traverses a reparse
+point and writers never write through one. A second concurrent writer is
+refused via an exclusive lock file. These checks cannot rule out a path that
+is replaced between validation and use: hostile concurrent mutation of the
+output tree during publication is unsupported, and no race-proof confinement
+beyond the executed checks is claimed.
+
+Publication is staged. Every artifact renders in memory first; the previous
+`manifest.json` is then invalidated and an incomplete-publication marker
+(`.publication_state.json`) is written; the new artifacts commit; the new
+manifest - carrying `publication_state: complete` - commits last and clears the
+marker. A failure during rendering leaves the previous generation intact; a
+failure during commit leaves no manifest claiming completeness, only the
+explicit incomplete marker, and the next successful invocation recovers
+deterministically. A directory without a manifest is not a complete generation
+and must not be read as one.
+
 Every run id is checked for output-path collisions before anything is written -
 including case-only differences and the characters that normalize to `_` - because a
 report tree generated on one machine is read on another. JSON is written by rename

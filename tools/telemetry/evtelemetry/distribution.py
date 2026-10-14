@@ -33,6 +33,8 @@ Three properties are deliberate:
 
 from __future__ import annotations
 
+import decimal
+import math
 import statistics
 from typing import Any, Optional, Sequence
 
@@ -40,9 +42,14 @@ from .endpoints import MEASUREMENT_NUMERIC_COLUMNS, Measurement, MeasurementTabl
 
 __all__ = [
     "DISTRIBUTION_NUMERIC_COLUMNS",
+    "DistributionError",
     "describe_values",
     "measurement_distribution",
 ]
+
+
+class DistributionError(ValueError):
+    """A series whose derived statistics are not representable."""
 
 # The numeric columns a distribution is reported for. The first two are the
 # measured facts; the last two are the context that makes them interpretable.
@@ -58,6 +65,74 @@ def _round(value: Optional[float], digits: int = _ROUND_DIGITS) -> Optional[floa
     return float(round(float(value), digits)) + 0.0
 
 
+def _as_finite_float(value: decimal.Decimal, *, statistic: str) -> float:
+    """A Decimal statistic as a finite float, or a named refusal.
+
+    A derived quantity can be genuinely unrepresentable in binary64 (e.g. the
+    range of ``[-1e308, 1e308]`` is ~2e616): emitting ``inf`` would corrupt
+    strict JSON downstream, and clamping would invent a number, so the
+    series is refused with the statistic named.
+    """
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as error:
+        raise DistributionError(
+            f"the {statistic} of this measurement series is not representable "
+            f"as a finite number ({value}); refusing the distribution rather "
+            "than emitting a non-finite statistic"
+        ) from None
+    if not math.isfinite(result):
+        raise DistributionError(
+            f"the {statistic} of this measurement series is not representable "
+            f"as a finite number ({value}); refusing the distribution rather "
+            "than emitting a non-finite statistic"
+        )
+    return result
+
+
+def _describe_exact(ordered: list[float]) -> dict[str, Any]:
+    """Statistics via exact decimal arithmetic (overflow fallback).
+
+    Reached only when the float path overflowed or went non-finite, so
+    ordinary series keep their exact historical float behavior. ``repr`` of
+    each float round-trips the binary value into Decimal, making the sum,
+    mean, median, variance, range and deviation exact; each derived quantity
+    that still does not fit in a float refuses by name instead of becoming
+    ``inf``. No clamping, no silent record loss, no invented bound.
+    """
+    count = len(ordered)
+    stepped = [decimal.Decimal(repr(value)) for value in ordered]
+    total = sum(stepped, decimal.Decimal(0))
+    mean_d = total / count
+    middle = count // 2
+    if count % 2:
+        median_d = stepped[middle]
+    else:
+        median_d = (stepped[middle - 1] + stepped[middle]) / 2
+    if count >= 2:
+        variance_d = (
+            sum((value - mean_d) ** 2 for value in stepped) / (count - 1)
+        )
+        stdev_d = variance_d.sqrt()
+        stdev = _round(_as_finite_float(stdev_d, statistic="standard deviation"))
+    else:
+        stdev = None
+    range_d = stepped[-1] - stepped[0]
+    deviation_d = max(abs(value - mean_d) for value in stepped)
+    return {
+        "count": count,
+        "min": _round(ordered[0]),
+        "max": _round(ordered[-1]),
+        "mean": _round(_as_finite_float(mean_d, statistic="mean")),
+        "median": _round(_as_finite_float(median_d, statistic="median")),
+        "stdev": stdev,
+        "range": _round(_as_finite_float(range_d, statistic="range")),
+        "max_abs_deviation_from_mean": _round(
+            _as_finite_float(deviation_d, statistic="maximum deviation")
+        ),
+    }
+
+
 def describe_values(values: Sequence[float]) -> dict[str, Any]:
     """Descriptive statistics for one series.
 
@@ -65,6 +140,13 @@ def describe_values(values: Sequence[float]) -> dict[str, Any]:
     measurements are a sample of the vehicle's behaviour, not the whole
     population of possible runs. With one observation it is undefined and is
     reported as ``None`` rather than as a confident zero.
+
+    Finite but extreme inputs (around 1e308) use exact decimal arithmetic
+    when the float path overflows: a representable result (mean 1e308,
+    zero spread of identical extremes) is computed accurately, while a
+    genuinely unrepresentable one refuses with a controlled
+    :class:`DistributionError` instead of an uncaught ``OverflowError`` or
+    a non-finite JSON value.
     """
     ordered = sorted(float(value) for value in values)
     count = len(ordered)
@@ -79,17 +161,29 @@ def describe_values(values: Sequence[float]) -> dict[str, Any]:
             "range": None,
             "max_abs_deviation_from_mean": None,
         }
-    mean = statistics.fmean(ordered)
-    return {
-        "count": count,
-        "min": _round(ordered[0]),
-        "max": _round(ordered[-1]),
-        "mean": _round(mean),
-        "median": _round(statistics.median(ordered)),
-        "stdev": _round(statistics.stdev(ordered)) if count >= 2 else None,
-        "range": _round(ordered[-1] - ordered[0]),
-        "max_abs_deviation_from_mean": _round(max(abs(value - mean) for value in ordered)),
-    }
+    try:
+        mean = statistics.fmean(ordered)
+        median = statistics.median(ordered)
+        stdev_raw = statistics.stdev(ordered) if count >= 2 else None
+        span = ordered[-1] - ordered[0]
+        deviation = max(abs(value - mean) for value in ordered)
+        candidates = [mean, median, span, deviation]
+        if stdev_raw is not None:
+            candidates.append(stdev_raw)
+        if all(math.isfinite(candidate) for candidate in candidates):
+            return {
+                "count": count,
+                "min": _round(ordered[0]),
+                "max": _round(ordered[-1]),
+                "mean": _round(mean),
+                "median": _round(median),
+                "stdev": _round(stdev_raw) if stdev_raw is not None else None,
+                "range": _round(span),
+                "max_abs_deviation_from_mean": _round(deviation),
+            }
+    except OverflowError:
+        pass
+    return _describe_exact(ordered)
 
 
 def _values(rows: Sequence[Measurement], attribute: str) -> list[float]:
@@ -106,13 +200,30 @@ def _residuals(rows: Sequence[Measurement]) -> list[float]:
 
     Only rows that recorded **both** numbers contribute. A missing target does
     not silently become the event target: inventing one would turn an unrecorded
-    run into an apparently systematic error.
+    run into an apparently systematic error. An opposite-sign extreme pair
+    whose difference is not a finite float refuses the distribution rather
+    than contributing ``inf``.
     """
     out: list[float] = []
     for row in rows:
         if row.measured_end_position_m is None or row.target_distance_m is None:
             continue
-        out.append(row.measured_end_position_m - row.target_distance_m)
+        try:
+            residual = float(row.measured_end_position_m) - float(row.target_distance_m)
+        except OverflowError:
+            raise DistributionError(
+                f"the residual for run {row.run_id!r} is not representable as a "
+                "finite number; refusing the distribution rather than emitting "
+                "a non-finite residual"
+            ) from None
+        if not math.isfinite(residual):
+            difference = decimal.Decimal(repr(float(row.measured_end_position_m))) - (
+                decimal.Decimal(repr(float(row.target_distance_m)))
+            )
+            residual = _as_finite_float(
+                difference, statistic=f"residual for run {row.run_id!r}"
+            )
+        out.append(residual)
     return out
 
 

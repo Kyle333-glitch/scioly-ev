@@ -57,6 +57,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
+from .synthetic import SYNTHETIC_MARKER
+
 __all__ = [
     "MeasurementError",
     "Measurement",
@@ -355,10 +357,56 @@ def load_measurements(path: str) -> MeasurementTable:
     return MeasurementTable(source=path, sha256=sha256, rows=rows)
 
 
+def _row_is_synthetic(metrics: dict[str, Any]) -> bool:
+    """Whether the run is a generated fixture: header declaration or name."""
+    declared = (metrics["capture"].get("provenance_declared") or "")
+    if declared.strip().upper().startswith(SYNTHETIC_MARKER):
+        return True
+    haystack = f"{metrics['run_id']} {metrics['source']['path']}".lower()
+    return SYNTHETIC_MARKER.lower() in haystack
+
+
+def _row_provenance_warning(metrics: dict[str, Any]) -> Optional[str]:
+    """The fixture/capture caveat for one endpoint row, if any applies."""
+    declared = metrics["capture"].get("provenance_declared")
+    conflict = metrics["capture"].get("provenance_conflict")
+    if _row_is_synthetic(metrics):
+        if conflict:
+            return (
+                "SYNTHETIC FIXTURE - declared in the capture header, not measured "
+                "(a conflicting CAPTURE declaration was also present and was not "
+                "honored); not calibration evidence"
+            )
+        if declared and declared.strip().upper().startswith(SYNTHETIC_MARKER):
+            return "SYNTHETIC FIXTURE - declared in the capture header, not measured"
+        return "SYNTHETIC FIXTURE - synthetic run id or file name, not measured"
+    if declared:
+        return (
+            f"provenance {declared!r} is declared by the capture itself, not "
+            "verified: a CAPTURE label is an untrusted claim, not proof that "
+            "hardware measurements occurred"
+        )
+    return None
+
+
 def _delta(measured: Optional[float], believed: Optional[float]) -> Optional[float]:
     if measured is None or believed is None:
         return None
-    return round(measured - believed, 6)
+    try:
+        result = float(measured) - float(believed)
+    except (OverflowError, ValueError):
+        raise MeasurementError(
+            f"the endpoint delta {measured!r} minus {believed!r} is not "
+            "representable as a finite number; refusing the comparison rather "
+            "than emitting a non-finite delta"
+        ) from None
+    if result != result or result in (float("inf"), float("-inf")):
+        raise MeasurementError(
+            f"the endpoint delta {measured!r} minus {believed!r} is not "
+            "representable as a finite number; refusing the comparison rather "
+            "than emitting a non-finite delta"
+        )
+    return round(result, 6)
 
 
 def _capture_comparability(metrics: dict[str, Any]) -> Optional[str]:
@@ -392,6 +440,15 @@ def _capture_comparability(metrics: dict[str, Any]) -> Optional[str]:
     """
     selection = metrics["capture"]["selection"]
     reasons: list[str] = []
+    # Contradictory verification evidence (R1R-M2) already makes the believed
+    # endpoint unavailable, which the endpoint-source check below refuses;
+    # the contradiction text travels in `end_position_unavailable_reason`.
+    duration_reason = (metrics.get("window") or {}).get("duration_unavailable_reason")
+    if duration_reason and metrics["position"]["end_position_source"] == "verified_final_stop":
+        reasons.append(
+            "the capture's chronology is uncertain "
+            f"({duration_reason}); an elapsed run time across it cannot be attributed"
+        )
     if selection["mixed_sessions"] or selection["mixed_runs"]:
         reasons.append(
             "the capture holds more than one run ("
@@ -494,7 +551,19 @@ def compare_endpoints(
         # because an armed-flag span or a whole-log duration is not a Run Time and a
         # number that looks comparable would be worse than a blank.
         believed_time = metrics["run_window"]["internal_run_time_s"]
-
+        try:
+            end_delta = _delta(measured_end_position, believed_end_position)
+            time_delta = _delta(measured_time, believed_time)
+        except MeasurementError as error:
+            end_delta = None
+            time_delta = None
+            refusal = (refusal + "; " if refusal else "") + str(error)
+            if not any(entry["run_id"] == run_id for entry in refusals):
+                refusals.append({"run_id": run_id, "reason": refusal})
+            else:
+                for entry in refusals:
+                    if entry["run_id"] == run_id:
+                        entry["reason"] = refusal
         rows.append(
             {
                 "run_id": run_id,
@@ -528,15 +597,22 @@ def compare_endpoints(
                 "capture_provenance_declared": metrics["capture"][
                     "provenance_declared"
                 ],
-                "end_position_delta_m": _delta(measured_end_position, believed_end_position)
-                if refusal is None
-                else None,
+                # Normalized fixture provenance travels with the row (R1R-L1):
+                # the explicit declaration alone is not the whole answer -
+                # a SYNTHETIC run id or file name adds the warning, and a
+                # conflicting CAPTURE claim never removes it. A standalone
+                # root export must still read as a fixture, never as
+                # physically verified calibration evidence.
+                "synthetic": _row_is_synthetic(metrics),
+                "capture_provenance_conflict": metrics["capture"].get(
+                    "provenance_conflict"
+                ),
+                "provenance_warning": _row_provenance_warning(metrics),
+                "end_position_delta_m": end_delta if refusal is None else None,
                 "net_travel_m": metrics["position"]["net_travel_m"],
                 "measured_run_time_s": measured_time,
                 "believed_run_time_s": believed_time,
-                "run_time_delta_s": _delta(measured_time, believed_time)
-                if refusal is None
-                else None,
+                "run_time_delta_s": time_delta if refusal is None else None,
                 "believed_target_m": metrics["position"]["believed_target_m"],
                 "believed_target_source": metrics["position"]["believed_target_source"],
                 # The context columns travel with the row so an accepted or

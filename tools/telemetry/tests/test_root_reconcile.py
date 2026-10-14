@@ -546,19 +546,26 @@ class FailureBeforeGenerationCase(IsolatedCase):
 
 
 class FailureDuringPublicationCase(IsolatedCase):
-    """TEST N - a mid-publication error never yields a falsely complete manifest."""
+    """TEST N - a mid-publication error never yields a falsely complete manifest.
+
+    Publication is staged: everything renders in memory first, the previous
+    manifest is invalidated, the new artifacts commit, and the new manifest
+    commits last. A commit failure therefore leaves no manifest claiming
+    completeness - only an explicit incomplete-publication marker - and the
+    next successful invocation recovers deterministically.
+    """
 
     def test_failed_second_run_writes_no_manifest_claiming_it(self) -> None:
         calls: list[str] = []
-        real_run_report = cli.run_report
+        real_write_json = cli.write_json
 
-        def flaky(run_dir: str, *args: object, **kwargs: object) -> list[str]:
-            calls.append(run_dir)
+        def flaky(path: str, payload: object) -> None:
+            calls.append(path)
             if len(calls) == 2:
                 raise ReportError("injected publication failure")
-            return real_run_report(run_dir, *args, **kwargs)  # type: ignore[arg-type]
+            real_write_json(path, payload)  # type: ignore[arg-type]
 
-        with mock.patch.object(cli, "run_report", side_effect=flaky):
+        with mock.patch.object(cli, "write_json", side_effect=flaky):
             code, _, _ = self.analyze(
                 SAMPLE_A, SAMPLE_B, "--run-id", "AAA", "--run-id", "BBB"
             )
@@ -566,29 +573,46 @@ class FailureDuringPublicationCase(IsolatedCase):
         # A fresh tree has no manifest at all: visibly incomplete, never
         # falsely complete.
         self.assertFalse(os.path.exists(os.path.join(self.out, "manifest.json")))
+        with open(os.path.join(self.out, ".publication_state.json"), encoding="utf-8") as handle:
+            state = json.load(handle)
+        self.assertEqual(state["publication_state"], "incomplete")
 
-    def test_failed_rerun_keeps_the_previous_complete_manifest(self) -> None:
+    def test_failed_rerun_invalidates_the_manifest_and_recovers(self) -> None:
         code, _, err = self.analyze(SAMPLE_A, "--run-id", "AAA")
         self.assertEqual(code, 0, err)
         self.assertEqual(manifest_inputs(self.out), ["AAA"])
 
         calls: list[str] = []
-        real_run_report = cli.run_report
+        real_write_json = cli.write_json
 
-        def flaky(run_dir: str, *args: object, **kwargs: object) -> list[str]:
-            calls.append(run_dir)
+        def flaky(path: str, payload: object) -> None:
+            calls.append(path)
             if len(calls) == 2:
                 raise ReportError("injected publication failure")
-            return real_run_report(run_dir, *args, **kwargs)  # type: ignore[arg-type]
+            real_write_json(path, payload)  # type: ignore[arg-type]
 
-        with mock.patch.object(cli, "run_report", side_effect=flaky):
+        with mock.patch.object(cli, "write_json", side_effect=flaky):
             code, _, _ = self.analyze(
                 SAMPLE_A, SAMPLE_B, "--run-id", "AAA", "--run-id", "BBB"
             )
         self.assertNotEqual(code, 0)
-        # The surviving manifest still describes the last *completed*
-        # generation; it must not claim the failed one.
-        self.assertEqual(manifest_inputs(self.out), ["AAA"])
+        # The previous manifest was invalidated before the commit, so no
+        # manifest - old or new - can present the mixed tree as a complete
+        # generation. The incomplete marker says so explicitly.
+        self.assertFalse(os.path.exists(os.path.join(self.out, "manifest.json")))
+        with open(os.path.join(self.out, ".publication_state.json"), encoding="utf-8") as handle:
+            state = json.load(handle)
+        self.assertEqual(state["publication_state"], "incomplete")
+        # Recovery is deterministic: the next successful invocation
+        # publishes the full generation and clears the marker.
+        code, _, err = self.analyze(
+            SAMPLE_A, SAMPLE_B, "--run-id", "AAA", "--run-id", "BBB"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(manifest_inputs(self.out), ["AAA", "BBB"])
+        self.assertFalse(
+            os.path.exists(os.path.join(self.out, ".publication_state.json"))
+        )
 
 
 class CaseHandlingCase(unittest.TestCase):

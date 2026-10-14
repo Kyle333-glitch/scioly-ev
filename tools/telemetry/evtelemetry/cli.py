@@ -23,21 +23,33 @@ import sys
 from typing import NoReturn, Optional, Sequence
 
 from . import TOOL_VERSION, schema
-from .distribution import measurement_distribution
+from .distribution import DistributionError, measurement_distribution
 from .endpoints import MeasurementError, MEASUREMENT_TEMPLATE, compare_endpoints, load_measurements
 from .metrics import compute_metrics
 from .parse import TelemetryFormatError, read_log
 from .report import (
     ReportError,
+    acquire_output_lock,
+    build_comparison_payload,
+    clear_publication_state,
+    is_reparse_or_link,
     is_synthetic,
+    mark_publication_incomplete,
     reconcile_root_reports,
+    reconcile_run_dir,
     reconcile_stale_run_dirs,
+    recover_interrupted_publication,
+    release_output_lock,
+    render_run_artifacts,
     run_report,
     summarize_distribution,
+    validate_output_confinement,
     write_comparison_report,
     write_distribution_report,
     write_endpoints_report,
+    write_json,
     write_manifest,
+    write_text_report,
     summarize_comparison,
     summarize_run,
 )
@@ -225,6 +237,76 @@ def _run_dir(out_dir: str, run_id: str) -> str:
     return os.path.join(out_dir, "runs", _safe_run_name(run_id))
 
 
+def _preflight_output_collision(args: argparse.Namespace) -> None:
+    """Refuses source files that collide with the report destination (R1R-E8).
+
+    A log or measurement file sitting at the output root, at a managed run
+    slot, or at a managed root-report slot would be read as input and then
+    replaced or reconciled as output. Every such collision is refused before
+    any mutation, while the previous generation is still intact.
+    """
+    out_abs = os.path.abspath(args.out)
+    sources = list(args.logs)
+    if args.measurements:
+        sources.append(args.measurements)
+    managed_targets = {out_abs}
+    try:
+        run_dirs = _preflight_run_dirs(args.out, [
+            _run_id_for(path, index, args.run_id)
+            for index, path in enumerate(args.logs)
+        ])
+    except CliError:
+        run_dirs = []
+    for run_dir in run_dirs:
+        managed_targets.add(os.path.abspath(run_dir))
+        for name in ("metrics.json", "summary.txt", "parse_errors.txt"):
+            managed_targets.add(os.path.join(os.path.abspath(run_dir), name))
+    for name in (
+        "comparison.json",
+        "comparison.txt",
+        "endpoints.json",
+        "endpoints.txt",
+        "manifest.json",
+    ):
+        managed_targets.add(os.path.join(out_abs, name))
+    for source in sources:
+        source_abs = os.path.abspath(source)
+        if source_abs in managed_targets:
+            raise CliError(
+                f"source file {source!r} collides with the report destination "
+                f"{args.out!r}; move the source or choose a different --out"
+            )
+        if source_abs.startswith(out_abs + os.sep):
+            for target in managed_targets:
+                if source_abs == target or source_abs.startswith(target + os.sep):
+                    raise CliError(
+                        f"source file {source!r} collides with the report destination "
+                        f"{args.out!r}; move the source or choose a different --out"
+                    )
+
+
+def _invalidate_manifest(out_dir: str) -> None:
+    """Removes the previous manifest so no stale claim survives the commit.
+
+    Runs under the writer lock after confinement preflight: the manifest
+    path is validated, never followed through a reparse point, and its
+    absence afterwards means no complete generation is published until the
+    new manifest commits last.
+    """
+    from .report import _guard
+    path = os.path.join(out_dir, "manifest.json")
+    _guard(path)
+    if os.path.lexists(path):
+        if is_reparse_or_link(path) or os.path.isdir(path):
+            raise ReportError(
+                f"refusing to invalidate {path!r}: not a regular file"
+            )
+        try:
+            os.remove(path)
+        except OSError as error:
+            raise ReportError(f"could not invalidate {path!r}: {error}") from None
+
+
 def _cmd_synth(args: argparse.Namespace) -> int:
     try:
         written = write_samples(args.out, force=args.force)
@@ -249,11 +331,20 @@ def _cmd_distribution(args: argparse.Namespace) -> int:
     except MeasurementError as error:
         raise CliError(f"the measurement file could not be read\n{error}") from None
 
-    payload = measurement_distribution(table)
     try:
+        payload = measurement_distribution(table)
+    except DistributionError as error:
+        raise CliError(str(error)) from None
+    try:
+        validate_output_confinement(
+            args.out,
+            expect_files=["distribution.json", "distribution.txt"],
+        )
         write_distribution_report(args.out, payload)
     except ReportError as error:
         raise CliError(str(error)) from None
+    except OSError as error:
+        raise CliError(f"could not write the distribution report: {error}") from None
 
     print(summarize_distribution(payload))
     print(f"distribution written to {os.path.join(args.out, 'distribution.txt')}")
@@ -295,62 +386,34 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         except MeasurementError as error:
             raise CliError(f"the measurement file could not be read\n{error}") from None
 
-    metrics_by_run = []
-    for run_id, run_dir, log, metrics in prepared:
-        try:
-            run_report(run_dir, metrics, log, include_plots=not args.no_plots)
-        except ReportError as error:
-            raise CliError(str(error)) from None
+    metrics_by_run = [metrics for _, _, _, metrics in prepared]
 
-        metrics_by_run.append(metrics)
-        print(summarize_run(metrics))
-        print(f"report written to {run_dir}")
-        print("")
-
-    wrote_comparison = False
-    if len(metrics_by_run) > 1:
-        print(summarize_comparison(metrics_by_run))
-        write_comparison_report(args.out, metrics_by_run)
-        wrote_comparison = True
-
-    wrote_endpoints = False
-    if table is not None:
-        endpoints_summary = compare_endpoints(metrics_by_run, table)
-        try:
-            write_endpoints_report(args.out, endpoints_summary)
-        except ReportError as error:
-            raise CliError(str(error)) from None
-        wrote_endpoints = True
-        print(
-            f"endpoint comparison written to {os.path.join(args.out, 'endpoints.txt')} "
-            f"({len(endpoints_summary['runs'])} run(s))"
+    # Staged publication (R1R-K1): everything is rendered in memory before
+    # any live managed slot is touched, so a rendering failure leaves the
+    # previous generation intact and a commit failure leaves no manifest
+    # claiming completeness. Rendering raises ReportError for unplottable
+    # selections exactly as before - but before any mutation.
+    try:
+        run_artifact_maps = [
+            render_run_artifacts(metrics, log, include_plots=not args.no_plots)
+            for _, _, log, metrics in prepared
+        ]
+        comparison_payload = (
+            build_comparison_payload(metrics_by_run) if len(metrics_by_run) > 1 else None
         )
-        refused = endpoints_summary["refused_comparisons"]
-        for entry in refused:
-            print(f"  no comparison for {entry['run_id']}: {entry['reason']}")
-        print("")
-
-    # M15: the new generation owns the root now. Managed root pairs the
-    # current inputs did not produce are removed (fixed slots only), and run
-    # directories no current input maps to are reconciled to their unknown
-    # content or removed when empty. This runs after every current artifact is
-    # written and before the manifest claims the tree, so a manifest never
-    # describes a generation the directory contradicts. A failure before this
-    # point (bad input, preflight collision, unreadable log) writes nothing
-    # and therefore removes nothing.
-    reconcile_root_reports(
-        args.out,
-        keep_comparison=wrote_comparison,
-        keep_endpoints=wrote_endpoints,
-    )
-    reconcile_stale_run_dirs(args.out, run_dirs)
-
-    write_manifest(
-        args.out,
-        {
+        comparison_text = (
+            summarize_comparison(metrics_by_run)
+            if len(metrics_by_run) > 1
+            else None
+        )
+        endpoints_summary = (
+            compare_endpoints(metrics_by_run, table) if table is not None else None
+        )
+        manifest_payload = {
             "tool_version": TOOL_VERSION,
             "schema_version": schema.SCHEMA_VERSION,
             "schema_prefixes": [schema.SAMPLE_PREFIX, schema.EVENT_PREFIX],
+            "publication_state": "complete",
             "inputs": [
                 {
                     "run_id": metrics["run_id"],
@@ -387,8 +450,102 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 "A report describes what the firmware reported. Physical facts are recorded in "
                 "VERIFIED_STATE.md after measurement, never here."
             ),
-        },
-    )
+        }
+    except ReportError as error:
+        raise CliError(str(error)) from None
+
+    # Confinement preflight over every managed slot, before any mutation:
+    # output root and ancestors, run directories, plot/file slots, root
+    # pairs, manifest, lock and publication-state paths (R1R-M1/E9). Source
+    # files colliding with the destination are refused here as well. Exact
+    # rendered slots are known (rendering precedes this), so every target
+    # is validated, not just the fixed names.
+    try:
+        _preflight_output_collision(args)
+        root_files = ["manifest.json"]
+        if comparison_payload is not None:
+            root_files += ["comparison.json", "comparison.txt"]
+        if endpoints_summary is not None:
+            root_files += ["endpoints.json", "endpoints.txt"]
+        validate_output_confinement(args.out, expect_files=root_files)
+        for run_dir, rendered in zip(run_dirs, run_artifact_maps):
+            validate_output_confinement(
+                run_dir,
+                expect_dirs=[".", "plots"],
+                expect_files=list(rendered),
+            )
+    except ReportError as error:
+        raise CliError(str(error)) from None
+
+    try:
+        acquire_output_lock(args.out)
+    except ReportError as error:
+        raise CliError(str(error)) from None
+    try:
+        recover_interrupted_publication(args.out)
+        # Invalidate the previous generation's claim before committing the
+        # new one: from here on there is no manifest until the full commit
+        # succeeds, so an interrupted commit cannot masquerade as complete.
+        _invalidate_manifest(args.out)
+        mark_publication_incomplete(
+            args.out,
+            "a new generation is committing; the manifest is written last",
+        )
+        try:
+            for (_, run_dir, _, metrics), rendered in zip(prepared, run_artifact_maps):
+                os.makedirs(run_dir, exist_ok=True)
+                for relative, (kind, text) in rendered.items():
+                    if kind == "json":
+                        write_json(os.path.join(run_dir, relative), metrics)
+                    else:
+                        write_text_report(os.path.join(run_dir, relative), text)
+                reconcile_run_dir(run_dir, list(rendered))
+            if comparison_payload is not None and comparison_text is not None:
+                print(comparison_text)
+                write_json(
+                    os.path.join(args.out, "comparison.json"), comparison_payload
+                )
+                write_text_report(
+                    os.path.join(args.out, "comparison.txt"), comparison_text
+                )
+            if endpoints_summary is not None:
+                write_endpoints_report(args.out, endpoints_summary)
+                print(
+                    f"endpoint comparison written to {os.path.join(args.out, 'endpoints.txt')} "
+                    f"({len(endpoints_summary['runs'])} run(s))"
+                )
+                refused = endpoints_summary["refused_comparisons"]
+                for entry in refused:
+                    print(f"  no comparison for {entry['run_id']}: {entry['reason']}")
+                print("")
+            # M15: the new generation owns the root now. Managed root pairs
+            # the current inputs did not produce are removed (fixed slots
+            # only), and run directories no current input maps to are
+            # reconciled to their unknown content or removed when empty.
+            # This runs after every current artifact is committed and before
+            # the manifest claims the tree, so a manifest never describes a
+            # generation the directory contradicts.
+            reconcile_root_reports(
+                args.out,
+                keep_comparison=comparison_payload is not None,
+                keep_endpoints=endpoints_summary is not None,
+            )
+            reconcile_stale_run_dirs(args.out, run_dirs)
+            write_manifest(args.out, manifest_payload)
+            clear_publication_state(args.out)
+        except (ReportError, OSError) as error:
+            raise CliError(
+                f"the report could not be published completely: {error}; no "
+                "complete generation is published (the manifest was invalidated "
+                "before the commit) - fix the cause and re-run to recover"
+            ) from None
+    finally:
+        release_output_lock(args.out)
+
+    for run_id, run_dir, _, metrics in prepared:
+        print(summarize_run(metrics))
+        print(f"report written to {run_dir}")
+        print("")
     print(f"manifest written to {os.path.join(args.out, 'manifest.json')}")
     return _EXIT_OK
 

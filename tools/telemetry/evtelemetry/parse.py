@@ -740,6 +740,26 @@ _WRAP_WINDOW_MS = 120_000
 _REORDER_WINDOW_MS = 1_000
 
 
+def _late_pre_wrap_abs(
+    previous_ms: Optional[int], previous_abs: int, t_ms: int
+) -> Optional[int]:
+    """The reconstructed time of a late pre-wrap record, or ``None``.
+
+    A lane that rolled over (``U-2 -> 1``) can then receive a slightly
+    out-of-order record from just before the rollover (``-> U-1``). In raw
+    value that step runs *forward* by almost the whole uint32 range, but it
+    is really the clock being re-read a couple of milliseconds late: the
+    record belongs ``(previous_ms - t_ms) mod 2**32`` milliseconds before the
+    post-wrap time, in the previous epoch. Anything smaller than a near-full-
+    range forward jump is an ordinary step and returns ``None``.
+    """
+    if previous_ms is None or t_ms <= previous_ms:
+        return None
+    if t_ms - previous_ms <= _UINT32_SPAN - _REORDER_WINDOW_MS:
+        return None
+    return previous_abs - ((previous_ms - t_ms) % _UINT32_SPAN)
+
+
 def classify_backwards_step(previous_ms: Optional[int], t_ms: int) -> Optional[dict]:
     """Classifies a step whose raw reading is behind the previous one, or ``None``.
 
@@ -831,8 +851,10 @@ def parse_lines(
     log = Log(source=source or "<stream>")
     sample_previous_ms: Optional[int] = None
     sample_previous_abs = 0
+    sample_backfilled = False
     event_previous_ms: Optional[int] = None
     event_previous_abs = 0
+    event_backfilled = False
     session_index = 0
     session_records = 0
     provenance: Optional[str] = None
@@ -865,26 +887,76 @@ def parse_lines(
 
         if isinstance(record, Sample):
             previous_ms = sample_previous_ms
+            backfill = _late_pre_wrap_abs(previous_ms, sample_previous_abs, record.t_ms)
             step = classify_backwards_step(previous_ms, record.t_ms)
-            if step is not None:
+            if (
+                backfill is None
+                and sample_backfilled
+                and previous_ms is not None
+                and step is not None
+                and step["kind"] == "wrap"
+            ):
+                # The rollover this step resembles is the one already counted
+                # before the backfilled record (R1R-M3b, e.g. U-2 -> 1 -> U-1
+                # -> 20): the lane is already in the new epoch, so the
+                # unsigned delta is the honest one and no second wrap is
+                # observed. The flag is consumed by this one step.
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=sample_previous_abs + step["unsigned_delta_ms"],
+                    session_index=session_index,
+                )
+                sample_previous_ms = record.t_ms
+                sample_previous_abs = record.t_abs_ms
+                sample_backfilled = False
+                log.samples.append(record)
+                session_records += 1
+                continue
+            sample_backfilled = False
+            if backfill is not None:
+                # A slightly out-of-order pre-wrap record arriving after the
+                # lane already rolled over (R1R-M3b, e.g. U-2 -> 1 -> U-1):
+                # reading it as a +49.7-day forward step fabricates a second
+                # wrap epoch. It belongs a few milliseconds before the
+                # post-wrap clock, like any reordered reading.
                 log.wrap_observations.append(
                     {
                         "line_number": index,
                         "lane": "sample",
                         "session_index": session_index,
-                        **step,
+                        "kind": "reordered",
+                        "from_ms": previous_ms,
+                        "to_ms": record.t_ms,
+                        "unsigned_delta_ms": (record.t_ms - previous_ms) % _UINT32_SPAN,  # type: ignore[operator]
+                        "raw_backwards_ms": (previous_ms - record.t_ms) % _UINT32_SPAN,  # type: ignore[operator]
                     }
                 )
-            record = dataclasses.replace(
-                record,
-                t_abs_ms=_unwrap(
-                    previous_ms,
-                    sample_previous_abs,
-                    record.t_ms,
-                    kind=step["kind"] if step is not None else None,
-                ),
-                session_index=session_index,
-            )
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=backfill,
+                    session_index=session_index,
+                )
+                sample_backfilled = True
+            else:
+                if step is not None:
+                    log.wrap_observations.append(
+                        {
+                            "line_number": index,
+                            "lane": "sample",
+                            "session_index": session_index,
+                            **step,
+                        }
+                    )
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=_unwrap(
+                        previous_ms,
+                        sample_previous_abs,
+                        record.t_ms,
+                        kind=step["kind"] if step is not None else None,
+                    ),
+                    session_index=session_index,
+                )
             sample_previous_ms = record.t_ms
             sample_previous_abs = record.t_abs_ms
             log.samples.append(record)
@@ -899,29 +971,72 @@ def parse_lines(
                     session_index += 1
                 sample_previous_ms = None
                 sample_previous_abs = 0
+                sample_backfilled = False
                 event_previous_ms = None
                 event_previous_abs = 0
+                event_backfilled = False
             previous_ms = event_previous_ms
+            backfill = _late_pre_wrap_abs(previous_ms, event_previous_abs, record.t_ms)
             step = classify_backwards_step(previous_ms, record.t_ms)
-            if step is not None:
+            if (
+                backfill is None
+                and event_backfilled
+                and previous_ms is not None
+                and step is not None
+                and step["kind"] == "wrap"
+            ):
+                # Same already-counted rollover as in the sample lane (R1R-M3b).
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=event_previous_abs + step["unsigned_delta_ms"],
+                    session_index=session_index,
+                )
+                event_previous_ms = record.t_ms
+                event_previous_abs = record.t_abs_ms
+                event_backfilled = False
+                log.events.append(record)
+                session_records += 1
+                continue
+            event_backfilled = False
+            if backfill is not None:
                 log.wrap_observations.append(
                     {
                         "line_number": index,
                         "lane": "event",
                         "session_index": session_index,
-                        **step,
+                        "kind": "reordered",
+                        "from_ms": previous_ms,
+                        "to_ms": record.t_ms,
+                        "unsigned_delta_ms": (record.t_ms - previous_ms) % _UINT32_SPAN,  # type: ignore[operator]
+                        "raw_backwards_ms": (previous_ms - record.t_ms) % _UINT32_SPAN,  # type: ignore[operator]
                     }
                 )
-            record = dataclasses.replace(
-                record,
-                t_abs_ms=_unwrap(
-                    previous_ms,
-                    event_previous_abs,
-                    record.t_ms,
-                    kind=step["kind"] if step is not None else None,
-                ),
-                session_index=session_index,
-            )
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=backfill,
+                    session_index=session_index,
+                )
+                event_backfilled = True
+            else:
+                if step is not None:
+                    log.wrap_observations.append(
+                        {
+                            "line_number": index,
+                            "lane": "event",
+                            "session_index": session_index,
+                            **step,
+                        }
+                    )
+                record = dataclasses.replace(
+                    record,
+                    t_abs_ms=_unwrap(
+                        previous_ms,
+                        event_previous_abs,
+                        record.t_ms,
+                        kind=step["kind"] if step is not None else None,
+                    ),
+                    session_index=session_index,
+                )
             event_previous_ms = record.t_ms
             event_previous_abs = record.t_abs_ms
             log.events.append(record)

@@ -163,16 +163,26 @@ def _phase_segments(
         duration_broken = following is not None and _spans_break(
             segment["start_line"], following["start_line"], break_lines
         )
-        segment["timing_unreliable"] = span_broken or bool(duration_broken)
+        # A phase change across a benign timestamp reorder (R1R-M3c, e.g.
+        # 1000 Approach -> 999 Capture) runs backwards by a few milliseconds.
+        # That signed spacing is kept in the raw observations, but it is not
+        # a physically meaningful negative phase duration.
+        span_negative = segment["end_ms"] < segment["start_ms"]
+        duration_negative = following is not None and (
+            following["start_ms"] < segment["start_ms"]
+        )
+        segment["timing_unreliable"] = (
+            span_broken or bool(duration_broken) or span_negative or duration_negative
+        )
         segment["observed_span_s"] = (
             None
-            if span_broken
+            if span_broken or span_negative
             else _round((segment["end_ms"] - segment["start_ms"]) / 1000.0)
         )
         segment["censored"] = following is None
         segment["duration_s"] = (
             None
-            if following is None or duration_broken
+            if following is None or duration_broken or duration_negative
             else _round((following["start_ms"] - segment["start_ms"]) / 1000.0)
         )
         del segment["start_line"]
@@ -470,7 +480,159 @@ def _stopped_leg(phases: set[str]) -> str:
     return "reverse" if any(phase in phases for phase in _REVERSE_PHASES) else "forward"
 
 
-def _verified_stop_sample(samples: Sequence[Sample]) -> Optional[Sample]:
+# Driving phases incompatible with a latched verified final stop (R1R-M2d).
+# The verification latch survives into terminal phases (Done, Fault) and into
+# post-run non-driving phases (Idle after disarm keeps the latch), but a run
+# that verified a *final* stop cannot be driving again: a sample carrying the
+# verification timeline in one of these phases contradicts the claim.
+_DRIVING_PHASES = frozenset(
+    {
+        "Approach",
+        "Capture",
+        "Push",
+        "ForwardDecel",
+        "BrakeZeroSpeed",
+        "Reverse",
+        "FinalApproach",
+        "FinalBrake",
+    }
+)
+
+
+def _verification_contradiction(
+    samples: Sequence[Sample],
+    *,
+    wrap_observed: bool = False,
+    restart_observed: bool = False,
+) -> Optional[str]:
+    """Why the selected run's verification evidence contradicts itself, or ``None``.
+
+    Every selected-run sample carrying the latched verification timeline is
+    inspected *before* any candidate is accepted (R1R-M2). A single exact
+    tick-match must not mask a later contradictory stamp, and the first of two
+    same-tick records with different positions must not win by file order.
+    Identical duplicate records (same stamp, same usable position) are
+    legitimate latch repetition and are not a contradiction.
+    """
+    latched = [
+        sample
+        for sample in samples
+        if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok
+    ]
+    if not latched:
+        return None
+    run_starts = {sample.run_start_ms for sample in latched}
+    if len(run_starts) > 1:
+        return (
+            "the selected run carries contradictory run-start readings "
+            f"({', '.join(str(stamp) for stamp in sorted(run_starts))} ms); no single "
+            "run timeline can be attributed, so the verified stop position "
+            "is unavailable"
+        )
+    dwell_starts = {sample.dwell_start_ms for sample in latched}
+    if len(dwell_starts) > 1:
+        return (
+            "the selected run carries contradictory dwell-start readings "
+            f"({', '.join(str(stamp) for stamp in sorted(dwell_starts))} ms); no single "
+            "verification timeline can be attributed, so the verified stop "
+            "position is unavailable"
+        )
+    stamps = {sample.stop_verified_ms for sample in latched}
+    if len(stamps) > 1:
+        return (
+            "the selected run carries contradictory stop-verification timestamps "
+            f"({', '.join(str(stamp) for stamp in sorted(stamps))} ms); no single "
+            "verification instant can be attributed, so the verified stop position "
+            "is unavailable (the latest usable position remains a later observation, "
+            "not a verified stop)"
+        )
+    for sample in latched:
+        if sample.phase in _DRIVING_PHASES:
+            return (
+                f"stop verification is claimed while driving in phase {sample.phase!r} "
+                f"at {sample.t_ms} ms; a verified final stop cannot occur mid-drive, "
+                "so the verified stop position is unavailable"
+            )
+    run_ms = next(iter(run_starts))
+    dwell_ms = next(iter(dwell_starts))
+    stamp = next(iter(stamps))
+    # Impossible-timeline guard, modular half-range on the dwell reading only
+    # (R1R-M2c): a dwell start that wraps past half the uint32 range cannot
+    # follow the actuation on the firmware's own clock - e.g. actuation
+    # 4000 ms with dwell 100 ms would publish ~49.7 days. Skipped when the
+    # session actually observed a rollover, across which raw readings
+    # legitimately span the boundary, and when a suspected restart break
+    # falls inside the session, across which raw readings have no elapsed
+    # meaning at all (the internal run time is refused separately via the
+    # break lines; the endpoint stays governed by tick-match and stamp
+    # consistency). The verification stamp itself is not range-checked:
+    # established captures reuse timeline defaults whose stamp precedes the
+    # actuation reading in raw value, and the tick-match plus
+    # stamp-consistency checks above already govern it.
+    dwell_delta = (dwell_ms - run_ms) % _UINT32_SPAN
+    if (
+        not wrap_observed
+        and not restart_observed
+        and dwell_delta >= _UINT32_SPAN // 2
+    ):
+        return (
+            f"the selected run's timeline is impossible (actuation {run_ms} ms, "
+            f"dwell start {dwell_ms} ms); the readings "
+            "do not fit in one half of the uint32 clock, so the verified stop "
+            "position and the internal run time are unavailable"
+        )
+    # Phase regression: once verification has latched in this run, the run
+    # cannot return to an active driving phase.
+    seen_latched = False
+    for sample in samples:
+        if sample.run_start_ok and sample.dwell_start_ok and sample.stop_verified_ok:
+            seen_latched = True
+        elif (
+            seen_latched
+            and sample.run_start_ok
+            and sample.run_start_ms == run_ms
+            and sample.phase in _DRIVING_PHASES
+        ):
+            return (
+                f"the selected run regresses from a verified stop to active phase "
+                f"{sample.phase!r} at {sample.t_ms} ms; the verification evidence "
+                "contradicts itself, so the verified stop position is unavailable"
+            )
+    # Duplicate records at the verification instant: every record at the tick
+    # must be usable and agree, otherwise file order would decide the endpoint.
+    at_tick = [
+        sample
+        for sample in samples
+        if sample.t_ms == stamp
+        and sample.run_start_ok
+        and sample.dwell_start_ok
+        and sample.stop_verified_ok
+    ]
+    if any(not sample.is_usable_position for sample in at_tick):
+        return (
+            f"the run recorded stop verification at {stamp} ms but a "
+            f"verification-instant sample at {stamp} ms carries no usable "
+            "position, so the verified stop position is unavailable (the latest "
+            "usable position remains a later observation, not a verified stop)"
+        )
+    tick_positions = {float(sample.position_m) for sample in at_tick}  # type: ignore[arg-type]
+    if len(tick_positions) > 1:
+        ordered = sorted(tick_positions)
+        return (
+            f"the run carries conflicting verification-instant positions at "
+            f"{stamp} ms ({', '.join(str(position) for position in ordered)} m); "
+            "file order cannot decide the endpoint, so the verified stop "
+            "position is unavailable"
+        )
+    return None
+
+
+def _verified_stop_sample(
+    samples: Sequence[Sample],
+    *,
+    wrap_observed: bool = False,
+    restart_observed: bool = False,
+) -> Optional[Sample]:
     """The sample observed at the run's verified final-stop instant.
 
     Producer contract (`CompetitionStateMachine.h`, `VehicleRuntime.cpp`): the
@@ -493,6 +655,16 @@ def _verified_stop_sample(samples: Sequence[Sample]) -> Optional[Sample]:
     window and cross-run/cross-session pairing is impossible (callers pass
     only the selected run's samples).
     """
+    if (
+        _verification_contradiction(
+            samples, wrap_observed=wrap_observed, restart_observed=restart_observed
+        )
+        is not None
+    ):
+        # Contradictory evidence must refuse, not pick the first candidate
+        # (R1R-M2): accepting candidates[0] lets one exact match mask a later
+        # conflicting stamp and lets file order decide duplicate positions.
+        return None
     candidates = [
         sample
         for sample in samples
@@ -510,6 +682,9 @@ def _position_section(
     samples: Sequence[Sample],
     events: Sequence[Event],
     break_lines: frozenset[int] = frozenset(),
+    *,
+    wrap_observed: bool = False,
+    restart_observed: bool = False,
 ) -> dict[str, Any]:
     usable = [sample for sample in samples if sample.is_usable_position]
     unusable = [sample for sample in samples if not sample.is_usable_position]
@@ -525,7 +700,9 @@ def _position_section(
 
     phases = _observed_phases(samples, events)
     leg = _stopped_leg(phases)
-    verified = _verified_stop_sample(usable)
+    verified = _verified_stop_sample(
+        usable, wrap_observed=wrap_observed, restart_observed=restart_observed
+    )
     stop_position = (
         float(verified.position_m) if verified is not None else None  # type: ignore[arg-type]
     )
@@ -552,7 +729,20 @@ def _position_section(
     # named, with the source that produced each. A latched flag without the
     # verification-tick sample is UNAVAILABLE, never the later position: matching
     # values do not prove a late sample was taken at verification.
-    if stop_position is not None:
+    # Contradictory verification evidence refuses before any candidate is
+    # accepted (R1R-M2): one exact match must not mask a conflicting stamp,
+    # and file order must not decide duplicate positions.
+    contradiction = _verification_contradiction(
+        samples, wrap_observed=wrap_observed, restart_observed=restart_observed
+    )
+    if contradiction is not None:
+        stop_position = None
+        verified = None
+        stop_remaining = None
+        end_position = None
+        end_source = None
+        end_reason = contradiction
+    elif stop_position is not None:
         end_position = stop_position
         end_source: Optional[str] = "verified_final_stop"
         end_reason: Optional[str] = None
@@ -863,6 +1053,9 @@ def _run_window(
     samples: Sequence[Sample],
     events: Sequence[Event],
     break_lines: frozenset[int] = frozenset(),
+    *,
+    wrap_observed: bool = False,
+    restart_observed: bool = False,
 ) -> dict[str, Any]:
     """The armed window, the run's own timeline, and the internal Run Time.
 
@@ -914,8 +1107,19 @@ def _run_window(
     internal_run_time_s = None
     final_stop_verification_completed_s = None
     internal_run_time_unavailable_reason = None
+    verification_contradiction = _verification_contradiction(
+        samples, wrap_observed=wrap_observed, restart_observed=restart_observed
+    )
     if verified is not None:
-        if actuated is not None and _spans_break(
+        if verification_contradiction is not None:
+            # The timeline readings contradict each other (R1R-M2): the
+            # unsigned difference would be an attributable number from
+            # unattributable evidence.
+            internal_run_time_unavailable_reason = verification_contradiction
+            verified = None
+            dwell_start_ms = None
+            stop_verified_ms = None
+        elif actuated is not None and _spans_break(
             actuated.line_number, verified.line_number, break_lines
         ):
             # The run's own timeline readings straddle a suspected restart:
@@ -1027,8 +1231,9 @@ def _endpoint_section(
         "note": (
             "believed endpoints are the firmware's own estimates and are not measured "
             "positions; `believed_end_position_source` says whether the endpoint is a "
-            "verified final stop or the last sample, and the sampling window bounds how "
-            "far the estimate could have moved between samples"
+            "verified final stop or the last sample, and the sampling window reports "
+            "the observed adjacent-sample step around the confirming sample - a "
+            "sampling delta, not a physical error bound"
         ),
     }
 
@@ -1114,6 +1319,106 @@ def _event_at_or_after_actuation(actuation_ms: int, t_ms: int) -> bool:
     return ((t_ms - actuation_ms) % _UINT32_SPAN) < (_UINT32_SPAN // 2)
 
 
+# The continuity horizon for placing two lanes on one timeline. One lane
+# beginning just before a uint32 rollover while the other begins just after
+# is individually plausible in each lane, but their absolute readings then
+# sit ~49.7 days apart (R1R-M3a). A cross-lane span that exceeds both
+# lane-local spans by more than this horizon has no supporting epoch bridge
+# and is refused rather than published as a confident duration. The value
+# matches the parser's wrap window: the same section-4 continuity assumption.
+_CROSS_LANE_HORIZON_MS = 120_000
+
+# Tolerance for an event reconstructed just before the selected run's first
+# sample (actuation/announcement events legitimately precede it). Matches the
+# parser's reorder window: the same few-millisecond re-reading of the clock.
+_EVENT_MEMBERSHIP_TOLERANCE_MS = 1_000
+
+# Window the parser treats as the rollover neighborhood (mirrors
+# parse._WRAP_WINDOW_MS): a raw forward jump from near the bottom of the
+# range to near the top is the backfill shape the parser resolves as a
+# few-millisecond reordered reading, not an unbridged gap.
+
+
+def _cross_lane_uncertainty(log: Log, session_index: int) -> Optional[str]:
+    """Why the session's lanes cannot share one timeline, or ``None``.
+
+    Each lane unwraps from its own first record, so a lane that starts before
+    a rollover and one that starts after it end up in different epochs with
+    individually plausible readings. Combining their absolute numbers across
+    that gap fabricates ~49.7 days of session time and misplaces chart
+    markers by the same amount (R1R-M3a). When the cross-lane span exceeds
+    what either lane supports on its own, elapsed metrics across lanes are
+    unavailable rather than confidently wrong.
+    """
+    sample_abs = [
+        record.t_abs_ms for record in log.samples if record.session_index == session_index
+    ]
+    event_abs = [
+        record.t_abs_ms for record in log.events if record.session_index == session_index
+    ]
+    if not sample_abs or not event_abs:
+        return None
+    sample_span = max(sample_abs) - min(sample_abs)
+    event_span = max(event_abs) - min(event_abs)
+    cross_span = max(max(sample_abs), max(event_abs)) - min(
+        min(sample_abs), min(event_abs)
+    )
+    if cross_span > max(sample_span, event_span) + _CROSS_LANE_HORIZON_MS:
+        return (
+            "the sample and event lanes of the analyzed session cannot be placed "
+            "on one timeline: their combined span exceeds what either lane "
+            "supports on its own by more than the rollover continuity horizon, "
+            "so no epoch bridge establishes their relative alignment and "
+            "elapsed durations across the lanes are unavailable"
+        )
+    return None
+
+
+def _continuity_gap_uncertainty(log: Log, session_index: int) -> Optional[str]:
+    """Why the session's own continuity cannot be established, or ``None``.
+
+    A raw forward jump of half the uint32 range or more inside one lane is an
+    unbridged gap: the rollover-epoch count across it (or a corrupt reading)
+    cannot be established from the values alone (R1R-L2/H). Smaller gaps -
+    including ordinary hour-long monotonic captures - remain supported.
+    """
+    for lane in (log.samples, log.events):
+        ordered = sorted(
+            (record for record in lane if record.session_index == session_index),
+            key=lambda record: record.order,
+        )
+        for previous, current in zip(ordered, ordered[1:]):
+            if not (
+                current.t_ms > previous.t_ms
+                and current.t_ms - previous.t_ms >= _UINT32_SPAN // 2
+            ):
+                continue
+            if (
+                previous.t_ms < _CROSS_LANE_HORIZON_MS
+                and current.t_ms > _UINT32_SPAN - _CROSS_LANE_HORIZON_MS
+            ):
+                # The backfill shape (post-wrap record followed by a
+                # milliseconds-late pre-wrap one): the parser already resolved
+                # it as a reordered reading in the previous epoch, so it is
+                # bridged, not an unbridged gap.
+                continue
+            return (
+                "the analyzed session holds an unbridged timestamp gap of half "
+                "the uint32 range or more; the rollover-epoch count across it "
+                "cannot be established from the recorded values, so elapsed "
+                "durations spanning it and cross-lane event alignment across "
+                "it are unavailable"
+            )
+    return None
+
+
+def _session_chronology_uncertainty(log: Log, session_index: int) -> Optional[str]:
+    """The session's cross-lane or continuity uncertainty, if any."""
+    return _cross_lane_uncertainty(
+        log, session_index
+    ) or _continuity_gap_uncertainty(log, session_index)
+
+
 @dataclasses.dataclass(frozen=True)
 class SelectedRun:
     """The one selected run every run-specific consumer must describe.
@@ -1197,6 +1502,7 @@ def select_run(log: Log) -> SelectedRun:
         and observation["session_index"] == selected
         for observation in log.wrap_observations
     )
+    chronology_uncertain = _session_chronology_uncertainty(log, selected)
     event_window_uncertain: Optional[str] = None
     if unsegmented_restart:
         # A backwards step that is neither a wrap nor a re-ordering sits inside
@@ -1209,13 +1515,49 @@ def select_run(log: Log) -> SelectedRun:
             "timestamp comparisons across it have no elapsed meaning, so the "
             "actuation boundary is uncertain there"
         )
+    elif chronology_uncertain is not None:
+        event_window_uncertain = chronology_uncertain
 
     if len(starts) > 1 and selected_run_start_ms is not None:
-        run_events = tuple(
-            event
-            for event in session_events
-            if _event_at_or_after_actuation(selected_run_start_ms, event.t_ms)
+        first_run_sample = session_samples[run_first_index]
+        # The reconstructed-epoch gate below applies only when the session
+        # holds an unbridged half-range gap (R1R-L2): without one, a lane
+        # that never observed the rollover has an unknown epoch, and the
+        # unsigned actuation window remains the membership rule - e.g. a
+        # post-wrap event preceding the first post-wrap sample tick stays a
+        # member. With such a gap the modular test wraps ancient readings
+        # forward, so epoch coherence governs too.
+        gap_ambiguous = (
+            _continuity_gap_uncertainty(log, selected) is not None
         )
+        members: list[Event] = []
+        excluded_by_epoch = 0
+        for event in session_events:
+            if not _event_at_or_after_actuation(selected_run_start_ms, event.t_ms):
+                continue
+            if gap_ambiguous:
+                # An event more than half the clock behind the run, or more
+                # than half ahead of it, cannot belong to the run no matter
+                # what the modular test says. A small negative tolerance
+                # keeps genuinely attributable actuation/announcement events
+                # that were recorded just before the first sample.
+                coherent = (
+                    first_run_sample.t_abs_ms - _EVENT_MEMBERSHIP_TOLERANCE_MS
+                    <= event.t_abs_ms
+                    < first_run_sample.t_abs_ms + _UINT32_SPAN // 2
+                )
+                if not coherent:
+                    excluded_by_epoch += 1
+                    continue
+            members.append(event)
+        run_events = tuple(members)
+        if excluded_by_epoch and event_window_uncertain is None:
+            event_window_uncertain = (
+                f"{excluded_by_epoch} session event(s) pass the modular actuation "
+                "boundary but fall outside the selected run's reconstructed "
+                "epoch; they are excluded from the run rather than wrapped "
+                "forward by half-range arithmetic"
+            )
         event_membership_rule = "at_or_after_actuation_unsigned"
         run_start_source = "actuation_reading"
     else:
@@ -1373,16 +1715,47 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
         and observation["session_index"] == selection["selected_session_index"]
         for observation in log.wrap_observations
     )
-    window_unavailable_reason = (
-        "a backwards timestamp that is neither a uint32 wrap nor a few-millisecond "
-        "re-ordering appears inside the analyzed session; the capture likely spans a "
-        "clock restart whose Boot line was not recorded, and an elapsed duration "
-        "across it would be reconstructed as about 49.7 days that did not happen"
-        if unsegmented_restart
-        else None
+    chronology_uncertain = _session_chronology_uncertainty(
+        log, selection["selected_session_index"]
     )
-    position = _position_section(samples, run_events, sample_break_lines)
-    run_window = _run_window(samples, run_events, sample_break_lines)
+    if unsegmented_restart:
+        window_unavailable_reason = (
+            "a backwards timestamp that is neither a uint32 wrap nor a few-millisecond "
+            "re-ordering appears inside the analyzed session; the capture likely spans a "
+            "clock restart whose Boot line was not recorded, and an elapsed duration "
+            "across it would be reconstructed as about 49.7 days that did not happen"
+        )
+    elif chronology_uncertain is not None:
+        # Sparse lanes on different rollover epochs, or an unbridged
+        # half-range gap (R1R-M3a/L2/H): combining the lanes' absolute
+        # numbers would publish a confident ~49.7-day duration.
+        window_unavailable_reason = chronology_uncertain
+    else:
+        window_unavailable_reason = None
+    wrap_observed = any(
+        observation["kind"] == "wrap"
+        and observation["session_index"] == selection["selected_session_index"]
+        for observation in log.wrap_observations
+    )
+    restart_observed = any(
+        observation["kind"] == "restart_suspected"
+        and observation["session_index"] == selection["selected_session_index"]
+        for observation in log.wrap_observations
+    )
+    position = _position_section(
+        samples,
+        run_events,
+        sample_break_lines,
+        wrap_observed=wrap_observed,
+        restart_observed=restart_observed,
+    )
+    run_window = _run_window(
+        samples,
+        run_events,
+        sample_break_lines,
+        wrap_observed=wrap_observed,
+        restart_observed=restart_observed,
+    )
 
     return {
         "run_id": run_id,
@@ -1404,7 +1777,10 @@ def compute_metrics(log: Log, run_id: str) -> dict[str, Any]:
             "last_t_abs_ms": last,
             "log_duration_s": (
                 _round((last - first) / 1000.0)
-                if first is not None and last is not None and not unsegmented_restart
+                if first is not None
+                and last is not None
+                and not unsegmented_restart
+                and chronology_uncertain is None
                 else None
             ),
             "duration_unavailable_reason": window_unavailable_reason,

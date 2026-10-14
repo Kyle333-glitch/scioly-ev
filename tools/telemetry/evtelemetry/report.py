@@ -18,8 +18,10 @@ not be able to reach the project's evidence record by accident.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import stat
 from typing import Any, Optional, Sequence
 
 from . import schema, svgplot, synthetic
@@ -28,7 +30,21 @@ from .parse import Event, Log, Sample
 
 __all__ = [
     "PROTECTED_OUTPUT_NAMES",
+    "STAGING_DIR_NAME",
+    "LOCK_FILE_NAME",
+    "PUBLICATION_STATE_NAME",
     "ReportError",
+    "is_reparse_or_link",
+    "validate_output_confinement",
+    "acquire_output_lock",
+    "release_output_lock",
+    "recover_interrupted_publication",
+    "mark_publication_incomplete",
+    "clear_publication_state",
+    "render_run_artifacts",
+    "write_text_report",
+    "reconcile_run_dir",
+    "build_comparison_payload",
     "reconcile_root_reports",
     "reconcile_stale_run_dirs",
     "run_report",
@@ -53,33 +69,151 @@ PROTECTED_OUTPUT_NAMES: tuple[str, ...] = (
     "AGENTS.md",
 )
 
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(
+    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+)
+
 
 class ReportError(ValueError):
     """The report could not be written as asked."""
 
 
+def is_reparse_or_link(path: str) -> bool:
+    """True when ``path`` itself is a symbolic link, junction, or reparse point.
+
+    On Windows, Python's ``os.path.islink`` returns ``False`` for NTFS directory
+    junctions (mount-point reparse points), yet ``os.isdir``, ``os.listdir``,
+    ``os.remove``, ``os.makedirs`` and ``open`` follow them. Checking
+    ``os.path.isjunction`` (where available) and ``os.lstat``'s
+    ``FILE_ATTRIBUTE_REPARSE_POINT`` / ``st_reparse_tag`` catches junctions as
+    well as ordinary symbolic links without following the link target.
+    """
+    try:
+        if os.path.islink(path):
+            return True
+    except OSError:
+        return False
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        try:
+            if isjunction(path):
+                return True
+        except OSError:
+            pass
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    if getattr(st, "st_reparse_tag", 0) != 0:
+        return True
+    if getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return True
+    return False
+
+
 def _guard(path: str) -> None:
-    """Refuses any output path that names a project authority file.
+    """Refuses any output path that names a project authority file or reparse point.
 
     Every path component is checked, not just the last one. A *directory* named
     after an authority file inside a report tree is a trap for whoever reads the
     tree next, so it is refused too - the rule is easier to state and easier to
-    rely on that way.
+    rely on that way. In addition, no existing ancestor or target component may
+    be a symbolic link, Windows junction, or reparse point (R1R-M1).
     """
-    components = os.path.normpath(os.path.abspath(path)).split(os.sep)
+    abs_path = os.path.abspath(path)
+    components = os.path.normpath(abs_path).split(os.sep)
     for component in components:
         if component in PROTECTED_OUTPUT_NAMES:
             raise ReportError(
                 f"refusing to write '{component}': the path names a project authority "
                 f"file, and this tool writes only to its own output directory"
             )
+    drive, tail = os.path.splitdrive(abs_path)
+    parts = [part for part in tail.split(os.sep) if part and part != "."]
+    current = drive + os.sep if drive else os.sep
+    for part in parts:
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and is_reparse_or_link(current):
+            raise ReportError(
+                f"refusing to write through reparse point or symbolic link: {current}"
+            )
+
+
+def validate_output_confinement(
+    out_dir: str,
+    *,
+    expect_files: Sequence[str] = (),
+    expect_dirs: Sequence[str] = (),
+) -> None:
+    """Verifies that ``out_dir`` and all expected managed slots are confined.
+
+    Raises :class:`ReportError` before any mutation if:
+
+    * ``out_dir`` or any ancestor is a protected name or reparse point/junction;
+    * ``out_dir`` exists as a regular file rather than a directory;
+    * any expected directory slot (e.g. ``runs``, ``runs/<id>``, ``plots``)
+      exists as a non-directory or reparse point/junction;
+    * any expected file slot (or its ``.partial`` staging sibling) exists as a
+      directory or reparse point/junction.
+    """
+    _guard(out_dir)
+    if os.path.lexists(out_dir):
+        if is_reparse_or_link(out_dir) or not os.path.isdir(out_dir):
+            raise ReportError(
+                f"refusing to use output destination {out_dir!r}: path exists and is "
+                "not a regular directory"
+            )
+    out_abs = os.path.abspath(out_dir)
+    for rel_dir in expect_dirs:
+        norm = os.path.normpath(rel_dir)
+        if os.path.isabs(rel_dir) or norm.startswith(".."):
+            raise ReportError(
+                f"refusing to use directory path outside output root: {rel_dir!r}"
+            )
+        target_dir = os.path.join(out_abs, norm)
+        _guard(target_dir)
+        if os.path.lexists(target_dir):
+            if is_reparse_or_link(target_dir) or not os.path.isdir(target_dir):
+                raise ReportError(
+                    f"refusing to write into {target_dir!r}: path is not a regular directory"
+                )
+    for rel_file in expect_files:
+        norm = os.path.normpath(rel_file)
+        if os.path.isabs(rel_file) or norm.startswith(".."):
+            raise ReportError(
+                f"refusing to use file path outside output root: {rel_file!r}"
+            )
+        target_file = os.path.join(out_abs, norm)
+        _guard(target_file)
+        _guard(target_file + ".partial")
+        parent = os.path.dirname(target_file)
+        if os.path.lexists(parent):
+            if is_reparse_or_link(parent) or not os.path.isdir(parent):
+                raise ReportError(
+                    f"refusing to write {target_file!r}: parent {parent!r} is not a regular directory"
+                )
+        for candidate in (target_file, target_file + ".partial"):
+            if os.path.lexists(candidate):
+                if is_reparse_or_link(candidate) or os.path.isdir(candidate):
+                    raise ReportError(
+                        f"refusing to write {candidate!r}: path exists and is a directory or reparse point"
+                    )
 
 
 def _write_text(path: str, text: str) -> None:
     _guard(path)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+    if os.path.lexists(path) and (is_reparse_or_link(path) or os.path.isdir(path)):
+        raise ReportError(
+            f"refusing to write {path!r}: destination is a directory or reparse point"
+        )
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    except OSError as error:
+        raise ReportError(f"could not write {path}: {error}") from None
 
 
 def _write_text_atomic(path: str, text: str) -> None:
@@ -91,18 +225,35 @@ def _write_text_atomic(path: str, text: str) -> None:
     mystery file each time, and it is removed if the write fails.
     """
     _guard(path)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
     temporary = path + ".partial"
+    _guard(temporary)
+    for target in (path, temporary):
+        if os.path.lexists(target) and (is_reparse_or_link(target) or os.path.isdir(target)):
+            raise ReportError(
+                f"refusing to write {target!r}: destination is a directory or reparse point"
+            )
+    directory = os.path.dirname(path) or "."
     try:
+        os.makedirs(directory, exist_ok=True)
         with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+    except ReportError:
+        with contextlib.suppress(OSError):
+            if not is_reparse_or_link(temporary):
+                os.remove(temporary)
+        raise
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            if not is_reparse_or_link(temporary):
+                os.remove(temporary)
+        raise ReportError(f"could not write {path}: {error}") from None
     except BaseException:
         with contextlib.suppress(OSError):
-            os.remove(temporary)
+            if not is_reparse_or_link(temporary):
+                os.remove(temporary)
         raise
 
 
@@ -419,6 +570,20 @@ def summarize_comparison(metrics_by_run: Sequence[dict[str, Any]]) -> str:
     lines = [
         "Comparison across runs (descriptive only - no run is evidence for another).",
         "",
+    ]
+    fixture_runs = [
+        metrics["run_id"]
+        for metrics in metrics_by_run
+        if _comparison_provenance(metrics)["synthetic"]
+    ]
+    if fixture_runs:
+        lines.append(
+            "SYNTHETIC FIXTURE(S): "
+            + ", ".join(fixture_runs)
+            + " - generated data, not measurements and never calibration evidence."
+        )
+        lines.append("")
+    lines += [
         header,
         "-" * len(header),
     ]
@@ -513,7 +678,7 @@ def run_plots(metrics: dict[str, Any], log: Log) -> dict[str, str]:
     recorded = metrics["capture"]["selection"]
     if (
         view.session_index != recorded["selected_session_index"]
-        or (view.run_start_ms or None) != recorded.get("selected_run_start_ms")
+        or view.run_start_ms != recorded.get("selected_run_start_ms")
         or len(view.samples) != metrics["counts"]["samples"]
         or len(view.events) != len(metrics["transitions"]["events"])
     ):
@@ -691,7 +856,7 @@ def _reconcile(out_dir: str, kept: Sequence[str]) -> list[str]:
     removed: list[str] = []
     keep_folded = {str(entry).casefold() for entry in kept}
     plots_dir = os.path.join(out_dir, "plots")
-    plots_is_link = os.path.islink(plots_dir)
+    plots_is_link = is_reparse_or_link(plots_dir)
     plots_is_dir = not plots_is_link and os.path.isdir(plots_dir)
     # Actual on-disk names keyed by folded name, so a managed slot is found
     # whatever letter case the filesystem stored. Unmanaged names never enter
@@ -702,25 +867,29 @@ def _reconcile(out_dir: str, kept: Sequence[str]) -> list[str]:
             for name in sorted(os.listdir(plots_dir)):
                 on_disk.setdefault(name.casefold(), name)
     for relative in list(_REPORT_ARTIFACTS) + list(_MANAGED_PLOTS):
-        if relative.casefold() in keep_folded:
-            continue
-        head, _, tail = relative.partition("/")
-        if head == "plots":
-            if not plots_is_dir:
+        for candidate in (relative, relative + _PARTIAL_SUFFIX):
+            if candidate.casefold() in keep_folded:
                 continue
-            actual = on_disk.get(tail.casefold())
-            if actual is None:
+            head, _, tail = candidate.partition("/")
+            if head == "plots":
+                if not plots_is_dir:
+                    continue
+                actual = on_disk.get(tail.casefold())
+                if actual is None:
+                    continue
+                path = os.path.join(plots_dir, actual)
+                label = f"{head}/{actual}"
+            else:
+                path = os.path.join(out_dir, candidate)
+                label = candidate
+            if is_reparse_or_link(path):
                 continue
-            path = os.path.join(plots_dir, actual)
-            label = f"{head}/{actual}"
-        else:
-            path = os.path.join(out_dir, relative)
-            label = relative
-        if os.path.islink(path):
-            continue
-        if os.path.isfile(path):
-            os.remove(path)
-            removed.append(label)
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError as error:
+                    raise ReportError(f"could not reconcile {label}: {error}") from None
+                removed.append(label)
     if plots_is_dir:
         with contextlib.suppress(OSError):
             if not os.listdir(plots_dir):
@@ -792,10 +961,13 @@ def reconcile_root_reports(
         if actual is None:
             continue
         path = os.path.join(out_dir, actual)
-        if os.path.islink(path):
+        if is_reparse_or_link(path):
             continue
         if os.path.isfile(path):
-            os.remove(path)
+            try:
+                os.remove(path)
+            except OSError as error:
+                raise ReportError(f"could not reconcile {actual}: {error}") from None
             removed.append(actual)
     return removed
 
@@ -827,7 +999,7 @@ def reconcile_stale_run_dirs(out_dir: str, current_run_dirs: Sequence[str]) -> l
     """
     removed: list[str] = []
     runs_dir = os.path.join(out_dir, "runs")
-    if os.path.islink(runs_dir) or not os.path.isdir(runs_dir):
+    if is_reparse_or_link(runs_dir) or not os.path.isdir(runs_dir):
         return removed
     try:
         runs_abs = os.path.abspath(runs_dir)
@@ -841,7 +1013,7 @@ def reconcile_stale_run_dirs(out_dir: str, current_run_dirs: Sequence[str]) -> l
         if _fold_run_dir_name(entry) in current:
             continue
         path = os.path.join(runs_dir, entry)
-        if os.path.islink(path) or not os.path.isdir(path):
+        if is_reparse_or_link(path) or not os.path.isdir(path):
             continue
         if os.path.abspath(path) != os.path.join(runs_abs, entry):
             continue
@@ -852,6 +1024,253 @@ def reconcile_stale_run_dirs(out_dir: str, current_run_dirs: Sequence[str]) -> l
                 os.rmdir(path)
                 removed.append(entry)
     return removed
+
+
+# Publication contract (R1R-K1): a report directory carries at most one
+# authoritative generation, identified by `manifest.json`. The manifest is
+# written last and only after every artifact it names is in place; a
+# directory without a manifest (or with a `.publication_state.json` saying
+# `incomplete`) is not a complete generation and must not be read as one.
+# Rendering happens in memory (or a confined staging directory) before any
+# live managed slot is touched, so a failure during rendering leaves the
+# previous generation intact, and a failure during commit leaves no manifest
+# claiming completeness. Full filesystem transactionality is explicitly NOT
+# claimed: concurrent writers are refused via an exclusive lock file, and a
+# path that changes between validation and use (TOCTOU) is refused where
+# detected but cannot be ruled out on this platform - hostile concurrent
+# mutation of the output tree during publication is unsupported and refused
+# rather than guaranteed safe.
+STAGING_DIR_NAME = ".staging"
+LOCK_FILE_NAME = ".analyze.lock"
+PUBLICATION_STATE_NAME = ".publication_state.json"
+
+
+def acquire_output_lock(out_dir: str) -> None:
+    """Takes the exclusive writer lock, or refuses a concurrent writer.
+
+    The lock is a plain file created exclusively: whoever holds it is the
+    only authorized writer. A second concurrent invocation fails with a
+    controlled error instead of interleaving two generations. A lock left by
+    a killed process is not silently stolen; the message says how to clear
+    it after confirming no writer is running.
+    """
+    _guard(os.path.join(out_dir, LOCK_FILE_NAME))
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, LOCK_FILE_NAME)
+    if os.path.lexists(path) and (
+        is_reparse_or_link(path) or os.path.isdir(path)
+    ):
+        raise ReportError(
+            f"refusing to publish into {out_dir!r}: the writer lock is a "
+            "directory or reparse point"
+        )
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise ReportError(
+            f"refusing to publish into {out_dir!r}: another analysis appears "
+            f"to be writing there ({LOCK_FILE_NAME} exists); concurrent "
+            "writers are not supported - wait for it to finish, or, after "
+            "confirming no writer is running, remove the lock file and retry"
+        ) from None
+    except OSError as error:
+        raise ReportError(f"could not take the writer lock in {out_dir!r}: {error}") from None
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+
+
+def release_output_lock(out_dir: str) -> None:
+    """Releases the writer lock, never following a reparse point."""
+    path = os.path.join(out_dir, LOCK_FILE_NAME)
+    try:
+        if os.path.lexists(path) and not is_reparse_or_link(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def recover_interrupted_publication(out_dir: str) -> list[str]:
+    """Cleans staging and partial-file residue from an interrupted run.
+
+    Runs under the writer lock before rendering, so its deletions cannot race
+    a live commit. Staging content is never promoted here - only discarded -
+    and managed `.partial` leftovers are removed alongside it. Returns what
+    was removed, relative to the output root.
+    """
+    removed: list[str] = []
+    staging = os.path.join(out_dir, STAGING_DIR_NAME)
+    if os.path.lexists(staging):
+        if is_reparse_or_link(staging) or not os.path.isdir(staging):
+            raise ReportError(
+                f"refusing to recover {out_dir!r}: staging path is a reparse "
+                "point or file, not a regular directory"
+            )
+        for root, dirs, files in os.walk(staging, topdown=True):
+            for name in files:
+                full = os.path.join(root, name)
+                if is_reparse_or_link(full):
+                    continue
+                with contextlib.suppress(OSError):
+                    os.remove(full)
+                removed.append(os.path.relpath(full, out_dir))
+            for name in list(dirs):
+                full = os.path.join(root, name)
+                if is_reparse_or_link(full):
+                    dirs.remove(name)
+        with contextlib.suppress(OSError):
+            os.rmdir(staging)
+    return removed
+
+
+def mark_publication_incomplete(out_dir: str, reason: str) -> None:
+    """Records that no complete generation is published, without a manifest.
+
+    Called after the previous manifest is invalidated and before/while the
+    new artifacts commit, so a reader can tell an interrupted tree from a
+    complete one. Never followed by a manifest write on the same path
+    without a successful full commit.
+    """
+    payload = {
+        "publication_state": "incomplete",
+        "reason": reason,
+        "note": (
+            "no complete generation is published: the manifest was invalidated "
+            "before this commit and the commit did not finish"
+        ),
+    }
+    write_json(os.path.join(out_dir, PUBLICATION_STATE_NAME), payload)
+
+
+def clear_publication_state(out_dir: str) -> None:
+    """Removes the incomplete-publication marker after a successful commit."""
+    path = os.path.join(out_dir, PUBLICATION_STATE_NAME)
+    if os.path.lexists(path) and not is_reparse_or_link(path):
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+def render_run_artifacts(
+    metrics: dict[str, Any],
+    log: Log,
+    *,
+    include_plots: bool = True,
+) -> dict[str, tuple[str, str]]:
+    """Renders one run's report files in memory, without touching the disk.
+
+    Returns ``{relative_path: (kind, text)}`` where kind is ``"json"`` (text
+    is the canonical JSON encoding of the metrics) or ``"text"``. The
+    caller commits the mapping through the atomic writers, then reconciles
+    the directory against its keys - so rendering failures never leave a
+    half-written live generation behind.
+    """
+    artifacts: dict[str, tuple[str, str]] = {}
+    artifacts["metrics.json"] = (
+        "json",
+        json.dumps(metrics, sort_keys=True, indent=2, allow_nan=False) + "\n",
+    )
+    artifacts["summary.txt"] = ("text", summarize_run(metrics))
+    if include_plots:
+        for relative, svg in run_plots(metrics, log).items():
+            artifacts[relative] = ("text", svg)
+    if log.errors:
+        artifacts["parse_errors.txt"] = ("text", _parse_errors_text(log))
+    return artifacts
+
+
+def write_text_report(path: str, text: str) -> None:
+    """Writes a text report file through the confinement guard."""
+    _write_text(path, text)
+
+
+def reconcile_run_dir(out_dir: str, kept: Sequence[str]) -> list[str]:
+    """Public alias for per-run reconciliation against a committed set."""
+    return _reconcile(out_dir, kept)
+
+
+def _comparison_provenance(metrics: dict[str, Any]) -> dict[str, Any]:
+    """The normalized fixture provenance of one compared run (R1R-L1)."""
+    declared = (metrics["capture"] or {}).get("provenance_declared")
+    conflict = bool((metrics["capture"] or {}).get("provenance_conflict"))
+    header_synthetic = bool(
+        declared and declared.strip().upper().startswith(synthetic.SYNTHETIC_MARKER)
+    )
+    name_synthetic = is_synthetic(metrics["run_id"], metrics["source"]["path"])
+    is_fixture = header_synthetic or name_synthetic
+    if is_fixture:
+        warning = "SYNTHETIC FIXTURE - generated data, not a measurement"
+        if conflict:
+            warning += (
+                " (a conflicting CAPTURE declaration was also present and was "
+                "not honored)"
+            )
+        elif not header_synthetic:
+            warning += " (synthetic run id or file name; no header declaration)"
+    elif declared:
+        warning = (
+            f"provenance {declared!r} is declared by the capture itself, not "
+            "verified: a CAPTURE label is an untrusted claim, not proof that "
+            "hardware measurements occurred"
+        )
+    else:
+        warning = None
+    return {
+        "synthetic": is_fixture,
+        "provenance_declared": declared,
+        "provenance_conflict": conflict,
+        "provenance_warning": warning,
+    }
+
+
+def build_comparison_payload(
+    metrics_by_run: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """The side-by-side believed-metrics payload, without writing it."""
+    provenance_by_run = [_comparison_provenance(metrics) for metrics in metrics_by_run]
+    return {
+        "note": (
+            "side-by-side believed metrics; comparing runs is descriptive and does not "
+            "establish repeatability without physical measurements"
+        ),
+        "provenance_note": (
+            "CAPTURE provenance is declared by the capture itself and is unverified; "
+            "SYNTHETIC runs are generated fixtures, never calibration evidence. "
+            "Per-run provenance travels in each run entry and must accompany any "
+            "quotation of these numbers."
+        ),
+        "synthetic_runs": [
+            metrics["run_id"]
+            for metrics, provenance in zip(metrics_by_run, provenance_by_run)
+            if provenance["synthetic"]
+        ],
+        "runs": [
+            {
+                "run_id": metrics["run_id"],
+                "synthetic": provenance["synthetic"],
+                "provenance_declared": provenance["provenance_declared"],
+                "provenance_conflict": provenance["provenance_conflict"],
+                "provenance_warning": provenance["provenance_warning"],
+                "samples": metrics["counts"]["samples"],
+                "log_duration_s": metrics["window"]["log_duration_s"],
+                "armed_duration_s": metrics["run_window"]["armed_duration_s"],
+                "internal_run_time_s": metrics["run_window"]["internal_run_time_s"],
+                "final_stop_verification_completed_s": metrics["run_window"][
+                    "final_stop_verification_completed_s"
+                ],
+                "net_travel_m": metrics["position"]["net_travel_m"],
+                "end_position_m": metrics["position"]["end_position_m"],
+                "believed_target_m": metrics["position"]["believed_target_m"],
+                "final_phase": metrics["endpoints"]["final_phase"],
+                "final_fault": metrics["endpoints"]["final_fault"],
+                "final_sample_drops": metrics["drops"]["samples"]["final"],
+                "phase_change_mismatch_count": metrics["transitions"][
+                    "phase_change_mismatch_count"
+                ],
+            }
+            for metrics, provenance in zip(metrics_by_run, provenance_by_run)
+        ],
+    }
 
 
 def run_report(
@@ -866,20 +1285,18 @@ def run_report(
     The directory is reconciled against what this analysis produced, so it never
     holds a mix of two analyses of different bytes.
     """
-    _guard(os.path.join(out_dir, "metrics.json"))
+    validate_output_confinement(
+        out_dir,
+        expect_dirs=["."],
+        expect_files=["metrics.json", "summary.txt"],
+    )
     os.makedirs(out_dir, exist_ok=True)
 
-    artifacts: dict[str, str] = {"metrics.json": ""}
-    artifacts["summary.txt"] = summarize_run(metrics)
-    if include_plots:
-        artifacts.update(run_plots(metrics, log))
-
-    if log.errors:
-        artifacts["parse_errors.txt"] = _parse_errors_text(log)
+    rendered = render_run_artifacts(metrics, log, include_plots=include_plots)
 
     written: list[str] = []
-    for relative, text in artifacts.items():
-        if relative == "metrics.json":
+    for relative, (kind, text) in rendered.items():
+        if kind == "json":
             write_json(os.path.join(out_dir, relative), metrics)
         else:
             _write_text(os.path.join(out_dir, relative), text)
@@ -896,34 +1313,7 @@ def write_manifest(out_dir: str, payload: dict[str, Any]) -> None:
 def write_comparison_report(out_dir: str, metrics_by_run: Sequence[dict[str, Any]]) -> None:
     write_json(
         os.path.join(out_dir, "comparison.json"),
-        {
-            "note": (
-                "side-by-side believed metrics; comparing runs is descriptive and does not "
-                "establish repeatability without physical measurements"
-            ),
-            "runs": [
-                {
-                    "run_id": metrics["run_id"],
-                    "samples": metrics["counts"]["samples"],
-                    "log_duration_s": metrics["window"]["log_duration_s"],
-                    "armed_duration_s": metrics["run_window"]["armed_duration_s"],
-                    "internal_run_time_s": metrics["run_window"]["internal_run_time_s"],
-                    "final_stop_verification_completed_s": metrics["run_window"][
-                        "final_stop_verification_completed_s"
-                    ],
-                    "net_travel_m": metrics["position"]["net_travel_m"],
-                    "end_position_m": metrics["position"]["end_position_m"],
-                    "believed_target_m": metrics["position"]["believed_target_m"],
-                    "final_phase": metrics["endpoints"]["final_phase"],
-                    "final_fault": metrics["endpoints"]["final_fault"],
-                    "final_sample_drops": metrics["drops"]["samples"]["final"],
-                    "phase_change_mismatch_count": metrics["transitions"][
-                        "phase_change_mismatch_count"
-                    ],
-                }
-                for metrics in metrics_by_run
-            ],
-        },
+        build_comparison_payload(metrics_by_run),
     )
     _write_text(os.path.join(out_dir, "comparison.txt"), summarize_comparison(metrics_by_run))
 
@@ -936,6 +1326,16 @@ def write_endpoints_report(out_dir: str, comparison: dict[str, Any]) -> None:
         f"{'delta_m':>9} {'measured_time_s':>16} {'believed_time_s':>16} {'delta_s':>9} "
         f"{'target_m':>9} {'pack_v':>7} {'accepted':>8} {'reason':<20}"
     )
+    synthetic_rows = [
+        str(row["run_id"])
+        for row in comparison["runs"]
+        if row.get("synthetic")
+    ]
+    declared_rows = [
+        f"{row['run_id']}={row.get('capture_provenance_declared')}"
+        for row in comparison["runs"]
+        if not row.get("synthetic") and row.get("capture_provenance_declared")
+    ]
     lines = [
         "External measurement comparison (descriptive only).",
         "",
@@ -944,6 +1344,22 @@ def write_endpoints_report(out_dir: str, comparison: dict[str, Any]) -> None:
         "measured from the start line. A difference is arithmetic, not a conclusion: judging",
         "it needs repeated runs and physical evidence, recorded in VERIFIED_STATE.md.",
         "",
+    ]
+    if synthetic_rows:
+        lines.append(
+            "SYNTHETIC FIXTURE(S): "
+            + ", ".join(synthetic_rows)
+            + " - generated data, not measurements and never calibration evidence."
+        )
+        lines.append("")
+    if declared_rows:
+        lines.append(
+            "Capture-declared provenance (untrusted claims, not verified measurements): "
+            + ", ".join(declared_rows)
+            + ". A CAPTURE label does not prove hardware measurements occurred."
+        )
+        lines.append("")
+    lines += [
         header,
         "-" * len(header),
     ]

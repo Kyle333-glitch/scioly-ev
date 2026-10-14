@@ -666,34 +666,55 @@ def write_samples(out_dir: str, *, force: bool = False) -> list[str]:
     runs over every fixture *before* anything is written, so a refusal leaves the
     directory exactly as it was rather than half-updated.
     """
-    os.makedirs(out_dir, exist_ok=True)
-    plans: list[tuple[str, Optional[str]]] = []
-    conflicts: list[str] = []
-    for spec in SPECS:
-        path = os.path.join(out_dir, f"{spec.run_id.lower().replace('-', '_')}.csv")
-        text = generate_text(spec)
-        existing: Optional[str] = None
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as handle:
-                existing = handle.read()
-        if existing is not None and existing != text:
-            if not force:
-                conflicts.append(path)
-                continue
-        plans.append((path, None if existing == text else text))
+    from .report import ReportError, _guard, _write_text_atomic, is_reparse_or_link
 
-    if conflicts:
-        raise SyntheticWriteError(
-            "refusing to replace existing fixture file(s) whose content differs: "
-            + ", ".join(conflicts)
-            + "; pass --force to rewrite them (they may hold data someone saved under "
-            "a fixture's name)"
-        )
+    try:
+        _guard(out_dir)
+        if os.path.lexists(out_dir) and (
+            is_reparse_or_link(out_dir) or not os.path.isdir(out_dir)
+        ):
+            raise SyntheticWriteError(
+                f"refusing to write fixtures into {out_dir!r}: path is not a regular directory"
+            )
+        plans: list[tuple[str, Optional[str]]] = []
+        conflicts: list[str] = []
+        for spec in SPECS:
+            path = os.path.join(out_dir, f"{spec.run_id.lower().replace('-', '_')}.csv")
+            _guard(path)
+            _guard(path + ".partial")
+            if os.path.lexists(path) and (
+                is_reparse_or_link(path) or os.path.isdir(path)
+            ):
+                raise SyntheticWriteError(
+                    f"refusing to write fixture {path!r}: path is a directory or reparse point"
+                )
+            text = generate_text(spec)
+            existing: Optional[str] = None
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as handle:
+                    existing = handle.read()
+            if existing is not None and existing != text:
+                if not force:
+                    conflicts.append(path)
+                    continue
+            plans.append((path, None if existing == text else text))
 
-    written: list[str] = []
-    for path, text in plans:
-        if text is not None:
-            with open(path, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-        written.append(path)
-    return written
+        if conflicts:
+            raise SyntheticWriteError(
+                "refusing to replace existing fixture file(s) whose content differs: "
+                + ", ".join(conflicts)
+                + "; pass --force to rewrite them (they may hold data someone saved under "
+                "a fixture's name)"
+            )
+
+        os.makedirs(out_dir, exist_ok=True)
+        written: list[str] = []
+        for path, text in plans:
+            if text is not None:
+                _write_text_atomic(path, text)
+            written.append(path)
+        return written
+    except ReportError as error:
+        raise SyntheticWriteError(str(error)) from None
+    except OSError as error:
+        raise SyntheticWriteError(f"could not write synthetic fixtures into {out_dir}: {error}") from None

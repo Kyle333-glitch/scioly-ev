@@ -8449,3 +8449,61 @@ raw evidence: .agent-work/reviews/r1g-m11/ (repro.py, BEFORE.txt,
 AFTER.txt, prerepair-failing.txt, pristine/). Original D54-D65 records
 unchanged. Next eligible action is the independent cumulative R1 review,
 only in a new run. STOP after this stage.
+
+## D67 / R1U - 2026-10-14 - Unified remediation of all R1R telemetry-integrity findings
+
+R1U repairs every actionable software finding from the independent
+cumulative audit R1R (BLOCKED - INTEGRITY DEFECT over seven green builder
+stages) in the Python telemetry tooling only. R1R cataloged 4 new Medium
+(M1 Windows junction escape, M2 contradictory verification evidence still
+eligible, M3 sparse cross-lane rollover fabricating ~49.7 days, M4 valid
+run_start_ms=0 rejected with plots), 2 new Low (L1 root-export provenance
+omissions, L2 half-range event membership), and 2 known open robustness
+items (K1 mixed-generation publication, K2 1e308 distribution overflow),
+plus wording boundaries O1/O2. Reproduced on entry HEAD 07b227e before any
+edit (.agent-work/reviews/r1u/*/before.json: external sentinel deletion and
+overwrite through junctions at exit 0, contradictory-stamp and 5 m/8 m
+order-dependent eligibility, 4294967.275 s sparse duration, zero-actuation
+exit 2 with plots, mixed eligible-root beside null metrics, warning-free
+root exports, uncaught OverflowError, ancient-fault attribution).
+
+Contract changes: reparse-point confinement over every mutation path
+(islink plus junction/reparse metadata; cleanup never traverses, writers
+never write through; preflight, lock, collision refusal; TOCTOU explicitly
+not claimed); verification evidence validated as a set before any candidate
+(contradictory stamps/dwells/runs, same-tick conflicts, mid-drive claims,
+dwell half-range impossibility refuse with reasons; identical duplicates
+stay usable); shared-epoch chronology or explicit unavailability (backfill
+records reuse the prior epoch with one wrap counted; negative phase
+segments unavailable; unbridged half-range gaps and unalignable lanes
+refuse elapsed metrics while lane-local facts stay); zero stays zero in
+plot guards; staged publication (render, preflight, lock, invalidate,
+commit, manifest-with-complete-state last; failures leave no manifest, only
+an incomplete marker, with deterministic recovery); per-row provenance in
+all endpoint/comparison exports with CAPTURE untrusted; exact decimal
+fallback or named refusal for extreme finite arithmetic (no clamping, no
+NaN/Infinity); epoch-coherent event membership under gap ambiguity.
+
+Changed: evtelemetry/report.py, cli.py, metrics.py, parse.py, endpoints.py,
+distribution.py, synthetic.py, tools/telemetry/README.md,
+tests/test_root_reconcile.py (2 publication tests follow the staged
+contract), new 53-test tests/test_r1u_remediation.py (36 of 53 fail or
+error on pristine HEAD: 27 failures + 9 errors recorded in
+.agent-work/reviews/r1u/validation/failing-before-pristine.txt; 53/53 pass
+repaired). After-evidence: .agent-work/reviews/r1u/adversarial/after.json.
+
+Validation on the exact staged content: telemetry 388/388 OK (335 prior +
+53 new; 4 pre-existing symlink-privilege skips), py_compile clean, native
+740/740 in 38 suites, nano_r4/bench/bench-watchdog 3 SUCCESS 0 warnings at
+RAM/Flash 7500/77152, 7700/84664, 7692/84004 (identical to R1R baseline;
+Python-only change is image-neutral), git diff --check clean, each command
+exit 0. Historical audits byte-identical; no firmware, hardware,
+calibration, or push. R1A-R1G preserved; R2/R3/R4 and physical Blocks E/F
+unchanged (calibration NOT READY, Block F NOT READY). This closes the R1R
+software findings; it does not qualify physical readiness.
+
+Full ledger, design, matrix and verdict: .agent-work/stages/R1U.md;
+finding inventory: .agent-work/stages/R1U-FINDING-LEDGER.md; checkpoint:
+.agent-work/utilities/U1-R1U-checkpoint.md (after commit). Original D54-D66
+records unchanged. STOP after R1U checkpoint. NO R2/R3/R4, NO hardware, NO
+firmware upload, NO calibration promotion, NO push.
