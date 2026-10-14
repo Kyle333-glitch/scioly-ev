@@ -173,8 +173,9 @@ void loop() {
     // bench holds ownership, and de-energizes the driver otherwise.
     const evhw::PassOutcome outcome = runtime.runPass(nowMs);
 
-    // The single watchdog checkpoint, as in production.
-    watchdog.endOfPass(outcome.refreshable(), nowMs);
+    // The single watchdog checkpoint, as in production: stamped with the
+    // refresh event's own time (R2/M2), not the pass-start reading.
+    watchdog.endOfPass(outcome.refreshable(), millis());
 
     // Low-priority work, in the production order: the operator's own output first,
     // then the console's read and dispatch, then the telemetry drain - so an

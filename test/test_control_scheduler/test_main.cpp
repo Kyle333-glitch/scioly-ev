@@ -341,6 +341,35 @@ void test_start_rearms_from_a_new_boundary(void) {
     expectDue(20U, 0U, 0U, decision);
 }
 
+// --- R2/L4: defined wait at the signed boundary ------------------------------
+//
+// The not-due wait is the wrapped distance to the deadline. Negating the
+// signed difference is undefined behavior exactly at INT32_MIN, so the wait
+// is formed with unsigned arithmetic instead - the same half-range
+// eligibility, without the overflow.
+void test_wait_at_the_int32_min_boundary_is_defined(void) {
+    ev::ControlScheduler scheduler(kPeriodMs);
+    scheduler.start(0U);
+    // nextDeadlineMs is 20; choose nowMs so (int32)(nowMs - 20) == INT32_MIN.
+    const uint32_t nowMs = 20U + 0x80000000u;
+    const ev::ControlTickDecision decision = scheduler.decide(nowMs);
+    expectNotDue(0x80000000u, decision);
+}
+
+void test_half_range_eligibility_is_unchanged_at_the_extremes(void) {
+    // The half-range edge turns exactly at a zero difference: INT32_MAX past
+    // the deadline is the maximum lateness (due), INT32_MIN is the maximum
+    // wait (not due). The fix changes only how the wait is formed, never
+    // which side of the edge a reading falls on.
+    ev::ControlScheduler scheduler(kPeriodMs);
+    scheduler.start(0U);
+    const ev::ControlTickDecision due = scheduler.decide(20U + 0x7FFFFFFFu);
+    expectDue(20U + 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu / kPeriodMs, due);
+    ev::ControlScheduler scheduler2(kPeriodMs);
+    scheduler2.start(0U);
+    expectNotDue(0x80000000u, scheduler2.decide(20U + 0x80000000u));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_unstarted_scheduler_is_never_due);
@@ -356,5 +385,7 @@ int main(int, char**) {
     RUN_TEST(test_deadline_and_dt_are_wraparound_safe);
     RUN_TEST(test_wait_across_the_wrap_is_a_small_interval);
     RUN_TEST(test_start_rearms_from_a_new_boundary);
+    RUN_TEST(test_wait_at_the_int32_min_boundary_is_defined);
+    RUN_TEST(test_half_range_eligibility_is_unchanged_at_the_extremes);
     return UNITY_END();
 }

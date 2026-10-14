@@ -653,6 +653,62 @@ void test_reset_clears_an_earned_permission(void) {
     TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
 }
 
+// --- R2/M3: reversal timeout/dwell headroom ----------------------------------
+//
+// The reversal timeout bounds the whole sequence - ramp-down, brake command
+// and dwell verification together - and the timeout is evaluated before the
+// verification step on every update. A timeout at or below the dwell it has
+// to verify therefore refuses before the stop can ever be earned: the
+// outcome stays safe (StopRequired) but the configuration is impossible, so
+// validation must refuse it. The fixture dwell below is 0.2 s.
+
+ev::ReversalConfig reversalConfigWithTimeout(double timeoutS) {
+    return ev::ReversalConfig(stopConfig(measured(0.05), measured(0.2)), measured(timeoutS));
+}
+
+void test_a_reversal_timeout_at_or_below_its_dwell_is_rejected(void) {
+    const double impossible[] = {0.2, 0.1, 0.05, 0.001};
+    for (double timeoutS : impossible) {
+        const ev::ReversalConfigValidation verdict =
+            ev::validateReversalConfig(reversalConfigWithTimeout(timeoutS));
+        TEST_ASSERT_FALSE(verdict.ok);
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(ev::ReversalConfigError::TimeoutWithoutDwellHeadroom),
+            static_cast<int>(verdict.error));
+    }
+}
+
+void test_a_reversal_timeout_just_above_its_dwell_is_accepted(void) {
+    TEST_ASSERT_TRUE(ev::validateReversalConfig(reversalConfigWithTimeout(0.201)).ok);
+    TEST_ASSERT_TRUE(ev::validateReversalConfig(reversalConfigWithTimeout(3.0)).ok);
+}
+
+void test_reversal_timeout_headroom_keeps_existing_refusals_first(void) {
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::ReversalConfigError::NonFiniteTimeout),
+        static_cast<int>(
+            ev::validateReversalConfig(reversalConfigWithTimeout(std::nan(""))).error));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::ReversalConfigError::NonPositiveTimeout),
+        static_cast<int>(ev::validateReversalConfig(reversalConfigWithTimeout(0.0)).error));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::ReversalConfigError::NonPositiveTimeout),
+        static_cast<int>(ev::validateReversalConfig(reversalConfigWithTimeout(-2.0)).error));
+}
+
+void test_an_impossible_reversal_timeout_cannot_be_sequenced(void) {
+    // Belt and braces at the sequencer: a config the validator refuses also
+    // refuses at begin, immediately and latched, rather than timing out.
+    ev::ReversalSequencer sequencer(reversalConfigWithTimeout(0.1));
+    TEST_ASSERT_FALSE(sequencer.configUsable());
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::ReversalBeginStatus::ConfigIsNotUsable),
+        static_cast<int>(sequencer.beginReversal(ev::MotionDirection::Forward,
+                                                ev::MotionDirection::Reverse, 1000U)));
+    expectPhase(ev::ReversalPhase::StopRequired, sequencer.update(1010U, nearZero(true)));
+    TEST_ASSERT_FALSE(sequencer.directionChangePermitted());
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_config_refuses_placeholders_and_degenerate_values);
@@ -675,5 +731,9 @@ int main(int, char**) {
     RUN_TEST(test_a_refusal_keeps_reporting_the_time_it_was_given);
     RUN_TEST(test_reset_ends_a_latched_refusal);
     RUN_TEST(test_reset_clears_an_earned_permission);
+    RUN_TEST(test_a_reversal_timeout_at_or_below_its_dwell_is_rejected);
+    RUN_TEST(test_a_reversal_timeout_just_above_its_dwell_is_accepted);
+    RUN_TEST(test_reversal_timeout_headroom_keeps_existing_refusals_first);
+    RUN_TEST(test_an_impossible_reversal_timeout_cannot_be_sequenced);
     return UNITY_END();
 }

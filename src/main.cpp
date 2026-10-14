@@ -146,8 +146,12 @@ void loop() {
     const evhw::PassOutcome outcome = runtime.runPass(nowMs);
 
     // The single watchdog health checkpoint. `refreshable()` is false only when a
-    // control tick ran and did not complete in order.
-    watchdog.endOfPass(outcome.refreshable(), nowMs);
+    // control tick ran and did not complete in order. The stamp is read again
+    // here - it is the refresh event's own time (R2/M2), not the pass-start
+    // reading above: the checkpoint measures its inter-refresh gaps from the
+    // instant the refresh is decided, at millisecond resolution, so a long
+    // pass is measured as a long gap rather than hidden inside a stale stamp.
+    watchdog.endOfPass(outcome.refreshable(), millis());
 
     // Low-priority work, after the checkpoint: the operator interface first (a
     // command's answer and the queued records), then the status LED. Neither can

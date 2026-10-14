@@ -40,10 +40,13 @@ namespace ev {
 //   handling during the pause. Toggling between powered and unpowered therefore
 //   cannot renew the allowance indefinitely: only genuine progress resets it.
 // * Inert without a validated bound: a `Provisional` (or non-finite or
-//   non-positive) timeout, an unmeasured/unknown tick polarity, or a dropped
-//   sample pauses the monitor instead of faulting. Production therefore gains
-//   no new refusal while its placeholders are unmeasured - and no run may be
-//   armed on them either (`validateRunPhaseConfig()`).
+//   non-positive) timeout or an unmeasured/unknown tick polarity pauses the
+//   monitor instead of faulting. Production therefore gains no new refusal
+//   while its placeholders are unmeasured - and no run may be armed on them
+//   either (`validateRunPhaseConfig()`). A dropped sample with a validated
+//   bound is NOT a pause: sustained-invalid exposure during accepted power
+//   consumes the same allowance a frozen count consumes (R2/S18R-M1), so
+//   repeated invalid readings can withhold evidence but never renew power.
 //
 // What this module is not
 //
@@ -132,12 +135,13 @@ class EncoderProgressMonitor {
     bool update(int32_t ticks, bool sampleFresh, bool poweredAccepted, bool legForward,
                 const Sourced<MotionDirection>& positiveTicksDirection,
                 const Sourced<double>& timeoutS, uint32_t dtMs) {
-        // No progress fact without a sample, a usable bound, or a usable
-        // polarity: follow the position so a later powered cycle is judged on
-        // movement under power, and report no violation. This pauses rather
-        // than faults, so placeholders and dropouts can only withhold
-        // protection, never stop a run for a reason nobody established.
-        if (!sampleFresh || !encoderProgressLimitUsable(timeoutS) ||
+        // No enforcement without a validated bound: a placeholder timeout or
+        // polarity is data with no runtime effect. Follow the position so a
+        // later powered cycle is judged on movement under power, and report
+        // no violation. This pauses rather than faults, so placeholders can
+        // only withhold protection, never stop a run for a reason nobody
+        // established.
+        if (!encoderProgressLimitUsable(timeoutS) ||
             !encoderProgressPolarityUsable(positiveTicksDirection)) {
             referenceTicks_ = ticks;
             hasReference_ = true;
@@ -157,12 +161,32 @@ class EncoderProgressMonitor {
         // takes its reference now and owns the full timeout from here. There
         // is no separate startup constant: the allowance is the same bound,
         // baselined at the first accepted authorization rather than at
-        // announce/arm (which are operator decisions, not motion).
+        // announce/arm (which are operator decisions, not motion). An invalid
+        // first sample baselines identically - it owns the allowance, not a
+        // fault - and every invalid cycle after it consumes the allowance
+        // below instead of pausing (R2/S18R-M1).
         if (!hasReference_) {
             referenceTicks_ = ticks;
             hasReference_ = true;
             poweredMsWithoutProgress_ = 0U;
             return false;
+        }
+        // R2/S18R-M1: sustained-invalid exposure. No usable observation on a
+        // powered cycle with a validated bound is powered exposure without
+        // progress evidence, so it consumes the SAME allowance a frozen count
+        // consumes: accumulate the elapsed control interval and fault at the
+        // bound. Repeated short invalid readings accumulate across cycles -
+        // only genuine expected-direction progress resets - and alternating
+        // invalid with frozen-but-valid cannot renew power either. The
+        // reference still follows the reported count, so a later powered
+        // cycle with fresh samples is judged on movement under power from
+        // here, not on the invalid interval. A single missed sample (tens of
+        // milliseconds against a hundreds-of-milliseconds bound) never faults:
+        // a temporarily missing sample and a sustained invalid condition are
+        // distinguished by the same bound.
+        if (!sampleFresh) {
+            referenceTicks_ = ticks;
+            return consume(dtMs, timeoutS);
         }
         // Signed advance in the expected direction, formed in 64 bits so a
         // full-range int32 reading pair is not undefined behaviour. Strictly
@@ -179,6 +203,15 @@ class EncoderProgressMonitor {
         }
         // No progress under power: consume the allowance by the interval that
         // actually elapsed, saturating instead of wrapping on extreme gaps.
+        return consume(dtMs, timeoutS);
+    }
+
+    // Consumes the powered-without-progress allowance by the interval that
+    // actually elapsed - saturating instead of wrapping on extreme gaps -
+    // and reports whether the validated bound is reached. Shared by the
+    // frozen/wrong-sign path above and the sustained-invalid path (R2/S18R-M1)
+    // so both shapes of missing progress evidence drain one allowance.
+    bool consume(uint32_t dtMs, const Sourced<double>& timeoutS) {
         const uint64_t grown =
             static_cast<uint64_t>(poweredMsWithoutProgress_) + static_cast<uint64_t>(dtMs);
         poweredMsWithoutProgress_ =

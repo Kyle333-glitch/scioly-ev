@@ -283,7 +283,12 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // single fault stop - so a violation stops this cycle's authorization, not
     // the next one's. Priority is driver first (electrical), then feedback
     // (active-travel safety), then the run-scoped duration backstop; every one
-    // answers with the same Disable stop.
+    // answers with the same Disable stop. The sample is always fresh here by
+    // construction: the interrupt-sampled count exists every cycle, so there
+    // is no "no tick sample" state to report (R2/S18R-M1). Encoder invalidity
+    // in production appears as derived-estimate staleness, which denies power
+    // the same cycle through `requiredDataFresh`; the monitor's own invalid
+    // path bounds scripted dropouts in the host mirror.
     const bool feedbackViolated = feedbackMonitor_.update(
         ticks.ticks, true, lastCycleAuthorizedPowered_, legForward_,
         vehicleConfig::positiveTicksDirection(), run_.config().encoderProgressTimeoutS,

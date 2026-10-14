@@ -237,7 +237,11 @@ public:
 
     // The single refresh path. `passCompleted` must be this pass's own verdict:
     // the loop reached its end and the control tick it ran, if any, completed in
-    // the frozen order.
+    // the frozen order. `nowMs` must be the refresh event's own clock reading -
+    // the loop re-reads `millis()` for this call (R2/M2) - because the
+    // inter-refresh gaps below are measured from it: a pass-start stamp would
+    // report every refresh as older than it is and hide one pass duration of
+    // gap. Resolution is one millisecond, which is the clock's own.
     void endOfPass(bool passCompleted, uint32_t nowMs) {
         ++passes_;
         if (!passCompleted) {

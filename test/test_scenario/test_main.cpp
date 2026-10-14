@@ -2831,6 +2831,173 @@ void test_a_feedback_fault_latches_and_a_reset_preserves_the_barrier(void) {
     expectTraceInvariants(harness);
 }
 
+// --- R2/S18R-M1: sustained-invalid-feedback composition ------------------------
+//
+// These cases run the full composed chain - decoder, odometry, estimator,
+// run policy, shaper, regulator, safety boundary and the mock actuator
+// boundary in the production stage order - with scripted invalid encoder
+// observations. Every timeout below is a synthetic host-only fixture, never
+// a physical claim: the 0.5 s feedback bound is unvalidated (P-H5/H7/H9),
+// and a pass here says nothing about electrical disable timing, which no
+// mocked I/O can observe.
+
+void test_accepted_power_never_survives_stale_feedback(void) {
+    // The S18R-M1 full-runtime case: once samples stop arriving during
+    // authorized drive, accepted power must end within the freshness window
+    // (60 ms, three control cycles) - revoked by the stale-data denial in
+    // the same cycle the data goes stale - and the run must end at the
+    // phase bound, never at the feedback bound: a dropout is not a freeze.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Approach, driver));
+    TEST_ASSERT_TRUE(stepUntilDriveAuthorized(harness, driver));
+    const size_t dropoutStart = harness.trace().size();
+    CycleScript dropout = driver.next(harness);
+    dropout.sensorSampleFresh = false;
+    const CycleRecord faulted = starveUntilFault(harness, dropout);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    uint32_t drivesAfterDropout = 0U;
+    for (size_t i = dropoutStart; i < harness.trace().size(); ++i) {
+        if (harness.trace()[i].commandedClass == ev::ActuationClass::Drive) {
+            ++drivesAfterDropout;
+        }
+        TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                              static_cast<int>(harness.trace()[i].faultOfRecord));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(drivesAfterDropout <= 3U,
+                             "accepted power survived stale feedback");
+    expectTraceInvariants(harness);
+}
+
+void test_a_feedback_fault_disables_at_the_actuator_in_the_same_cycle(void) {
+    // Driver write ordering on the fault cycle: the authorized command the
+    // fault produces is Disabled, and the mock actuator boundary receives
+    // exactly that command - no powered write leaks past the fault, and no
+    // drive is ever written again afterwards.
+    ScenarioHarness harness(plantedFixtures());
+    PlantModel plant(PlantConfig{1.0, 1.0, /*frozen=*/true});
+    harness.attachPlant(plant);
+    announceAndArm(harness);
+    NominalDriver driver;
+    const CycleRecord faulted = plantedDriveUntilFault(harness, driver, 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    TEST_ASSERT_EQUAL_UINT32(harness.trace().size(), harness.actuatorRecords().size());
+    size_t faultIndex = harness.trace().size();
+    for (size_t i = 0U; i < harness.trace().size(); ++i) {
+        if (harness.trace()[i].faultOfRecord == ev::FaultCode::EncoderFeedbackLost) {
+            faultIndex = i;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(faultIndex < harness.trace().size());
+    for (size_t i = faultIndex; i < harness.actuatorRecords().size(); ++i) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::ActuationClass::Drive),
+                                      static_cast<int>(harness.actuatorRecords()[i].actuationClass),
+                                      "a drive reached the actuator at or after the fault");
+    }
+    expectTraceInvariants(harness);
+}
+
+void test_short_dropouts_separated_by_progress_never_fault(void) {
+    // A temporarily missing sample is not a sustained invalid condition:
+    // two dropped samples separated by healthy advancing cycles must keep
+    // the run alive indefinitely.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Approach, driver));
+    for (uint32_t round = 0U; round < 40U; ++round) {
+        for (uint32_t cycle = 0U; cycle < 2U; ++cycle) {
+            CycleScript dropout = driver.next(harness);
+            dropout.sensorSampleFresh = false;
+            harness.step(dropout);
+        }
+        for (uint32_t cycle = 0U; cycle < 4U; ++cycle) {
+            harness.step(driver.next(harness));
+        }
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                              static_cast<int>(harness.faultCode()));
+    }
+    expectTraceInvariants(harness);
+}
+
+void test_a_feedback_fault_yields_to_a_concurrent_driver_fault(void) {
+    // Fault precedence at the composed layer: frozen counts under power with
+    // a simultaneously observed driver fault latch the electrical fault, not
+    // the feedback fault. Both answer with the same fault stop.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Approach, driver));
+    TEST_ASSERT_TRUE(stepUntilDriveAuthorized(harness, driver));
+    CycleScript frozen;
+    frozen.fault = ev::FaultCode::DriverFaultBar;
+    const CycleRecord faulted = starveUntilFault(harness, frozen, 500U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::DriverFaultBar),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::AuthzOutcome::ForcedFaultStop),
+                          static_cast<int>(faulted.outcome));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(faulted.commandedMode));
+    expectTraceInvariants(harness);
+}
+
+void test_a_dropout_in_the_terminal_phase_ends_in_the_phase_timeout(void) {
+    // Invalid feedback while terminal: the final stop can never verify on
+    // evidence the run does not have, so the FinalBrake bound ends the run.
+    // Nothing here claims the stop, and no feedback fault masks the wait.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::FinalBrake, driver),
+                             "the nominal run never reached its terminal phase");
+    CycleScript dropout;
+    dropout.sensorSampleFresh = false;
+    const CycleRecord faulted = starveUntilFault(harness, dropout);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::PhaseTimeout),
+                          static_cast<int>(faulted.faultOfRecord));
+    TEST_ASSERT_NOT_EQUAL(static_cast<int>(ev::RunPhase::Done),
+                            static_cast<int>(faulted.phase));
+    for (const CycleRecord& record : harness.trace()) {
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                                      static_cast<int>(record.faultOfRecord),
+                                      "a dropout is not a frozen count");
+    }
+    expectTraceInvariants(harness);
+}
+
+void test_a_reset_after_a_feedback_fault_starts_a_clean_run(void) {
+    // Reset and re-arm after a feedback fault: the new run owns a fresh
+    // allowance and proves progress anew - the fault does not leak into it,
+    // and healthy powered travel authorizes drive again.
+    ScenarioHarness harness(fixtures());
+    announceAndArm(harness);
+    NominalDriver driver;
+    TEST_ASSERT_TRUE(driveToPhase(harness, ev::RunPhase::Approach, driver));
+    const CycleRecord faulted = starveUntilFault(harness, CycleScript(), 1000U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::EncoderFeedbackLost),
+                          static_cast<int>(faulted.faultOfRecord));
+    harness.resetForNewRun();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::RunPhase::Idle),
+                          static_cast<int>(harness.phase()));
+    announceAndArm(harness);
+    NominalDriver secondDriver;
+    TEST_ASSERT_TRUE_MESSAGE(driveToPhase(harness, ev::RunPhase::Approach, secondDriver),
+                             "the run after the reset never reached Approach");
+    TEST_ASSERT_TRUE_MESSAGE(stepUntilDriveAuthorized(harness, secondDriver),
+                             "the run after the reset never authorized drive");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::FaultCode::None),
+                          static_cast<int>(harness.faultCode()));
+    expectTraceInvariants(harness);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_the_nominal_scenario_reaches_done_through_the_real_chain);
@@ -2882,5 +3049,11 @@ int main(int, char**) {
     RUN_TEST(test_a_large_scheduling_gap_without_progress_faults_at_once);
     RUN_TEST(test_a_stalled_clock_with_frozen_counts_faults_nothing);
     RUN_TEST(test_a_feedback_fault_latches_and_a_reset_preserves_the_barrier);
+    RUN_TEST(test_accepted_power_never_survives_stale_feedback);
+    RUN_TEST(test_a_feedback_fault_disables_at_the_actuator_in_the_same_cycle);
+    RUN_TEST(test_short_dropouts_separated_by_progress_never_fault);
+    RUN_TEST(test_a_feedback_fault_yields_to_a_concurrent_driver_fault);
+    RUN_TEST(test_a_dropout_in_the_terminal_phase_ends_in_the_phase_timeout);
+    RUN_TEST(test_a_reset_after_a_feedback_fault_starts_a_clean_run);
     return UNITY_END();
 }
