@@ -99,7 +99,8 @@ the live ones (`configurationBuildChecks()`, `src/VehicleConfig.h`).
   the two brake offsets follow at P-H7 Part B) and the first #10 slip evidence;
   H5 records the open-loop effort-to-speed relation (`kPlannedMinimumCruiseMps`,
   the velocity ceilings); H6 records the feed-forward from H5 and a conservative
-  P/I bootstrap (`ControllerConfigValid`).
+  P/I candidate (Provisional with its derivation cited - `ControllerConfigValid`
+  still fails on it until P-H7 Part L evaluates and promotes the pair).
 - **Conservative bootstrap - before the first armed run.** The run path cannot arm
   on placeholders, and its own timeouts, ceilings and plan dependencies cannot be
   measured without it, so each is first set from recorded bounded-trial evidence
@@ -112,7 +113,15 @@ the live ones (`configurationBuildChecks()`, `src/VehicleConfig.h`).
   (H5's measured steady speeds, reduced by the margin);
   and the plan's two dependencies (`kPlannedContactWindowToleranceM`,
   `kPlannedForwardStopMarginBeyondBottleLineM`, from P-H7 Part B's braking series
-  plus the placement range plus the margin). **No promotion touching
+  plus the placement range plus the margin). A conservative bootstrap is honest
+  only for a quantity the trials actually observed - a measured worst case plus a
+  margin in the safe direction - and it stays flagged until the run-path series
+  supersedes it. **Controller gains are excluded from bootstrapping**: P-H6's
+  computed P/I pair was never executed in closed loop anywhere, so no margin
+  and no flag can make it `Measured`; it stays a Provisional derived candidate
+  until P-H7 Part L (or an authorized equivalent) evaluates it, and everything
+  armed downstream stays blocked until then (P-H6 "Why the bootstrap cannot
+  self-qualify", R3/M6). **No promotion touching
   `runExecutionDependencies()` before the S16 arming gate exists.** That gate
   landed in S16 (2026-10-08, D53; Option D in `ARMING-PLAN-GATE-REVIEW.md`): `arm`
   is refused with the named `ExecutionPlanNotEstablished` refusal while the
@@ -309,7 +318,10 @@ protocol lists only its *additional* hazards.
 
 A session that is not recorded is not evidence. For every protocol, capture:
 
-- the build identity - `VERSION,fw=...` from the interface, plus `git rev-parse
+- the build identity - `VERSION` with its `rev=`/`dirty=`/`variant=`/`cfg=`
+  fields from the interface (R3/L3: the revision, dirty state, image variant
+  and configuration fingerprint that tell this image from any other),
+  plus `git rev-parse
   HEAD` of the tree that was flashed, **and which image it was**: `BOOT,...` for
   the vehicle image, or `bench health`'s `image=bench` for a bench session. A
   capture that does not say which image produced it cannot be re-read later;

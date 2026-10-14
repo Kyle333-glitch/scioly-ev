@@ -45,7 +45,7 @@ firmware image, motor temperature (let it return to ambient between runs).
   value chosen later is chosen from evidence. These are policy values, not
   measurements - nothing measured here becomes a `Measured` fact. They are
   **compile-time constants**: each candidate is a rebuild and a reflash, so record
-  the flashed image identity (`VERSION,fw=` and `git rev-parse HEAD`) with each
+  the flashed image identity (`VERSION` with `rev=`/`dirty=`/`variant=`/`cfg=` and `git rev-parse HEAD`) with each
   candidate's series, or the series is unattributable (C16).
 
 ## Measurements and logs

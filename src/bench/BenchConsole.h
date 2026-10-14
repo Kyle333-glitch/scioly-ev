@@ -4,6 +4,7 @@
 
 #include <BenchCommand.h>
 #include <BenchDrive.h>
+#include <BenchLineAccounting.h>
 #include <BoundedText.h>
 #include <DriverFault.h>
 #include <Motion.h>
@@ -159,13 +160,13 @@ constexpr uint32_t kH1aHoldMaxMs = 30000U;
 // transport's line slots and every slot has the same length (`ev::LineFramer`,
 // which holds one active and at most one waiting line since S15's M2 repair).
 //
-// **The derived worst case of the widest readout, `healthLine()`, is 534
+// **The derived worst case of the widest readout, `healthLine()`, is 562
 // characters** - every `uint32` field at its full ten digits, which the
 // free-running counters really can reach (`passes` needs roughly 26 h at the
 // measured ~46,000 passes/s; `last_refresh_ms` reaches ten digits at the
 // `millis()` wrap). That was **86 characters over** the 448 a previous shared
 // capacity held. S8 raised the capacity to 576 for the telemetry sample's own
-// derived worst case (567), so the readout now fits with 42 characters to spare -
+// derived worst case (567), so the readout now fits with 14 characters to spare -
 // but the room is still finite and still shared, so the two reasons this number
 // is recorded stand:
 //
@@ -218,15 +219,22 @@ inline ev::CommandLineReader& lineReader() {
 }
 
 // Counters of the console's own outcomes: evidence for a bench session about
-// whether the interface itself is doing what the operator expects.
-inline uint32_t& acceptedLines() {
-    static uint32_t count = 0U;
-    return count;
+// whether the interface itself is doing what the operator expects. The
+// contract is `ev::BenchLineCounters` (`lib/evcore/src/BenchLineAccounting.h`):
+// every answered line is recorded exactly once - accepted, refused or
+// forwarded - at the single dispatch choke points (`handleLine()` for lines,
+// `service()` for framing errors), never in the leaf verbs. `received()` is
+// derived (accepted + refused + forwarded); empty lines are excluded because
+// they receive no answer, exactly as the operator path treats them.
+inline ev::BenchLineCounters& lineCounters() {
+    static ev::BenchLineCounters counters;
+    return counters;
 }
 
-inline uint32_t& refusedLines() {
-    static uint32_t count = 0U;
-    return count;
+// The one recording choke point for dispatched lines. Exactly one call per
+// answered line; a verb that records anywhere else double-counts.
+inline void recordLineOutcome(ev::BenchLineOutcome outcome) {
+    lineCounters().record(outcome);
 }
 
 inline uint32_t& lostResponses() {
@@ -408,8 +416,12 @@ inline void healthLine(const VehicleRuntime& runtime, const WatchdogCheckpoint& 
     text.field("armed").appendBool(runtime.armed());
     // The console's own interface counters, so a session can tell "I typed it and
     // nothing happened" from "it was refused, and why" without re-reading the log.
-    text.field("lines_accepted").appendUnsigned(detail::acceptedLines());
-    text.field("lines_refused").appendUnsigned(detail::refusedLines());
+    // `lines_forwarded` counts non-bench lines handed to the production
+    // interface (whose own outcome the production counters own); it is neither
+    // accepted nor refused here, so one command is never counted twice.
+    text.field("lines_accepted").appendUnsigned(detail::lineCounters().accepted);
+    text.field("lines_refused").appendUnsigned(detail::lineCounters().refused);
+    text.field("lines_forwarded").appendUnsigned(detail::lineCounters().forwarded);
     text.field("responses_lost").appendUnsigned(detail::lostResponses());
     respond(text);
 }
@@ -612,19 +624,21 @@ inline void watchdogLine() {
 // typed `clear`, saw a readout and believed the flags were reset would draw the
 // wrong conclusion from the next read - and the whole point of this instrument is
 // that a conclusion about a reset is drawn from these numbers.
-inline void applyResetCause(const ev::BenchTokens& tokens) {
+//
+// Returns whether the line was accepted. The caller records the outcome; this
+// function only answers.
+inline bool applyResetCause(const ev::BenchTokens& tokens) {
     if (tokens.count > 3U) {
-        ++detail::refusedLines();
         refuseLine("TooManyTokens");
-        return;
+        return false;
     }
     if (tokens.count == 3U &&
         !ev::benchTokenEquals(tokens.token(2), tokens.tokenLength(2), "clear")) {
-        ++detail::refusedLines();
         refuseLine("UnknownResetCauseArgument");
-        return;
+        return false;
     }
     resetCauseLine(tokens.count == 3U);
+    return true;
 }
 
 inline void helpLine() {
@@ -650,33 +664,39 @@ inline void helpLine() {
 // Refused while an abort is latched, which is what makes "stop" mean stopped until
 // someone looks at why, and refused while already armed or driving, so a repeated
 // arm can neither reset the per-arm budget nor cancel a live command.
-inline void applyArm() {
+//
+// Returns whether the line was accepted. The caller records the outcome; this
+// function only answers.
+inline bool applyArm() {
     const ev::BenchArmRefusal refusal = detail::drive().arm();
     if (refusal != ev::BenchArmRefusal::None) {
         refuseLine(ev::benchArmRefusalName(refusal));
-        return;
+        return false;
     }
     ackLine("bench_arm");
+    return true;
 }
 
 // `bench drive <fwd|rev> <permille> <ms>` - one bounded command. Whether the line
 // is well formed is `ev::parseBenchDriveRequest()`'s decision (host-tested);
 // whether the request is within the bench ceilings is `ev::BenchDrive`'s, so the
 // reason an operator sees always names the limit that refused it.
-inline void applyDrive(const ev::BenchTokens& tokens, uint32_t nowMs) {
+//
+// Returns whether the line was accepted. The caller records the outcome; this
+// function only answers.
+inline bool applyDrive(const ev::BenchTokens& tokens, uint32_t nowMs) {
     const ev::BenchDriveRequest request = ev::parseBenchDriveRequest(tokens);
     if (request.error != ev::BenchArgumentError::None) {
         refuseLine(ev::benchArgumentErrorName(request.error));
-        return;
+        return false;
     }
 
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
     // At most one bench instrument may hold the driver. The diagnostic refuses a
     // drive while it holds; this refuses a drive while the hold is applied.
     if (detail::h1aHoldActive()) {
-        ++detail::refusedLines();
         refuseLine("H1AHoldInProgress");
-        return;
+        return false;
     }
 #endif
 
@@ -684,15 +704,15 @@ inline void applyDrive(const ev::BenchTokens& tokens, uint32_t nowMs) {
         detail::drive().command(nowMs, request.mode, request.permille, request.durationMs);
     if (refusal != ev::BenchCommandRefusal::None) {
         refuseLine(ev::benchCommandRefusalName(refusal));
-        return;
+        return false;
     }
 
-    ++detail::acceptedLines();
     driveLine();
+    return true;
 }
 
 // `bench stop` - the abort. De-energizes now and latches until `bench reset`.
-inline void applyStop() {
+inline bool applyStop() {
     detail::drive().abort();
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
     // `bench stop` means stopped, including the temporary H1A hold.
@@ -703,11 +723,12 @@ inline void applyStop() {
 #endif
     ackLine("bench_stop");
     driveLine();
+    return true;
 }
 
 // `bench reset` - the deliberate exit from a latch. Leaves the instrument
 // disarmed: re-arming is a separate decision.
-inline void applyReset() {
+inline bool applyReset() {
     detail::drive().reset();
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
     if (detail::h1aHoldActive()) {
@@ -717,6 +738,7 @@ inline void applyReset() {
 #endif
     ackLine("bench_reset");
     driveLine();
+    return true;
 }
 
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
@@ -752,52 +774,46 @@ inline void h1aHoldLine(uint32_t nowMs) {
     respond(text);
 }
 
-inline void applyH1aAwakeHold(const ev::BenchTokens& tokens, uint32_t nowMs) {
+inline bool applyH1aAwakeHold(const ev::BenchTokens& tokens, uint32_t nowMs) {
     if (tokens.count == 2U) {
+        // A state query, not a hold: answered like any other read-only verb.
         h1aHoldLine(nowMs);
-        return;
+        return true;
     }
     if (tokens.count != 3U) {
-        ++detail::refusedLines();
         refuseLine("Usage: bench h1a-brake <ms>");
-        return;
+        return false;
     }
     uint32_t durationMs = 0U;
     if (!ev::parseUnsignedDecimal(tokens.token(2), tokens.tokenLength(2), durationMs)) {
-        ++detail::refusedLines();
         refuseLine("DurationNotADecimal");
-        return;
+        return false;
     }
     if (durationMs == 0U) {
-        ++detail::refusedLines();
         refuseLine("DurationZero");
-        return;
+        return false;
     }
     if (durationMs > benchConfig::kH1aHoldMaxMs) {
-        ++detail::refusedLines();
         refuseLine("DurationAboveCeiling");
-        return;
+        return false;
     }
     if (detail::h1aHoldActive()) {
-        ++detail::refusedLines();
         refuseLine("H1AHoldInProgress");
-        return;
+        return false;
     }
     if (detail::drive().output().isDriving()) {
-        ++detail::refusedLines();
         refuseLine("H1ADriveActive");
-        return;
+        return false;
     }
     if (detail::drive().state() != ev::BenchDriveState::Armed) {
-        ++detail::refusedLines();
         refuseLine("H1ANotArmed");
-        return;
+        return false;
     }
     detail::h1aHoldActive() = true;
     detail::h1aHoldExpiresAtMs() = nowMs + durationMs;
     ++detail::h1aHoldsIssued();
-    ++detail::acceptedLines();
     h1aHoldLine(nowMs);
+    return true;
 }
 #endif  // EV_BENCH_H1A_DIAGNOSTIC
 
@@ -840,12 +856,27 @@ inline void revokeBenchOutputForProductionCommand() {
 // the production operator interface, so `status`, `checks`, `help` and the
 // configuration verbs keep working in a bench session and a bench image cannot
 // grow a second, diverging copy of them.
+//
+// Accounting (R3/L1): every path below records exactly one outcome through
+// `detail::recordLineOutcome()` - accepted, refused or forwarded - and no leaf
+// verb records anything itself. A forwarded production line is counted only
+// as forwarded: its accepted/refused outcome belongs to the production
+// counters, and counting it here too would count one command twice.
 inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
                        VehicleRuntime& runtime, const WatchdogCheckpoint& watchdog) {
     const ev::BenchTokens tokens = ev::splitBenchTokens(line, length);
     if (tokens.count == 0U) {
         return;  // an empty line answers nothing, exactly as the operator path does
     }
+
+    // Records one outcome and answers accordingly: the leaf's boolean says
+    // whether it executed, and this is the only place that boolean becomes a
+    // counter. A helper rather than a convention, so a verb added later that
+    // forgets it fails to compile instead of silently skewing the session.
+    const auto recordAccepted = [](bool accepted) {
+        detail::recordLineOutcome(accepted ? ev::BenchLineOutcome::Accepted
+                                           : ev::BenchLineOutcome::Refused);
+    };
 
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
     // The temporary H1A verb is recognized here, before `ev::benchVerbFor()`: it
@@ -856,11 +887,11 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
         ev::benchTokenEquals(tokens.token(0), tokens.tokenLength(0), "bench") &&
         ev::benchTokenEquals(tokens.token(1), tokens.tokenLength(1), "h1a-brake")) {
         if (tokens.overflow) {
-            ++detail::refusedLines();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
             refuseLine("TooManyTokens");
             return;
         }
-        applyH1aAwakeHold(tokens, nowMs);
+        recordAccepted(applyH1aAwakeHold(tokens, nowMs));
         return;
     }
 #endif
@@ -887,6 +918,7 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
                 revokeBenchOutputForProductionCommand();
             }
         }
+        detail::recordLineOutcome(ev::BenchLineOutcome::Forwarded);
         runtime.handleCommandLine(line, length, nowMs);
         return;
     }
@@ -894,7 +926,7 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
     // An over-long line is refused before dispatch: acting on the tokens that fit
     // is how a command nobody typed gets applied.
     if (tokens.overflow) {
-        ++detail::refusedLines();
+        detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
         refuseLine("TooManyTokens");
         return;
     }
@@ -904,7 +936,7 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
     // `bench arm <junk>` used to arm, and `bench reset <junk>` used to reset the
     // instrument.
     if (tokens.count > ev::benchVerbMaximumTokenCount(verb)) {
-        ++detail::refusedLines();
+        detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
         refuseLine("TooManyTokens");
         return;
     }
@@ -912,46 +944,53 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
     switch (verb) {
         case ev::BenchVerb::Help:
             helpLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Arm:
-            applyArm();
+            recordAccepted(applyArm());
             return;
         case ev::BenchVerb::Drive:
-            applyDrive(tokens, nowMs);
+            recordAccepted(applyDrive(tokens, nowMs));
             return;
         case ev::BenchVerb::Stop:
-            applyStop();
+            recordAccepted(applyStop());
             return;
         case ev::BenchVerb::Reset:
-            applyReset();
+            recordAccepted(applyReset());
             return;
         case ev::BenchVerb::Health:
             healthLine(runtime, watchdog);
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::DriveStatus:
             driveLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Ticks:
             ticksLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Inputs:
             inputsLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Pins:
             pinsLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::ResetCause:
-            applyResetCause(tokens);
+            recordAccepted(applyResetCause(tokens));
             return;
         case ev::BenchVerb::Wdt:
             watchdogLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Unknown:
         case ev::BenchVerb::None:
             break;
     }
 
-    ++detail::refusedLines();
+    detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
     refuseLine("UnknownBenchVerb");
 }
 
@@ -979,12 +1018,15 @@ inline void service(uint32_t nowMs, VehicleRuntime& runtime,
             break;  // one line per pass: the rest of the window waits
         }
         if (event == ev::LineEvent::LineTooLong) {
-            ++detail::refusedLines();
+            // A framing refusal, recorded with the reason on the wire: the
+            // bytes never formed a command, so there is nothing to dispatch,
+            // but the operator still got an answered refusal.
+            detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
             refuseLine("LineTooLong");
             break;
         }
         if (event == ev::LineEvent::InvalidCharacter) {
-            ++detail::refusedLines();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Refused);
             refuseLine("InvalidCharacter");
             break;
         }

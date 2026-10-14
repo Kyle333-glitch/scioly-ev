@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "BoundedText.h"
+#include "FirmwareIdentity.h"
 #include "OperatorPolicy.h"
 #include "RunExecutionPlan.h"
 #include "TelemetryRecord.h"
@@ -695,14 +696,20 @@ inline uint16_t formatTelemetryRateAck(const TelemetryRateVerdict& verdict, char
 // Identity
 // ---------------------------------------------------------------------------
 
-// `VERSION,fw=<id>,telemetry_schema=<n>`. The schema number is reported next to
-// the firmware identity because a log and a firmware are only comparable when
-// both are known; `firmwareId` is a compile-time string owned by the vehicle
-// layer and must not contain a comma.
-inline uint16_t formatVersionLine(const char* firmwareId, char* buffer, uint16_t capacity) {
+// `VERSION,<identity fragment>,telemetry_schema=<n>`. The schema number is
+// reported next to the firmware identity because a log and a firmware are
+// only comparable when both are known. The identity fragment is the shared
+// build identity (`ev::FirmwareIdentity`, rendered by
+// `ev::appendFirmwareIdentity()`): family, source revision, dirty state,
+// image variant and configuration fingerprint - so two materially different
+// images never report the same line (R3/L3). At ~110 characters the line is
+// far inside the widest response this module produces (the 445-character
+// checks report), so no worst-case constant changes.
+inline uint16_t formatVersionLine(const FirmwareIdentity& identity, char* buffer,
+                                  uint16_t capacity) {
     BoundedText text(buffer, capacity);
     text.appendText(kOperatorVersionPrefix);
-    text.field("fw").appendText(firmwareId == nullptr ? kTelemetryMissingField : firmwareId);
+    appendFirmwareIdentity(identity, text);
     text.field("telemetry_schema").appendUnsigned(kTelemetrySchemaVersion);
     return finishBoundedLine(text, buffer);
 }

@@ -153,17 +153,20 @@ values; then `SafetyLimitsValid` and `ProfileLimitsValid`).
 
 **Run `P-H6-ff-pi-tuning.md` (as amended, C1/C10).** Summary: the feed-forward is
 measured from H5's open-loop effort-to-speed relation; P/I are a **conservative
-bootstrap** derived from it under a pre-registered rule and promoted with that
-citation, because no bench command runs the regulator; the closed-loop criterion
-and the windup characterization (`kPlannedMaxIntegralPermille`,
-`kPlannedMaxIntegrationStepS`, the pinned-effort duration after sign change) are
-executed in **P-H7 Part L**, and the gains are re-promoted from those loaded
-records. P-H6 is authoritative for the method; this checklist does not restate a
-weaker variant (C10).
+candidate** derived from it under a pre-registered rule and recorded as a
+Provisional derived candidate with that citation - never promoted as
+`Measured` before a closed-loop test - because no bench command runs the
+regulator; the closed-loop criterion and the windup characterization
+(`kPlannedMaxIntegralPermille`, `kPlannedMaxIntegrationStepS`, the
+pinned-effort duration after sign change) are executed in **P-H7 Part L**, and
+the gains are promoted from those loaded records. Until that experiment
+exists, the pair stays Provisional and everything armed downstream stays
+blocked (P-H6 "Why the bootstrap cannot self-qualify"). P-H6 is authoritative
+for the method; this checklist does not restate a weaker variant (C10).
 **Establishes:** `kPlannedFeedForwardPermillePerMps`,
 `kPlannedProportionalPermillePerMps`, `kPlannedIntegralPermillePerMpsSecond`
-(feed-forward + bootstrap; refined at P-H7 Part L) (then `ControllerConfigValid`);
-#8.
+(feed-forward measured + Provisional candidate; promotion at P-H7 Part L)
+(then `ControllerConfigValid`); #8.
 
 ## Step 7 - Acceleration, and braking per direction (H7 part 1) - pointer
 
@@ -236,8 +239,9 @@ is explicitly declined** (the deadline sentence in Step 11).
 **Reps:** 5 per configuration (floor; derive the count in the pre-registration).
 **Bootstrap (the first run cannot wait for its own measurement, C2).** The first
 announced run cannot exist while its own timeouts are placeholders, so the initial
-values are set conservatively and promoted as **Measured bootstraps** citing
-their evidence: each timeout = the longest bounded trial actually recorded for
+values are set conservatively from recorded bounded-trial evidence plus a
+pre-registered margin, and promoted as **Measured bootstraps** citing that
+evidence: each timeout = the longest bounded trial actually recorded for
 that phase (B2 bounded-trial duration plus the pre-registered margin);
 `kPlannedFinalApproachDistanceM` from the measured stopping distance at the
 bootstrap ceiling speed; `kPlannedMaxRunDurationS` from the longest bounded trial
@@ -245,6 +249,16 @@ run plus the same margin. The run path is then armed and this step **refines eac
 value from the first run-path series** through the normal promotion procedure,
 superseding the bootstrap. No gate is weakened, and no value is promoted without
 the record it cites.
+
+A conservative `Measured` bootstrap of this kind is honest only because the
+quantity itself was observed: a worst-case duration was measured and the margin
+runs in the safe direction, and the value stays flagged as untested on the run
+path until the run-path series supersedes it. That is the line P-H6's
+provenance contract draws: a computed controller-gain pair was never executed
+anywhere, so no margin and no flag can make it `Measured` - gains are excluded
+from bootstrapping, full stop (R3/M6). The first armed run additionally waits
+for the gain bootstrap's own resolution (P-H6), so these timeout values enable
+nothing by themselves.
 **Calculation:** each timeout is the measured worst case plus the pre-registered
 margin; the final-approach distance is the distance at which the run can still stop
 inside the reversing leg's measured stopping distance; `kPlannedMaxRunDurationS` is

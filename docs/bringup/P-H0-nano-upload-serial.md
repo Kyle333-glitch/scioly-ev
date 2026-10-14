@@ -18,7 +18,7 @@ H1A. There is no motor supply connected here.
 ## Prerequisites
 
 - `pio run` succeeds on the exact tree being flashed. Record `git rev-parse HEAD`
-  and the `VERSION,fw=...` line the board reports.
+  and the `VERSION` identity line the board reports.
 - The motor supply is **off and disconnected**. Wheels off the floor. Driver
   outputs unloaded.
 - A serial capture path that writes to a file under `data/raw/`.

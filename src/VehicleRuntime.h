@@ -410,13 +410,13 @@ private:
     // host-tested; these methods are the wiring: they read the chain, call the
     // policy, and apply what the policy allowed through the chain's own entry
     // points.
-    void rejectWithoutCommand(ev::CommandError error);
+    void rejectWithoutCommand(ev::CommandError error, uint32_t nowMs);
     void applyCommand(const ev::OperatorRequest& request, uint32_t nowMs);
-    void applyConfigSet(const ev::RunConfigFields& supplied);
+    void applyConfigSet(const ev::RunConfigFields& supplied, uint32_t nowMs);
     void applyAnnounce(uint32_t nowMs);
-    void applyArm();
+    void applyArm(uint32_t nowMs);
     void applyReset(uint32_t nowMs);
-    void applyTelemetryRate(double requestedRateHz);
+    void applyTelemetryRate(double requestedRateHz, uint32_t nowMs);
 
     // The greeting, formatted and staged. Shared by the attach/silence re-arm in
     // `serviceStagedText()` and by the `boot` command, so the line an operator asks
@@ -425,7 +425,16 @@ private:
 
     void respondLine(uint16_t length);
     void respondRefusal(ev::OperatorCommandId id, const char* reason);
-    void pushOperatorEvent(ev::TelemetryEventCode code, const char* detail);
+    void pushOperatorEvent(ev::TelemetryEventCode code, const char* detail, uint32_t nowMs);
+
+    // The fault of record right now, for operator-event attribution: the run
+    // policy's fault first, else the safety authority's latch
+    // (`ev::currentFaultOfRecord()`). Read live at the action, never from the
+    // last tick's snapshot, so a fault a reset just cleared is not reported
+    // as current.
+    ev::FaultCode currentFaultCode() const {
+        return ev::currentFaultOfRecord(run_.faultCode(), authority_.latchedFault().code);
+    }
 
     ev::OperatorSystemState systemState() const;
     ev::OperatorStatusView statusView() const;
