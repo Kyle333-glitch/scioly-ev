@@ -792,6 +792,161 @@ void test_a_corrupt_measurement_never_asks_for_any_powered_effort(void) {
     }
 }
 
+// --- R2/M18: explicit arithmetic refusal ------------------------------------
+//
+// Finite configuration can still produce non-finite intermediate arithmetic:
+// a very large finite gain times a finite target or error overflows its term
+// to an infinity, and opposite infinities cancel to NaN. The regulator must
+// name that failure and refuse the cycle rather than convert it into an
+// effort. Every value below is a synthetic host-only fixture, never a tuning
+// recommendation: no gain has been measured.
+
+// A config whose gains are extreme but finite and measured: validation
+// accepts it (finiteness is not a cap), so the runtime arithmetic is what
+// has to refuse.
+ev::VelocityControllerConfig extremeGainConfig() {
+    const double huge = 1.0e308;
+    return ev::VelocityControllerConfig(measuredValue(huge), measuredValue(huge),
+                                        measuredValue(0.0),
+                                        measuredMode(ev::MotorMode::DriveForward),
+                                        ev::Sourced<uint16_t>(600U, ev::ValueSource::Measured), 0U,
+                                        0.05);
+}
+
+void test_opposite_infinite_terms_are_refused_as_arithmetic_not_as_no_request(void) {
+    ev::VelocityController controller(extremeGainConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    // Feed-forward overflows to +inf (1e308 * 10) while the proportional term
+    // overflows to -inf (1e308 * (10 - 20)): the demand is NaN.
+    const ev::VelocityControlResult result = controller.update(1000U, 10.0, true, 20.0);
+    expectRefused(ev::VelocityControlStatus::ArithmeticNotFinite, result);
+    // The refusal must not advertise computed terms that were never finite.
+    TEST_ASSERT_TRUE(result.feedForwardPermille == 0.0);
+    TEST_ASSERT_TRUE(result.proportionalPermille == 0.0);
+}
+
+void test_a_negative_infinite_demand_never_commands_power(void) {
+    // Fixture gains with an extreme but finite measurement: the proportional
+    // term overflows to -inf while the other terms stay finite, so the demand
+    // is -inf. Clamping that value would yield full reverse power; the
+    // arithmetic refusal must fire before any conversion.
+    ev::VelocityController controller(fixtureConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    const ev::VelocityControlResult result =
+        controller.update(1000U, -10.0, true, 1.0e308);
+    expectRefused(ev::VelocityControlStatus::ArithmeticNotFinite, result);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(result.effort.mode));
+    TEST_ASSERT_EQUAL_UINT16(0U, result.effort.magnitudePermille);
+}
+
+void test_a_positive_infinite_demand_is_refused_not_saturated(void) {
+    ev::VelocityController controller(fixtureConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    // +inf demand with a positive target: saturation logic would otherwise
+    // report a bounded powered effort as though the loop had regulated there.
+    const ev::VelocityControlResult result =
+        controller.update(1000U, 10.0, true, -1.0e308);
+    expectRefused(ev::VelocityControlStatus::ArithmeticNotFinite, result);
+    TEST_ASSERT_TRUE(!result.outputSaturated);
+}
+
+void test_large_representable_terms_still_saturate_at_the_ceiling(void) {
+    // A demand that is merely large - every term finite - keeps the
+    // intentional bounded-saturation behavior: Ok, powered, clamped.
+    ev::VelocityController controller(fixtureConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    const ev::VelocityControlResult result = controller.update(1000U, 10.0, true, 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::VelocityControlStatus::Ok),
+                          static_cast<int>(result.status));
+    expectEffort(ev::MotorMode::DriveForward, 600U, result);
+    TEST_ASSERT_TRUE(result.outputSaturated);
+    expectTerm(3000.0, result.feedForwardPermille);
+    expectTerm(2000.0, result.proportionalPermille);
+}
+
+void test_a_demand_exactly_at_the_ceiling_is_not_reported_saturated(void) {
+    ev::VelocityControllerConfig config(
+        measuredValue(60.0), measuredValue(0.0), measuredValue(0.0),
+        measuredMode(ev::MotorMode::DriveForward),
+        ev::Sourced<uint16_t>(600U, ev::ValueSource::Measured), 0U, 0.05);
+    ev::VelocityController controller(config);
+    TEST_ASSERT_TRUE(controller.enable());
+    const ev::VelocityControlResult result = controller.update(1000U, 10.0, true, 10.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::VelocityControlStatus::Ok),
+                          static_cast<int>(result.status));
+    expectEffort(ev::MotorMode::DriveForward, 600U, result);
+    TEST_ASSERT_TRUE(!result.outputSaturated);
+}
+
+void test_zero_gains_ask_for_no_power_but_stay_ok(void) {
+    ev::VelocityControllerConfig config(
+        measuredValue(0.0), measuredValue(0.0), measuredValue(0.0),
+        measuredMode(ev::MotorMode::DriveForward),
+        ev::Sourced<uint16_t>(600U, ev::ValueSource::Measured), 0U, 0.05);
+    ev::VelocityController controller(config);
+    TEST_ASSERT_TRUE(controller.enable());
+    const ev::VelocityControlResult result = controller.update(1000U, 5.0, true, 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::VelocityControlStatus::Ok),
+                          static_cast<int>(result.status));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(result.effort.mode));
+    expectTerm(0.0, result.feedForwardPermille);
+    expectTerm(0.0, result.proportionalPermille);
+}
+
+void test_negative_targets_drive_the_configured_reverse_mode(void) {
+    ev::VelocityController controller(fixtureConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    const ev::VelocityControlResult result = controller.update(1000U, -2.0, true, 0.0);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::VelocityControlStatus::Ok),
+                          static_cast<int>(result.status));
+    expectEffort(ev::MotorMode::DriveReverse, 600U, result);
+}
+
+void test_arithmetic_refusal_preserves_the_integral_like_an_invalid_target(void) {
+    ev::VelocityController controller(fixtureConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    controller.update(1000U, 1.0, true, 0.0);
+    controller.update(1020U, 1.0, true, 0.0);
+    controller.update(1040U, 1.0, true, 0.0);
+    expectTerm(4.0, controller.integralPermille());
+    // An extreme finite measurement overflows only the proportional term;
+    // the demand is -inf and the held integral must survive the refusal.
+    const ev::VelocityControlResult refused =
+        controller.update(1060U, 1.0, true, 1.0e308);
+    expectRefused(ev::VelocityControlStatus::ArithmeticNotFinite, refused);
+    expectTerm(4.0, refused.integralPermille);
+    TEST_ASSERT_TRUE(controller.integralPermille() == 4.0);
+}
+
+void test_invalid_inputs_keep_precedence_over_the_arithmetic_check(void) {
+    ev::VelocityController controller(extremeGainConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    // A non-finite target is the caller's fault, not the arithmetic's: the
+    // target verdict wins even when the gains would also overflow.
+    expectRefused(ev::VelocityControlStatus::InvalidTarget,
+                  controller.update(1000U, kInf, true, 0.0));
+    expectRefused(ev::VelocityControlStatus::InvalidTarget,
+                  controller.update(1020U, -kInf, true, 0.0));
+    // A self-contradicting measurement is refused as corrupt feedback first.
+    expectRefused(ev::VelocityControlStatus::InvalidMeasurement,
+                  controller.update(1040U, 1.0, true, kNaN));
+    expectRefused(ev::VelocityControlStatus::InvalidMeasurement,
+                  controller.update(1060U, 1.0, true, kInf));
+}
+
+void test_arithmetic_failure_overrides_a_frozen_stamp(void) {
+    ev::VelocityController controller(extremeGainConfig());
+    TEST_ASSERT_TRUE(controller.enable());
+    controller.update(1000U, 10.0, true, 20.0);
+    // The stamp does not advance, but the terms are still computed - and they
+    // are still non-finite, so the refusal must not degrade into a regulating
+    // TimeDidNotAdvance cycle carrying infinite diagnostics.
+    const ev::VelocityControlResult result = controller.update(1000U, 10.0, true, 20.0);
+    expectRefused(ev::VelocityControlStatus::ArithmeticNotFinite, result);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -836,6 +991,17 @@ int main(int, char**) {
     RUN_TEST(test_the_effort_never_asks_for_the_opposite_direction_of_the_target);
     RUN_TEST(test_a_measurement_moving_the_wrong_way_asks_for_effort_in_the_commanded_direction);
     RUN_TEST(test_a_corrupt_measurement_never_asks_for_any_powered_effort);
+
+    RUN_TEST(test_opposite_infinite_terms_are_refused_as_arithmetic_not_as_no_request);
+    RUN_TEST(test_a_negative_infinite_demand_never_commands_power);
+    RUN_TEST(test_a_positive_infinite_demand_is_refused_not_saturated);
+    RUN_TEST(test_large_representable_terms_still_saturate_at_the_ceiling);
+    RUN_TEST(test_a_demand_exactly_at_the_ceiling_is_not_reported_saturated);
+    RUN_TEST(test_zero_gains_ask_for_no_power_but_stay_ok);
+    RUN_TEST(test_negative_targets_drive_the_configured_reverse_mode);
+    RUN_TEST(test_arithmetic_refusal_preserves_the_integral_like_an_invalid_target);
+    RUN_TEST(test_invalid_inputs_keep_precedence_over_the_arithmetic_check);
+    RUN_TEST(test_arithmetic_failure_overrides_a_frozen_stamp);
 
     return UNITY_END();
 }

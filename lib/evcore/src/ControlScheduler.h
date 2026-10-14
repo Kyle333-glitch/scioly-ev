@@ -162,8 +162,13 @@ public:
         if (sinceDeadlineMs < 0) {
             // Not yet due. The remaining wait is the wrapped distance to the
             // deadline, which stays within one period for a monotonic clock.
-            return ControlTickDecision(false, 0U, 0U, 0U,
-                                       static_cast<uint32_t>(-sinceDeadlineMs), clockRewind);
+            // Formed with unsigned arithmetic (R2/L4): negating the signed
+            // difference is undefined behavior exactly at INT32_MIN, while the
+            // unsigned deadline-minus-now distance is defined for every
+            // reading and identical everywhere else. Eligibility is unchanged:
+            // this branch is still exactly the negative half-range.
+            return ControlTickDecision(false, 0U, 0U, 0U, nextDeadlineMs_ - nowMs,
+                                       clockRewind);
         }
 
         const uint32_t lateByMs = static_cast<uint32_t>(sinceDeadlineMs);

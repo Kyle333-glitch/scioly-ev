@@ -348,11 +348,136 @@ void test_an_unusable_configuration_pauses_instead_of_faulting(void) {
                                          provisionalTicks(ev::MotionDirection::Forward),
                                          kTimeout, kPeriodMs));
     }
-    for (uint32_t cycle = 0U; cycle < 100U; ++cycle) {
+    TEST_ASSERT_EQUAL_UINT32(0U, monitor.poweredMsWithoutProgress());
+}
+// R2/S18R-M1: an unavailable sample with a usable bound is sustained-invalid
+// exposure, not a missing configuration - the case the old suite paused on is
+// now bounded below. A placeholder bound or polarity still pauses (above).
+void test_persistently_invalid_feedback_faults_at_the_bound(void) {
+    // The first invalid powered cycle baselines the startup allowance (no
+    // instant fault on invalidity immediately after arming); every one after
+    // it consumes the bound exactly like a frozen count.
+    ev::EncoderProgressMonitor monitor;
+    TEST_ASSERT_FALSE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    TEST_ASSERT_EQUAL_UINT32(0U, monitor.poweredMsWithoutProgress());
+    for (uint32_t cycle = 0U; cycle < 24U; ++cycle) {
         TEST_ASSERT_FALSE(
             monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
     }
+    TEST_ASSERT_EQUAL_UINT32(480U, monitor.poweredMsWithoutProgress());
+    TEST_ASSERT_TRUE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+}
+
+void test_a_single_invalid_sample_does_not_fault(void) {
+    ev::EncoderProgressMonitor monitor;
+    TEST_ASSERT_FALSE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
     TEST_ASSERT_EQUAL_UINT32(0U, monitor.poweredMsWithoutProgress());
+    TEST_ASSERT_FALSE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    TEST_ASSERT_EQUAL_UINT32(20U, monitor.poweredMsWithoutProgress());
+}
+
+void test_alternating_invalid_and_frozen_feedback_still_faults(void) {
+    // Invalid and frozen are both powered cycles without progress evidence:
+    // they share one accumulator, so alternating them cannot renew power.
+    ev::EncoderProgressMonitor monitor;
+    bool violated = false;
+    for (uint32_t cycle = 0U; cycle < 26U; ++cycle) {
+        const bool fresh = (cycle % 2U) == 0U;
+        violated = monitor.update(0, fresh, true, true, kForwardTicks, kTimeout, kPeriodMs);
+    }
+    TEST_ASSERT_TRUE(violated);
+}
+
+void test_genuine_progress_after_invalid_discharges_the_allowance(void) {
+    ev::EncoderProgressMonitor monitor;
+    for (uint32_t cycle = 0U; cycle < 10U; ++cycle) {
+        TEST_ASSERT_FALSE(
+            monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    }
+    TEST_ASSERT_FALSE(monitor.update(1, true, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    TEST_ASSERT_EQUAL_UINT32(0U, monitor.poweredMsWithoutProgress());
+    TEST_ASSERT_FALSE(stepFrozen(monitor, 1, 24U));
+    TEST_ASSERT_TRUE(stepFrozen(monitor, 1, 1U));
+}
+
+void test_unpowered_invalid_feedback_never_faults(void) {
+    // A refused request or a deliberate stop is not accepted power: invalid
+    // observations while stationary accumulate nothing and fault nothing.
+    ev::EncoderProgressMonitor monitor;
+    for (uint32_t cycle = 0U; cycle < 200U; ++cycle) {
+        TEST_ASSERT_FALSE(
+            monitor.update(0, false, false, true, kForwardTicks, kTimeout, kPeriodMs));
+    }
+    TEST_ASSERT_EQUAL_UINT32(0U, monitor.poweredMsWithoutProgress());
+}
+
+void test_a_direction_flip_does_not_evict_the_invalid_exposure(void) {
+    ev::EncoderProgressMonitor monitor;
+    for (uint32_t cycle = 0U; cycle < 15U; ++cycle) {
+        TEST_ASSERT_FALSE(
+            monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    }
+    for (uint32_t cycle = 0U; cycle < 10U; ++cycle) {
+        TEST_ASSERT_FALSE(
+            monitor.update(0, false, true, false, kForwardTicks, kTimeout, kPeriodMs));
+    }
+    TEST_ASSERT_TRUE(
+        monitor.update(0, false, true, false, kForwardTicks, kTimeout, kPeriodMs));
+}
+
+void test_an_invalid_gap_longer_than_the_bound_faults_at_once(void) {
+    ev::EncoderProgressMonitor monitor;
+    TEST_ASSERT_FALSE(monitor.update(0, true, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    TEST_ASSERT_TRUE(monitor.update(0, false, true, true, kForwardTicks, kTimeout, 5000U));
+}
+
+void test_repeated_short_dropouts_without_progress_fault(void) {
+    // Three missed samples and one frozen-but-valid read, repeated: no cycle
+    // carries progress, so the allowance drains and the monitor faults.
+    ev::EncoderProgressMonitor monitor;
+    bool violated = false;
+    for (uint32_t round = 0U; round < 10U && !violated; ++round) {
+        for (uint32_t cycle = 0U; cycle < 3U; ++cycle) {
+            violated = monitor.update(0, false, true, true, kForwardTicks, kTimeout, kPeriodMs);
+        }
+        violated = monitor.update(0, true, true, true, kForwardTicks, kTimeout, kPeriodMs);
+    }
+    TEST_ASSERT_TRUE(violated);
+}
+
+void test_short_dropouts_with_real_progress_between_them_never_fault(void) {
+    // The complementary case: dropouts that genuine tick advances separate
+    // are renewed by evidence, not by time, and never fault.
+    ev::EncoderProgressMonitor monitor;
+    int32_t ticks = 0;
+    for (uint32_t round = 0U; round < 50U; ++round) {
+        for (uint32_t cycle = 0U; cycle < 3U; ++cycle) {
+            TEST_ASSERT_FALSE(
+                monitor.update(ticks, false, true, true, kForwardTicks, kTimeout, kPeriodMs));
+        }
+        ++ticks;
+        TEST_ASSERT_FALSE(
+            monitor.update(ticks, true, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    }
+}
+
+void test_invalid_exposure_saturates_instead_of_wrapping(void) {
+    // The accumulator measures powered exposure with dtMs only - no clock
+    // stamp enters it, so the uint32 millis wrap cannot disturb it - and it
+    // saturates at the largest representable count rather than wrapping to a
+    // small one that would renew power.
+    ev::EncoderProgressMonitor monitor;
+    TEST_ASSERT_FALSE(
+        monitor.update(0, true, true, true, kForwardTicks, kTimeout, kPeriodMs));
+    TEST_ASSERT_TRUE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, 0xFFFFFFFFu));
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFu, monitor.poweredMsWithoutProgress());
+    TEST_ASSERT_TRUE(
+        monitor.update(0, false, true, true, kForwardTicks, kTimeout, 0xFFFFFFFFu));
 }
 
 // 19. RECOVERY: reset() clears the accumulation and the reference. A new run
@@ -514,6 +639,16 @@ int main(int, char**) {
     RUN_TEST(test_a_moving_reversal_handoff_continues_without_fault);
     RUN_TEST(test_intentional_stationary_periods_pause_without_fault);
     RUN_TEST(test_an_unusable_configuration_pauses_instead_of_faulting);
+    RUN_TEST(test_persistently_invalid_feedback_faults_at_the_bound);
+    RUN_TEST(test_a_single_invalid_sample_does_not_fault);
+    RUN_TEST(test_alternating_invalid_and_frozen_feedback_still_faults);
+    RUN_TEST(test_genuine_progress_after_invalid_discharges_the_allowance);
+    RUN_TEST(test_unpowered_invalid_feedback_never_faults);
+    RUN_TEST(test_a_direction_flip_does_not_evict_the_invalid_exposure);
+    RUN_TEST(test_an_invalid_gap_longer_than_the_bound_faults_at_once);
+    RUN_TEST(test_repeated_short_dropouts_without_progress_fault);
+    RUN_TEST(test_short_dropouts_with_real_progress_between_them_never_fault);
+    RUN_TEST(test_invalid_exposure_saturates_instead_of_wrapping);
     RUN_TEST(test_reset_clears_the_accumulation_and_the_reference);
     RUN_TEST(test_the_run_policy_refuses_an_unusable_feedback_bound);
     RUN_TEST(test_the_expected_tick_sign_follows_leg_and_polarity);

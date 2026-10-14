@@ -85,6 +85,7 @@ enum class ReversalConfigError : uint8_t {
     TimeoutNotMeasured,      // reversalTimeoutS is not ValueSource::Measured
     NonFiniteTimeout,        // NaN or infinity
     NonPositiveTimeout,      // a zero timeout would refuse every reversal
+    TimeoutWithoutDwellHeadroom,  // the timeout cannot span its dwell (R2/M3)
 };
 
 struct ReversalConfigValidation {
@@ -108,6 +109,15 @@ inline ReversalConfigValidation validateReversalConfig(const ReversalConfig& con
     }
     if (!(config.reversalTimeoutS.value > 0.0)) {
         return {false, ReversalConfigError::NonPositiveTimeout};
+    }
+    // R2/M3: the timeout bounds the whole sequence - ramp-down, brake command
+    // and dwell verification together - and update() evaluates it BEFORE the
+    // verification step, so a timeout at or below the dwell it must verify
+    // refuses before the stop can ever be earned (timeout == dwell already
+    // loses the race by evaluation order). Compared in seconds, before any
+    // millisecond truncation; malformed values keep their verdicts above.
+    if (!(config.reversalTimeoutS.value > config.verification.dwellS.value)) {
+        return {false, ReversalConfigError::TimeoutWithoutDwellHeadroom};
     }
     return {true, ReversalConfigError::None};
 }

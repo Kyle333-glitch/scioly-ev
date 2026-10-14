@@ -185,6 +185,11 @@ enum class VelocityControlStatus : uint8_t {
     InvalidTarget,         // non-finite target velocity: no effort is computed
     InvalidMeasurement,    // measurement claims to be usable but is not a number
     TimeDidNotAdvance,     // stamp not strictly newer: no integration this cycle
+    ArithmeticNotFinite,   // a computed term or the demand is not finite: refused
+                           // before conversion. Checked after InvalidTarget and
+                           // InvalidMeasurement (caller faults win) and overriding
+                           // the time/regulation statuses below, because infinite
+                           // diagnostics must never be reported as regulation.
 };
 
 // One regulator answer. There is no default constructor: an effort with no
@@ -395,10 +400,20 @@ public:
         hasPreviousTargetSign_ = true;
 
         // --- Feed-forward, proportional, integral ---------------------------
+        // R2/M18: finite configuration can still overflow its terms. A very
+        // large finite gain times a finite target or error is an infinity
+        // (validation accepts finite extremes - there is no measured gain cap
+        // to appeal to), and opposite infinities cancel to NaN. The checks
+        // below refuse the cycle with a named status before any clamping,
+        // rounding or demand application.
         const double feedForwardPermille =
             config_.feedForwardPermillePerMps.value * targetVelocityMps;
         const double errorMps = measurementValid ? (targetVelocityMps - measuredVelocityMps) : 0.0;
         const double proportionalPermille = config_.proportionalPermillePerMps.value * errorMps;
+        if (!std::isfinite(feedForwardPermille) || !std::isfinite(errorMps) ||
+            !std::isfinite(proportionalPermille)) {
+            return stopped(VelocityControlStatus::ArithmeticNotFinite);
+        }
 
         double demandedPermille = feedForwardPermille + proportionalPermille + integralPermille_;
 
@@ -422,12 +437,31 @@ public:
                     integrationStepClamped = true;
                 }
                 const double integralCeilingPermille = static_cast<double>(config_.maxIntegralPermille);
-                integralPermille_ =
-                    clamp(config_.integralPermillePerMpsSecond.value * errorMps * integrationStepS +
-                              integralPermille_,
-                          -integralCeilingPermille, integralCeilingPermille);
+                // R2/M18: the increment itself can overflow while every input
+                // is finite. An unrepresentable increment is held, not wound:
+                // the established integral stays, exactly as anti-windup holds
+                // rather than integrates. (A NaN can never arise here from
+                // finite inputs, but a held integral is still the safe answer
+                // for one, since clamp() passes NaN through untouched.)
+                const double integralIncrement =
+                    config_.integralPermillePerMpsSecond.value * errorMps * integrationStepS;
+                if (std::isfinite(integralIncrement)) {
+                    integralPermille_ = clamp(integralIncrement + integralPermille_,
+                                              -integralCeilingPermille, integralCeilingPermille);
+                }
                 demandedPermille = feedForwardPermille + proportionalPermille + integralPermille_;
             }
+        }
+
+        // --- Arithmetic refusal ---------------------------------------------
+        // The demand is the sum of three independently finite terms, but
+        // opposite infinities cancel: +inf feed-forward against -inf
+        // proportional is NaN, and either sign of infinity alone would clamp
+        // into a powered effort the loop never regulated to. Refuse before
+        // the conversion below; the refusal carries zeroed diagnostic terms
+        // (stopped()) so the log cannot mistake it for computed control.
+        if (!std::isfinite(integralPermille_) || !std::isfinite(demandedPermille)) {
+            return stopped(VelocityControlStatus::ArithmeticNotFinite);
         }
 
         // --- Effort request -------------------------------------------------

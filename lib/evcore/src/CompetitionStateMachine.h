@@ -493,6 +493,7 @@ enum class RunPhaseConfigError : uint8_t {
     NonPositiveMinimumCruise,         // the planned-cruise floor is not > 0
     NonPositiveStrategyCeiling,       // a bottle-phase strategy ceiling is not > 0
     BottleEvidenceNotUsable,          // the BottleEvidenceConfig failed its own validation
+    FinalStopTimeoutWithoutDwellHeadroom,  // finalStopTimeoutS cannot span its dwell (R2/M3)
 };
 
 struct RunPhaseConfigValidation {
@@ -579,6 +580,21 @@ inline RunPhaseConfigValidation validateRunPhaseConfig(const RunPhaseConfig& con
     }
     if (!validateNearZeroConfig(config.stopVerification).ok) {
         return {false, RunPhaseConfigError::StopVerificationNotUsable};
+    }
+    // R2/M3: the FinalBrake phase verifies a continuous near-zero dwell and
+    // otherwise ends in its phase timeout (`phaseTimeoutMs()` vs the
+    // verifier's `dwellS`). A final-stop timeout at or below the dwell it has
+    // to verify - compared in seconds, before any millisecond truncation - can
+    // never complete verification before the bound expires: the outcome would
+    // still be safe (a PhaseTimeout fault) but the configuration is
+    // impossible, so it is refused here rather than armed. Malformed values
+    // keep their fundamental verdicts above; this constrains only timeouts
+    // that are otherwise usable. The one-tick cadence margin above equality
+    // is operational guidance (the verification needs a second observation
+    // after the dwell elapses), not a second gate: strict inequality is the
+    // complete, measurement-free rule.
+    if (!(config.finalStopTimeoutS.value > config.stopVerification.dwellS.value)) {
+        return {false, RunPhaseConfigError::FinalStopTimeoutWithoutDwellHeadroom};
     }
     return {true, RunPhaseConfigError::None};
 }

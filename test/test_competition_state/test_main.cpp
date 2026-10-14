@@ -2055,6 +2055,64 @@ void test_a_fault_discards_a_candidate_but_keeps_a_verified_record(void) {
     TEST_ASSERT_TRUE(kept.actuated);
 }
 
+// --- R2/M3: final-stop timeout/dwell headroom --------------------------------
+//
+// The FinalBrake phase verifies a continuous near-zero dwell and otherwise
+// ends in its phase timeout. A final-stop timeout at or below the dwell it
+// has to verify can never complete before timing out: the outcome stays safe
+// (a timeout fault) but the configuration is impossible, so validation must
+// refuse it. The fixture dwell below is 0.2 s (phaseConfig).
+
+ev::RunPhaseConfig phaseConfigWithFinalStopTimeout(double timeoutS) {
+    return ev::RunPhaseConfig(
+        measured(0.0), measured(5.0), measured(1.0), measured(5.0), measured(5.0),
+        measured(5.0), measured(timeoutS), measured(2.0), measured(0.5), measured(1.0),
+        stopConfig(measured(0.05), measured(0.2)), measured(0.10), measured(0.30),
+        measured(0.30), measured(0.30), fixtureBottleConfig());
+}
+
+void test_a_final_stop_timeout_at_or_below_its_dwell_is_rejected(void) {
+    const double impossible[] = {0.2, 0.1, 0.05, 0.001};
+    for (double timeoutS : impossible) {
+        const ev::RunPhaseConfigValidation verdict =
+            ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(timeoutS));
+        TEST_ASSERT_FALSE(verdict.ok);
+        TEST_ASSERT_EQUAL_INT(
+            static_cast<int>(ev::RunPhaseConfigError::FinalStopTimeoutWithoutDwellHeadroom),
+            static_cast<int>(verdict.error));
+    }
+}
+
+void test_a_final_stop_timeout_just_above_its_dwell_is_accepted(void) {
+    // One millisecond of headroom is the smallest representable grant: the
+    // dwell can complete one control tick before the phase bound expires.
+    // Anything at or below the dwell cannot, and is refused above.
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(0.201)).ok);
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(5.0)).ok);
+}
+
+void test_final_stop_timeout_headroom_keeps_existing_refusals_first(void) {
+    // Malformed values keep their fundamental verdicts: the headroom check
+    // only constrains timeouts that are otherwise usable.
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunPhaseConfigError::NonFiniteValue),
+        static_cast<int>(
+            ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(std::nan(""))).error));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunPhaseConfigError::NonPositiveTimeout),
+        static_cast<int>(ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(0.0)).error));
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(ev::RunPhaseConfigError::NonPositiveTimeout),
+        static_cast<int>(ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(-1.0)).error));
+}
+
+void test_an_extreme_final_stop_timeout_keeps_its_headroom(void) {
+    // A representable duration far above the dwell is usable: the millisecond
+    // conversion saturates rather than wraps, which stays the safe direction.
+    TEST_ASSERT_TRUE(ev::validateRunPhaseConfig(phaseConfigWithFinalStopTimeout(1.0e12)).ok);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFu, ev::msFromSeconds(1.0e12));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_a_fresh_state_machine_is_idle_and_asks_for_nothing);
@@ -2114,5 +2172,9 @@ int main(int, char**) {
     RUN_TEST(test_the_run_timeline_stays_correct_across_the_uint32_wrap);
     RUN_TEST(test_reset_clears_the_run_timeline_and_a_new_run_starts_empty);
     RUN_TEST(test_a_fault_discards_a_candidate_but_keeps_a_verified_record);
+    RUN_TEST(test_a_final_stop_timeout_at_or_below_its_dwell_is_rejected);
+    RUN_TEST(test_a_final_stop_timeout_just_above_its_dwell_is_accepted);
+    RUN_TEST(test_final_stop_timeout_headroom_keeps_existing_refusals_first);
+    RUN_TEST(test_an_extreme_final_stop_timeout_keeps_its_headroom);
     return UNITY_END();
 }
