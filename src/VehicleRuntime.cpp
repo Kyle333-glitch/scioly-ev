@@ -758,10 +758,13 @@ void VehicleRuntime::serviceSerial(uint32_t nowMs) {
     // Received bytes, bounded per pass. A line that arrives slowly is accumulated
     // across passes; nothing here waits for the rest of it.
     //
-    // At most one command is applied per pass, which is what keeps the answer
-    // contract honest: an operator's reply is one staged line, and a host that
-    // pipelines several terminators into one read window waits a pass per command
-    // rather than letting an earlier answer be displaced by the next response.
+    // At most one command is applied per pass. That bounds the loss rate to at
+    // most one waiting reply per pass, but it does NOT prevent displacement:
+    // when the host stalls, the active line never completes, the next reply
+    // waits, and the reply after that displaces it (S19, audit M16). The
+    // displaced reply is counted exactly once by the framer and reported on
+    // `STATUS` (`serial_abandoned`) and the bench `bench serial` readout, so
+    // a missing reply is never mistaken for a successful command.
     // Bytes that arrived behind the handled line stay in the port and are read
     // next pass.
     uint8_t budget = serialTransport::kReadBytesPerPass;
@@ -1312,6 +1315,20 @@ ev::OperatorStatusView VehicleRuntime::statusView() const {
     view.state = buildSample();
     view.config = heldConfig_;
     view.configVerdict = heldVerdict();
+    // S19 response-loss accounting (audit M16): the interface's own verdict
+    // counts plus the shared transport's evidence, gathered live so the
+    // report cannot disagree with the counters a later command would read.
+    // The transport fields are the framer's cumulative session evidence;
+    // `serialSent` is "transmitted", never "received by the host".
+    view.cmdAccepted = commandsAccepted_;
+    view.cmdRejected = commandsRejected_;
+    view.responsesLost = responsesLost_;
+    const serialTransport::LineTransport& transport = serialTransport::port();
+    view.serialAbandoned = transport.linesAbandoned();
+    view.serialRefused = transport.telemetryLinesRefused();
+    view.serialOversize = transport.oversizeLinesRefused();
+    view.serialSent = transport.linesSent();
+    view.serialStaged = transport.linesStaged();
     return view;
 }
 

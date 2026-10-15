@@ -324,6 +324,31 @@ void test_begin_clears_the_staging_state_but_not_the_counters(void) {
     TEST_ASSERT_EQUAL_STRING("EVS3,two\r\n", freshPort.out.c_str());
 }
 
+// S19: a burst of urgent lines against a stalled port keeps the active line
+// and the newest waiting line and abandons exactly the rest - one count per
+// displaced reply, in order. The host sees the first and the last line whole.
+void test_a_burst_of_waiting_responses_keeps_first_and_last_and_counts_the_rest(void) {
+    ev::LineFramer framer;
+    MockPort port;
+    port.room = 0;
+    TEST_ASSERT_TRUE(stageLine(framer, "R1", true));
+    TEST_ASSERT_FALSE(framer.pump(port));
+    for (int index = 2; index <= 6; ++index) {
+        char text[8];
+        text[0] = static_cast<char>('0' + index);
+        text[1] = '\0';
+        TEST_ASSERT_TRUE(stageLine(framer, text, true));
+        TEST_ASSERT_FALSE(framer.pump(port));
+    }
+    TEST_ASSERT_EQUAL_UINT32(4U, framer.linesAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(6U, framer.linesStaged());
+    TEST_ASSERT_EQUAL_UINT32(0U, framer.linesSent());
+    port.room = 4096;
+    while (!framer.pump(port)) {
+    }
+    TEST_ASSERT_EQUAL_STRING("R1\r\n6\r\n", port.out.c_str());
+    TEST_ASSERT_EQUAL_UINT32(2U, framer.linesSent());
+}
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_a_clean_line_moves_whole_with_its_terminator);
@@ -337,5 +362,6 @@ int main(int, char**) {
     RUN_TEST(test_oversize_lines_are_refused_and_counted);
     RUN_TEST(test_the_longest_schema_line_fits_and_moves);
     RUN_TEST(test_begin_clears_the_staging_state_but_not_the_counters);
+    RUN_TEST(test_a_burst_of_waiting_responses_keeps_first_and_last_and_counts_the_rest);
     return UNITY_END();
 }

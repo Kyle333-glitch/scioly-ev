@@ -618,6 +618,41 @@ inline void watchdogLine() {
     respond(text);
 }
 
+// `bench serial` - the shared serial transport's own accounting (S19, M16).
+//
+// Read-only: it reports counters, stages one bounded line, and touches no
+// instrument, no driver and no run state, so answering it can never authorize
+// motion. `responses_lost` is this console's own interface loss (a readout it
+// generated that never began transmission); the five `serial_*` fields are the
+// shared transport's evidence from `ev::LineFramer`, identical to the ones the
+// production `STATUS` line reports from the same transport:
+//
+//   * `serial_abandoned` - waiting urgent replies displaced before any byte
+//     moved (the M16 loss: an accepted command whose reply never left);
+//   * `serial_refused` - non-urgent (telemetry) lines refused while busy;
+//   * `serial_oversize` - lines refused for exceeding the shared capacity;
+//   * `serial_sent` - lines whose terminator fully left the port, i.e.
+//     "transmitted", never "received by the host";
+//   * `serial_staged` - lines published to the transport.
+//
+// All six are cumulative `uint32_t` session evidence that wraps modulo 2^32
+// and resets only on reboot or reset. Derived worst case is 170 characters
+// (`BENCH,serial=1` plus six ten-digit counters with their keys), far inside
+// the shared serial capacity, so this readout stays retrievable exactly when
+// a saturated channel makes it most needed.
+inline void serialLine() {
+    ev::BoundedText text(serialTransport::port().workingBuffer(),
+                         benchConfig::kReadoutLineCapacity);
+    text.appendText("BENCH,serial=1");
+    text.field("responses_lost").appendUnsigned(detail::lostResponses());
+    text.field("serial_abandoned").appendUnsigned(serialTransport::port().linesAbandoned());
+    text.field("serial_refused").appendUnsigned(serialTransport::port().telemetryLinesRefused());
+    text.field("serial_oversize").appendUnsigned(serialTransport::port().oversizeLinesRefused());
+    text.field("serial_sent").appendUnsigned(serialTransport::port().linesSent());
+    text.field("serial_staged").appendUnsigned(serialTransport::port().linesStaged());
+    respond(text);
+}
+
 // `bench resetsrc [clear]` - dispatch, including the argument check.
 //
 // An argument that is not `clear` is **refused**, not ignored: an operator who
@@ -646,7 +681,7 @@ inline void helpLine() {
                          benchConfig::kReadoutLineCapacity);
     text.appendText("BENCH,help=1");
     text.field("verbs")
-        .appendText("health drive arm stop reset resetsrc wdt ticks inputs pins");
+        .appendText("health drive arm stop reset resetsrc wdt ticks inputs pins serial");
 #if defined(EV_BENCH_H1A_DIAGNOSTIC)
     // The temporary H1A verb names itself here so a session capture cannot miss
     // that this image contains a non-shipping instrument.
@@ -983,6 +1018,10 @@ inline void handleLine(const char* line, uint16_t length, uint32_t nowMs,
             return;
         case ev::BenchVerb::Wdt:
             watchdogLine();
+            detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
+            return;
+        case ev::BenchVerb::Serial:
+            serialLine();
             detail::recordLineOutcome(ev::BenchLineOutcome::Accepted);
             return;
         case ev::BenchVerb::Unknown:

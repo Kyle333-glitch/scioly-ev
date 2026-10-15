@@ -164,6 +164,7 @@ enum class BenchVerb : uint8_t {
     Pins = 11,          // `bench pins`
     ResetCause = 12,    // `bench resetsrc [clear]`
     Wdt = 13,           // `bench wdt`
+    Serial = 14,        // `bench serial` (S19 transport accounting, read-only)
     Unknown = 10,       // a `bench` line with a verb nobody implements
 };
 
@@ -218,6 +219,9 @@ inline BenchVerb benchVerbFor(const BenchTokens& tokens) {
     if (benchTokenEquals(verb, length, "wdt")) {
         return BenchVerb::Wdt;
     }
+    if (benchTokenEquals(verb, length, "serial")) {
+        return BenchVerb::Serial;
+    }
     return BenchVerb::Unknown;
 }
 
@@ -245,6 +249,7 @@ inline uint8_t benchVerbMaximumTokenCount(BenchVerb verb) {
         case BenchVerb::Inputs:
         case BenchVerb::Pins:
         case BenchVerb::Wdt:
+        case BenchVerb::Serial:
             return 2U;  // `bench <verb>` only
         case BenchVerb::None:
         case BenchVerb::Unknown:

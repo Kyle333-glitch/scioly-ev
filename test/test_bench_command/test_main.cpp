@@ -92,6 +92,7 @@ void test_every_verb_is_recognized_by_its_whole_name(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Pins), static_cast<int>(ev::benchVerbFor(split("bench pins"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::ResetCause), static_cast<int>(ev::benchVerbFor(split("bench resetsrc"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Wdt), static_cast<int>(ev::benchVerbFor(split("bench wdt"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Serial), static_cast<int>(ev::benchVerbFor(split("bench serial"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::DriveStatus), static_cast<int>(ev::benchVerbFor(split("bench drive-status"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Drive), static_cast<int>(ev::benchVerbFor(split("bench drive fwd 10 10"))));
 }
@@ -240,8 +241,9 @@ void test_each_verb_has_its_exact_token_bound(void) {
         ev::BenchVerb::Arm,   ev::BenchVerb::Stop,         ev::BenchVerb::Reset,
         ev::BenchVerb::Health, ev::BenchVerb::DriveStatus, ev::BenchVerb::Ticks,
         ev::BenchVerb::Inputs, ev::BenchVerb::Pins,        ev::BenchVerb::Wdt,
+        ev::BenchVerb::Serial,
     };
-    for (uint8_t index = 0U; index < 9U; ++index) {
+    for (uint8_t index = 0U; index < 10U; ++index) {
         TEST_ASSERT_EQUAL_UINT8(2U, ev::benchVerbMaximumTokenCount(noArgumentVerbs[index]));
     }
 

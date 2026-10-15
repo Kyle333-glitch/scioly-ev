@@ -162,9 +162,12 @@ class MockSerial {
   public:
     void begin(unsigned long /*baud*/) {}
 
-    int availableForWrite() { return 4096; }
+    int availableForWrite() { return txBlocked ? 0 : 4096; }
 
     size_t write(const uint8_t* bytes, size_t count) {
+        if (txBlocked) {
+            return 0U;
+        }
         txBytes.append(reinterpret_cast<const char*>(bytes), count);
         return count;
     }
@@ -207,10 +210,16 @@ class MockSerial {
         txBytes.clear();
         connected = true;
         rtsAsserted = false;
+        txBlocked = false;
     }
 
     bool connected = true;
     bool rtsAsserted = false;
+    // S19 host-test control: when true the port accepts nothing, which is how
+    // a test stages a stalled-host backpressure condition against the REAL
+    // transport/framer and dispatch. Production firmware never sets this; the
+    // real USB endpoint reports its own free space.
+    bool txBlocked = false;
 
   private:
     std::string rxBytes;

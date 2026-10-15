@@ -1179,7 +1179,8 @@ the operator's, and `disarm` is the command for that.
   telemetry record (section 9), a response is **all or nothing**: it fits the line
   buffer or it is dropped and counted, never emitted truncated. Each family's
   worst case is bounded and statically checked against the line capacity: `STATUS`
-  357, the announce acknowledgement **192**, `CONFIG` 170, `CHECK` 445,
+  560 (control state, configuration verdict and the eight S19 serial-accounting
+  counters), the announce acknowledgement **192**, `CONFIG` 170, `CHECK` 445,
   `TELEMETRY` 88, `PLAN` 340 - the largest of them is
   `kOperatorResponseWorstCaseChars`. A host test formats a response built from the
   longest name of every table it uses and pins each number, so a field added to a
@@ -1228,7 +1229,8 @@ and watchdog counters, the driver pins' levels, the MCU's reset-status registers
 the watchdog's own configuration registers, a bounded way to command effort outside
 a run, and a way to stall the loop on purpose (H0W Step 3). Those are bench
 instruments **B1-B4** plus the readouts the later H0W steps added (`bench pins`,
-`bench resetsrc`, `bench wdt`) and the deliberate-hang hook
+`bench resetsrc`, `bench wdt`), the read-only S19 serial-accounting readout
+(`bench serial`) and the deliberate-hang hook
 (`docs/bringup/README.md`), and they are a separate build, not a mode of the vehicle
 image.
 

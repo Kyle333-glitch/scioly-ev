@@ -98,6 +98,15 @@ ev::OperatorStatusView widestStatusView() {
     view.configVerdict.complete = true;
     view.configVerdict.rulesOk = false;
     view.configVerdict.error = ev::ConfigError::BottleLineDistanceOffInterval;
+    // S19: the accounting section at its widest - every counter at ten digits.
+    view.cmdAccepted = 0xFFFFFFFFu;
+    view.cmdRejected = 0xFFFFFFFFu;
+    view.responsesLost = 0xFFFFFFFFu;
+    view.serialAbandoned = 0xFFFFFFFFu;
+    view.serialRefused = 0xFFFFFFFFu;
+    view.serialOversize = 0xFFFFFFFFu;
+    view.serialSent = 0xFFFFFFFFu;
+    view.serialStaged = 0xFFFFFFFFu;
     return view;
 }
 
@@ -433,7 +442,9 @@ void test_status_line_pins_the_control_state(void) {
     TEST_ASSERT_EQUAL_STRING(
         "STATUS,phase=Approach,armed=1,pos_m=6.2140,pos_ok=1,vel_mps=0.7140,vel_ok=1,"
         "vel_cmd_mps=0.7000,rem_m=0.2860,motor=DriveForward,effort_permille=740,fault=None,"
-        "authz=AuthorizedDrive,check=none,config_complete=1,config_rules=1,config_error=None",
+        "authz=AuthorizedDrive,check=none,config_complete=1,config_rules=1,config_error=None,"
+        "cmd_accepted=0,cmd_rejected=0,responses_lost=0,serial_abandoned=0,serial_refused=0,"
+        "serial_oversize=0,serial_sent=0,serial_staged=0",
         buffer);
 }
 
@@ -447,10 +458,10 @@ void test_status_line_reports_an_empty_vehicle(void) {
     TEST_ASSERT_NOT_NULL(strstr(buffer, ",phase=Idle,"));
     TEST_ASSERT_NOT_NULL(strstr(buffer, ",pos_ok=0,"));
     TEST_ASSERT_NOT_NULL(strstr(buffer, ",authz=DeniedNotArmed,"));
-    // The configuration verdict is the last field of the line, so the marker for
-    // "nothing held" is what the line ends with rather than what it contains.
-    TEST_ASSERT_NOT_NULL(strstr(buffer, ",config_error=-"));
-    TEST_ASSERT_EQUAL_STRING("config_error=-", buffer + strlen(buffer) - 14U);
+    // The configuration verdict still marks "nothing held" in place, and the S19
+    // accounting section closes the line with zeroed session evidence.
+    TEST_ASSERT_NOT_NULL(strstr(buffer, ",config_error=-,"));
+    TEST_ASSERT_EQUAL_STRING(",serial_staged=0", buffer + strlen(buffer) - 16U);
 }
 
 // Telemetry control reports the state it produced, including the rate the stride

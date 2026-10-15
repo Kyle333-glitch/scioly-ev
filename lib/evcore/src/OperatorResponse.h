@@ -66,8 +66,10 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 // host test that formats a response built from the longest name of every table it
 // uses.
 //
-//   STATUS  = 357   every control-state field, the widest names, the longest
-//                   configuration rule error name
+//   STATUS  = 560   every control-state field, the widest names, the longest
+//                   configuration rule error name (357), plus the S19 serial
+//                   accounting section: eight ten-digit counters with keys
+//                   (24 + 24 + 26 + 28 + 26 + 27 + 23 + 25 = 203)
 //   ANNOUNCE_ACK = 192  the widest timing-plan status name, four 13-character
 //                   values, and the wider of the execution section's two
 //                   renderings (widest status name, or the target's value; the
@@ -87,7 +89,7 @@ constexpr const char* kOperatorReasonChecksFailed = "ChecksFailed";
 //                   `ready=1`), which is wider than the refusal form: a refusal
 //                   names a longer reason but every field that describes the plan
 //                   is then the absent marker, twelve characters narrower each
-constexpr uint16_t kOperatorStatusLineWorstCaseChars = 357U;
+constexpr uint16_t kOperatorStatusLineWorstCaseChars = 560U;
 constexpr uint16_t kOperatorConfigEchoWorstCaseChars = 170U;
 constexpr uint16_t kOperatorChecksLineWorstCaseChars = 445U;
 constexpr uint16_t kOperatorTelemetryLineWorstCaseChars = 88U;
@@ -132,9 +134,10 @@ constexpr uint16_t kOperatorAnnounceAckWorstCaseChars = 192U;
 constexpr uint16_t kOperatorPlanLineWorstCaseChars = 340U;
 
 // The largest response this module can produce. `config set`'s confirmation is
-// the echo plus a `cmd` field, and the plan report is narrower than the checks
-// report, which is the widest line here.
-constexpr uint16_t kOperatorResponseWorstCaseChars = kOperatorChecksLineWorstCaseChars;
+// the echo plus a `cmd` field, and since S19 the status report - control state,
+// configuration verdict and the eight serial-accounting counters - is the
+// widest line here.
+constexpr uint16_t kOperatorResponseWorstCaseChars = kOperatorStatusLineWorstCaseChars;
 
 static_assert(kOperatorResponseWorstCaseChars <= kSerialLineCapacity,
               "the shared serial line must hold the widest operator response");
@@ -159,6 +162,45 @@ struct OperatorStatusView {
     TelemetrySample state{};
     RunConfigFields config{};
     HeldRunConfigVerdict configVerdict{};
+    // S19 serial response-loss accounting (audit M16), one meaning per
+    // counter, filled by the vehicle layer from its own interface counters
+    // and the shared transport. Session evidence since boot, never control
+    // inputs: nothing in the run path reads them.
+    //
+    //   * `cmdAccepted` / `cmdRejected` - production operator lines judged:
+    //     applied vs refused for any reason. Every answered line is counted
+    //     exactly once, in exactly one of the two; empty lines (no answer,
+    //     no verdict) are counted in neither, so accepted + rejected is
+    //     "lines that received a verdict", not "bytes that arrived".
+    //   * `responsesLost` - responses this interface generated that never
+    //     began transmission: the formatter overflowed its bounded buffer,
+    //     or the transport refused the stage. An urgent response is never
+    //     refused for being busy (it waits), so a waiting reply displaced
+    //     by a newer one is NOT counted here; it is `serialAbandoned`.
+    //   * `serialAbandoned` / `serialRefused` / `serialOversize` - the shared
+    //     transport's own evidence: waiting urgent lines displaced before
+    //     any byte moved, non-urgent (telemetry) lines refused while a line
+    //     was in flight or waiting, and lines refused for exceeding the
+    //     shared capacity. Counted exactly once each by the framer itself;
+    //     the bench `bench serial` readout reports these same counters from
+    //     the same transport.
+    //   * `serialSent` / `serialStaged` - transport lines whose terminator
+    //     fully left the port, and lines published to the transport.
+    //     `serialSent` is "transmitted", never "received": bytes that left
+    //     the port while no host was reading are gone without a trace the
+    //     firmware can see, and no counter here claims otherwise.
+    //
+    // All eight are cumulative `uint32_t` values that wrap modulo 2^32 (a
+    // decrease across two reads is a wrap, not a reset) and reset only on
+    // reboot or reset.
+    uint32_t cmdAccepted = 0U;
+    uint32_t cmdRejected = 0U;
+    uint32_t responsesLost = 0U;
+    uint32_t serialAbandoned = 0U;
+    uint32_t serialRefused = 0U;
+    uint32_t serialOversize = 0U;
+    uint32_t serialSent = 0U;
+    uint32_t serialStaged = 0U;
 };
 
 // The telemetry stream's own state. Reported by `telemetry status` and confirmed
@@ -634,6 +676,16 @@ inline uint16_t formatStatusLine(const OperatorStatusView& view, char* buffer, u
     } else {
         text.field("config_error").appendText(telemetryConfigErrorName(view.configVerdict.error));
     }
+    // S19 accounting section. Uint32 fields render at most ten digits each;
+    // the derived worst case above bounds all eight together with their keys.
+    text.field("cmd_accepted").appendUnsigned(view.cmdAccepted);
+    text.field("cmd_rejected").appendUnsigned(view.cmdRejected);
+    text.field("responses_lost").appendUnsigned(view.responsesLost);
+    text.field("serial_abandoned").appendUnsigned(view.serialAbandoned);
+    text.field("serial_refused").appendUnsigned(view.serialRefused);
+    text.field("serial_oversize").appendUnsigned(view.serialOversize);
+    text.field("serial_sent").appendUnsigned(view.serialSent);
+    text.field("serial_staged").appendUnsigned(view.serialStaged);
     return finishBoundedLine(text, buffer);
 }
 

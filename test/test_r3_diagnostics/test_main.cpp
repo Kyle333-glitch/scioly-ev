@@ -736,6 +736,256 @@ void test_r23i_config_fingerprint_includes_r2_timeout_and_feedback_fields(void) 
     TEST_ASSERT_EQUAL_STRING(vCfg.c_str(), bCfg.c_str());
 }
 
+// --- S19: serial response-loss accounting (M16), part 1 ---
+namespace s19 {
+inline uint32_t framerAbandoned() { return evhw::serialTransport::port().linesAbandoned(); }
+inline uint32_t framerTelRefused() { return evhw::serialTransport::port().telemetryLinesRefused(); }
+inline uint32_t framerSent() { return evhw::serialTransport::port().linesSent(); }
+inline uint32_t framerStaged() { return evhw::serialTransport::port().linesStaged(); }
+inline bool framerBusy() { return evhw::serialTransport::port().busy(); }
+inline std::string lastWithPrefix(const std::string& tx, const std::string& prefix) {
+    std::string found;
+    for (const std::string& line : splitLines(tx)) {
+        if (line.compare(0, prefix.size(), prefix) == 0) { found = line; }
+    }
+    return found;
+}
+inline uint32_t countWithPrefix(const std::string& tx, const std::string& prefix) {
+    uint32_t count = 0U;
+    for (const std::string& line : splitLines(tx)) {
+        if (line.compare(0, prefix.size(), prefix) == 0) { ++count; }
+    }
+    return count;
+}
+}  // namespace s19
+// B+E: accepted command with lost response under backpressure.
+void test_s19_accepted_command_with_lost_response_is_counted_and_visible(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t acceptedBefore = harness.runtime.commandsAccepted();
+    const uint32_t rejectedBefore = harness.runtime.commandsRejected();
+    const uint32_t respLostBefore = harness.runtime.responsesLost();
+    Serial.txBlocked = true;
+    harness.sendProduction("status", 1001U);
+    harness.sendProduction("version", 1002U);
+    harness.sendProduction("checks", 1003U);
+    TEST_ASSERT_TRUE(s19::framerBusy());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(acceptedBefore + 3U, harness.runtime.commandsAccepted());
+    TEST_ASSERT_EQUAL_UINT32(rejectedBefore, harness.runtime.commandsRejected());
+    TEST_ASSERT_EQUAL_UINT32(respLostBefore, harness.runtime.responsesLost());
+    TEST_ASSERT_EQUAL_UINT32(0U, static_cast<uint32_t>(Serial.takeTx().size()));
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1004U);
+    TEST_ASSERT_TRUE(contains(wire, "STATUS,"));
+    TEST_ASSERT_TRUE(contains(wire, "CHECK,"));
+    TEST_ASSERT_EQUAL_UINT32(0U, s19::countWithPrefix(wire, "VERSION,"));
+    harness.sendProduction("status", 1005U);
+    const std::string status = s19::lastWithPrefix(Serial.takeTx(), "STATUS,");
+    TEST_ASSERT_TRUE(!status.empty());
+    TEST_ASSERT_EQUAL_STRING("4", fieldOf(status, "cmd_accepted").c_str());
+    TEST_ASSERT_EQUAL_STRING("0", fieldOf(status, "cmd_rejected").c_str());
+    TEST_ASSERT_EQUAL_STRING("0", fieldOf(status, "responses_lost").c_str());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_abandoned").empty());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U,
+        static_cast<uint32_t>(std::stoul(fieldOf(status, "serial_abandoned"))));
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_refused").empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_oversize").empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_sent").empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_staged").empty());
+}
+// F: refused command with lost refusal under backpressure.
+void test_s19_refused_command_with_lost_response_is_counted_and_visible(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t acceptedBefore = harness.runtime.commandsAccepted();
+    const uint32_t rejectedBefore = harness.runtime.commandsRejected();
+    Serial.txBlocked = true;
+    harness.sendProduction("status", 1001U);
+    harness.sendProduction("frobnicate", 1002U);
+    harness.sendProduction("version", 1003U);
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(acceptedBefore + 2U, harness.runtime.commandsAccepted());
+    TEST_ASSERT_EQUAL_UINT32(rejectedBefore + 1U, harness.runtime.commandsRejected());
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1004U);
+    TEST_ASSERT_TRUE(contains(wire, "STATUS,"));
+    TEST_ASSERT_TRUE(contains(wire, "VERSION,"));
+    TEST_ASSERT_EQUAL_UINT32(0U, s19::countWithPrefix(wire, "ERR,"));
+    harness.sendProduction("status", 1005U);
+    const std::string status = s19::lastWithPrefix(Serial.takeTx(), "STATUS,");
+    TEST_ASSERT_TRUE(!status.empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_abandoned").empty());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U,
+        static_cast<uint32_t>(std::stoul(fieldOf(status, "serial_abandoned"))));
+    TEST_ASSERT_EQUAL_STRING("3", fieldOf(status, "cmd_accepted").c_str());
+    TEST_ASSERT_EQUAL_STRING("1", fieldOf(status, "cmd_rejected").c_str());
+}
+// D: burst of six keeps first+last, abandons exactly four.
+void test_s19_burst_abandonment_counts_exactly_once(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t stagedBefore = s19::framerStaged();
+    const uint32_t sentBefore = s19::framerSent();
+    const uint32_t acceptedBefore = harness.runtime.commandsAccepted();
+    Serial.txBlocked = true;
+    for (uint32_t index = 0U; index < 6U; ++index) {
+        harness.sendProduction("version", 1001U + index);
+    }
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 4U, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(stagedBefore + 6U, s19::framerStaged());
+    TEST_ASSERT_EQUAL_UINT32(sentBefore, s19::framerSent());
+    TEST_ASSERT_EQUAL_UINT32(acceptedBefore + 6U, harness.runtime.commandsAccepted());
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1010U);
+    TEST_ASSERT_EQUAL_UINT32(2U, s19::countWithPrefix(wire, "VERSION,"));
+    harness.sendProduction("status", 1011U);
+    const std::string status = s19::lastWithPrefix(Serial.takeTx(), "STATUS,");
+    TEST_ASSERT_TRUE(!status.empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_abandoned").empty());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 4U,
+        static_cast<uint32_t>(std::stoul(fieldOf(status, "serial_abandoned"))));
+}
+// G (bench): health/ticks/health under backpressure; ticks never arrives.
+void test_s19_bench_health_request_under_backpressure(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const Harness::Health before = harness.health(1000U);
+    Serial.txBlocked = true;
+    harness.sendBench("bench health", 1001U);
+    harness.sendBench("bench ticks", 1002U);
+    harness.sendBench("bench health", 1003U);
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U, s19::framerAbandoned());
+    Serial.txBlocked = false;
+    TEST_ASSERT_TRUE(Serial.takeTx().empty());
+    const std::string drained = harness.drain(1004U);
+    TEST_ASSERT_EQUAL_UINT32(2U, s19::countWithPrefix(drained, "BENCH,health=1"));
+    TEST_ASSERT_EQUAL_UINT32(0U, s19::countWithPrefix(drained, "BENCH,ticks=1"));
+    harness.sendBench("bench serial", 1005U);
+    const std::string serial = s19::lastWithPrefix(Serial.takeTx(), "BENCH,serial=1");
+    TEST_ASSERT_TRUE(!serial.empty());
+    TEST_ASSERT_TRUE(!fieldOf(serial, "serial_abandoned").empty());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U,
+        static_cast<uint32_t>(std::stoul(fieldOf(serial, "serial_abandoned"))));
+    const Harness::Health after = harness.health(1006U);
+    TEST_ASSERT_EQUAL_UINT32(before.accepted + 5U, after.accepted);
+    TEST_ASSERT_EQUAL_UINT32(before.refused, after.refused);
+}
+// C: staged-but-unsent is not loss; it arrives whole once the host reads.
+void test_s19_partial_output_resumes_without_loss_accounting(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t sentBefore = s19::framerSent();
+    const uint32_t respLostBefore = harness.runtime.responsesLost();
+    Serial.txBlocked = true;
+    harness.sendProduction("version", 1001U);
+    TEST_ASSERT_TRUE(s19::framerBusy());
+    TEST_ASSERT_EQUAL_UINT32(0U, static_cast<uint32_t>(Serial.takeTx().size()));
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(sentBefore, s19::framerSent());
+    TEST_ASSERT_EQUAL_UINT32(respLostBefore, harness.runtime.responsesLost());
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1002U);
+    TEST_ASSERT_EQUAL_UINT32(1U, s19::countWithPrefix(wire, "VERSION,"));
+    TEST_ASSERT_TRUE(s19::framerSent() > sentBefore);
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(respLostBefore, harness.runtime.responsesLost());
+}
+// A: telemetry never displaces a waiting operator response.
+void test_s19_telemetry_never_displaces_a_waiting_response(void) {
+    Harness harness;
+    harness.begin(1000U);
+    harness.tick(1020U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t telRefusedBefore = s19::framerTelRefused();
+    Serial.txBlocked = true;
+    harness.sendProduction("status", 1021U);
+    harness.sendProduction("version", 1022U);
+    harness.tick(1040U);
+    harness.runtime.drainTelemetry();
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(telRefusedBefore, s19::framerTelRefused());
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1041U);
+    TEST_ASSERT_EQUAL_UINT32(1U, s19::countWithPrefix(wire, "STATUS,"));
+    TEST_ASSERT_EQUAL_UINT32(1U, s19::countWithPrefix(wire, "VERSION,"));
+}
+// H: loss evidence survives a transport re-begin; staging goes idle.
+void test_s19_response_loss_counters_survive_rebegin(void) {
+    Harness harness;
+    harness.begin(1000U);
+    Serial.txBlocked = true;
+    harness.sendProduction("status", 1001U);
+    harness.sendProduction("version", 1002U);
+    harness.sendProduction("version", 1003U);
+    const uint32_t abandoned = s19::framerAbandoned();
+    const uint32_t staged = s19::framerStaged();
+    TEST_ASSERT_TRUE(abandoned > 0U);
+    TEST_ASSERT_TRUE(s19::framerBusy());
+    Serial.txBlocked = false;
+    evhw::serialTransport::begin(115200);
+    TEST_ASSERT_FALSE(s19::framerBusy());
+    TEST_ASSERT_EQUAL_UINT32(abandoned, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(staged, s19::framerStaged());
+}
+// Normal reply path unchanged: one command, one reply, no loss movement.
+void test_s19_normal_reply_path_unchanged(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const uint32_t acceptedBefore = harness.runtime.commandsAccepted();
+    const uint32_t respLostBefore = harness.runtime.responsesLost();
+    harness.sendProduction("status", 1001U);
+    const std::string wire = Serial.takeTx();
+    TEST_ASSERT_EQUAL_UINT32(1U, s19::countWithPrefix(wire, "STATUS,"));
+    TEST_ASSERT_EQUAL_UINT32(acceptedBefore + 1U, harness.runtime.commandsAccepted());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(respLostBefore, harness.runtime.responsesLost());
+}
+// Provisional arm refusal preserved: refused, named, counted, still disarmed.
+void test_s19_arm_stays_provisionally_refused_without_motion(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t rejectedBefore = harness.runtime.commandsRejected();
+    harness.sendProduction("arm", 1001U);
+    TEST_ASSERT_EQUAL_UINT32(rejectedBefore + 1U, harness.runtime.commandsRejected());
+    const std::string wire = Serial.takeTx();
+    TEST_ASSERT_EQUAL_UINT32(1U, s19::countWithPrefix(wire, "ERR,"));
+    TEST_ASSERT_FALSE(harness.runtime.armed());
+}
+// Forwarded STATUS shares the transport accounting; bench counts forwarding,
+// production counts outcomes, the loss shows on the forwarded STATUS.
+void test_s19_forwarded_status_shows_shared_transport_accounting(void) {
+    Harness harness;
+    harness.begin(1000U);
+    const uint32_t abandonedBefore = s19::framerAbandoned();
+    const Harness::Health before = harness.health(1000U);
+    const uint32_t acceptedBefore = harness.runtime.commandsAccepted();
+    Serial.txBlocked = true;
+    harness.sendBench("status", 1001U);
+    harness.sendBench("status", 1002U);
+    harness.sendBench("status", 1003U);
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U, s19::framerAbandoned());
+    TEST_ASSERT_EQUAL_UINT32(acceptedBefore + 3U, harness.runtime.commandsAccepted());
+    Serial.txBlocked = false;
+    const std::string wire = harness.drain(1004U);
+    TEST_ASSERT_EQUAL_UINT32(2U, s19::countWithPrefix(wire, "STATUS,"));
+    harness.sendBench("status", 1005U);
+    const std::string status = s19::lastWithPrefix(Serial.takeTx(), "STATUS,");
+    TEST_ASSERT_TRUE(!status.empty());
+    TEST_ASSERT_TRUE(!fieldOf(status, "serial_abandoned").empty());
+    TEST_ASSERT_EQUAL_UINT32(abandonedBefore + 1U,
+        static_cast<uint32_t>(std::stoul(fieldOf(status, "serial_abandoned"))));
+    const Harness::Health after = harness.health(1006U);
+    TEST_ASSERT_EQUAL_UINT32(before.forwarded + 4U, after.forwarded);
+    TEST_ASSERT_EQUAL_UINT32(before.accepted + 1U, after.accepted);
+    TEST_ASSERT_EQUAL_UINT32(before.refused, after.refused);
+}
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_l1_accepted_arm_counts_accepted);
@@ -775,5 +1025,15 @@ int main(int, char**) {
     RUN_TEST(test_r23i_derived_pi_candidates_remain_provisional_and_block_controller_check);
     RUN_TEST(test_r23i_forwarded_commands_update_production_counters_and_action_timestamps_once);
     RUN_TEST(test_r23i_config_fingerprint_includes_r2_timeout_and_feedback_fields);
+    RUN_TEST(test_s19_accepted_command_with_lost_response_is_counted_and_visible);
+    RUN_TEST(test_s19_refused_command_with_lost_response_is_counted_and_visible);
+    RUN_TEST(test_s19_burst_abandonment_counts_exactly_once);
+    RUN_TEST(test_s19_bench_health_request_under_backpressure);
+    RUN_TEST(test_s19_partial_output_resumes_without_loss_accounting);
+    RUN_TEST(test_s19_telemetry_never_displaces_a_waiting_response);
+    RUN_TEST(test_s19_response_loss_counters_survive_rebegin);
+    RUN_TEST(test_s19_normal_reply_path_unchanged);
+    RUN_TEST(test_s19_arm_stays_provisionally_refused_without_motion);
+    RUN_TEST(test_s19_forwarded_status_shows_shared_transport_accounting);
     return UNITY_END();
 }
