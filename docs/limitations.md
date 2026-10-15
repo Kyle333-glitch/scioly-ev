@@ -494,9 +494,13 @@ or what remains provisional about the numbers it justified.
   watchdog/loop half and its console/interface half, after which the bound can be
   asserted at compile time the way the operator path's is. Fitting today does not
   remove that work: the console's line still grows with its counters and is still
-  the only line with no compile-time bound behind it. Owner: unowned. With the
-  board gone this is maintenance, not bring-up, and nothing can be measured
-  against it.
+  the only line with no compile-time bound behind it. Owner: unowned. Whether the board is in hand *now* is a present-day availability
+  constraint to check before planning a stage (cf. `VERIFIED_STATE.md` current
+  hardware availability and D36: the unit was in hand on 2026-10-02/03, so
+  "the board is gone" must never be read as "no hardware work happened");
+  while it is not in hand, source can be reviewed and host-tested but no
+  `VERIFIED_STATE.md` row can be promoted, and this bench-readout bound still
+  needs its on-target measurement.
 - **`stageLostReadoutNotice()` is reviewed, not verified.** It lives in the
   ARM-only bench tree, so no host test reaches it (`test_build_src = no`), and no
   bench session could have produced a line long enough to trigger it: the derived

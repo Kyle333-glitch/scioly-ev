@@ -45,7 +45,7 @@ bootstrap order controls (P-H14 C2).
   ceilings, not tuning knobs).
 - **I. Safety prerequisites:** Block E PASS; H0/H0W; H1A (disconnect method +
   limit recorded); H1B (trigger + supply); H2 (sign + retention); bounded
-  first-power human approval (F-P1..P12, stall citation F-P8, disconnect drill
+  first-power human approval (F-P1..F-P17, stall citation F-P8, disconnect drill
   E-36, runout + kill switch); H3 Step 0 expiry/latch demo; H4/H5 complete; wheels
   unloaded for H6-part-1/H7-unloaded; loaded only in Part L with approver present.
 - **J. Measured provenance:** raw capture under `data/evidence/` + derivation
