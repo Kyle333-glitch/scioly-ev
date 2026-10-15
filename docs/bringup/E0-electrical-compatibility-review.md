@@ -13,9 +13,13 @@ Primary sources consulted or required (manufacturer-first):
   (already cited by `docs/hardware/motor-driver-drv8874.md`; PDF not in repo).
 - Pololu DRV8874 carrier (#4035) product page/schematic — REQUIRED, not yet cited
   in repo. E-01 records the carrier revision from its silkscreen.
-- Arduino Nano R4 documentation (Renesas RA4M1-based; VIN range, logic levels,
-  regulator limits, ADC reference) — REQUIRED, not cited in repo beyond the
-  core pin table noted in `src/PinMap.h`.
+- Arduino Nano R4 documentation, ref. ABX00142 (Renesas RA4M1-based; VIN range,
+  logic levels, regulator limits, ADC reference) — REQUIRED, not cited in repo beyond the
+  core pin table noted in `src/PinMap.h`. The exact installed board revision/silkscreen
+  is UNKNOWN until E-01 records it; the VIN range and I/O-level citations for F-P2b/F-P4
+  must be confirmed against ABX00142 at the Block F review. Arduino publications mix
+  “5 V operate”, “logic 3.3 V” and “+5 VDC logic” phrasing — cite the ABX00142
+  I/O specification itself, not a summary line (E0V F-E2).
 - Motor/encoder product page (#4862 or as labeled) for voltage, stall current,
   CPR, gear ratio — REQUIRED, entirely absent from repo.
 - Cell/pack data for the actual AA NiMH cells (nominal 1.2 V, full-charge
@@ -47,13 +51,17 @@ Primary sources consulted or required (manufacturer-first):
 
 ## 3. Fully charged pack voltage (restated)
 
-See §1. Block E records the cell model (E-01) and Block F measures the actual
-pack open-circuit voltage before connection (prerequisite table item 3). Never
-use nominal 9.6 V as the design peak.
+See §1. Three distinct voltages must never be conflated (E0V F-E4): NOMINAL
+8 x 1.2 V = 9.6 V (chemistry definition), CHARGED open-circuit ≈11.2–11.6 V
+(8 x ≈1.4–1.45 V/cell), and ACTUAL measured pack voltage (only by DMM at Block F
+entry, prerequisite table item 3 / F-P3 — never derived from nominal). Block E
+records the cell model (E-01). Never use nominal 9.6 V as the design peak.
 
 ## 4. Controller I/O logic levels
 
-- Nano R4 (RA4M1) GPIO is 3.3 V logic. Whether the DRV8874 carrier's
+- Nano R4 (RA4M1) GPIO is 3.3 V logic per the RA4M1/ABX00142 I/O specification
+  (exact board revision UNKNOWN until E-01; citation to be confirmed at the Block F
+  review — see source list above). Whether the DRV8874 carrier's
   PH/EN/nSLEEP inputs accept 3.3 V logic (TI DRV8874: logic thresholds are
   TTL-compatible per datasheet — TO BE CONFIRMED against the PDF) decides if a
   level shifter is needed. `docs/hardware/motor-driver-drv8874.md` explicitly

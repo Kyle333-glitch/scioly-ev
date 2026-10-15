@@ -61,7 +61,8 @@ Trigger mechanical action: ____. Pinch points marked (photo): ____.
 
 Pack location during session: ____. Terminal covers: Y/N. Switch identity:
 ____. Switch rating (from body): ____. OFF=open verified: Y/N. ON=continuous
-verified (pack absent): Y/N. One-motion drill time/s: ____. Reachable with
+verified (pack absent): Y/N. One-motion drill time/s: ____ (recorded; <3 s is an
+unvalidated planning criterion, not an auto-fail). Post-drill OFF=open re-verified: Y/N. Reachable with
 covers on: Y/N. USB absent start/end: Y/N / Y/N.
 
 ## Form G — Component rating verification (from E-01 labels + compatibility review)
@@ -92,7 +93,9 @@ Supervisor countersign: ____ date: ____. Photo set archived at: ____.
 
 ## Form J — Block E readiness summary
 
-Mandatory checks executed: __/45. NOT PERFORMED (permitted, with reasons):
+Mandatory checks executed: __/35 chronological checks (E-01…E-09, E-20…E-25,
+E-26…E-31, E-32…E-37, E-38…E-45; E-10…E-19 are functional aliases, not
+additional steps — do not count them). NOT PERFORMED (permitted, with reasons):
 ____. Critical deviations: ____. Mechanical FAILs: ____. Verdict: ____.
 
 ## Form K — Block F prerequisite register (copied from handoff at execution)

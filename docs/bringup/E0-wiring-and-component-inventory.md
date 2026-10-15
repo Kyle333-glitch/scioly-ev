@@ -137,7 +137,9 @@ inspection record, `E0-inspection-record-template.md`).
    the second terminal goes. Inspection decides; this file assumes nothing.
 4. **Battery voltage language.** "Approximately 12 V nominal" (assignment) vs
    8×1.2 V = 9.6 V NiMH nominal and ≈11.2–11.6 V fully charged (chemistry; see
-   compatibility review). The "12 V" figure must not be used as a rail value.
+   compatibility review). The "12 V" figure must not be used as a rail value. Keep three voltages distinct (E0V F-E4): NOMINAL 9.6 V
+   (8 x 1.2 V), CHARGED open-circuit ≈11.2–11.6 V (8 x ≈1.4–1.45 V/cell), and
+   ACTUAL measured pack voltage (DMM only, at Block F entry per F-P3).
 5. **Controller supply path.** Nothing states VIN vs 5V feed. A pack-voltage
    feed into the wrong Nano input is a damage hazard (compatibility review §3).
 6. **No conflicts found** between `src/PinMap.h`, `MotorDriverPlan.h`, and

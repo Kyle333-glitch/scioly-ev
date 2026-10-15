@@ -124,9 +124,11 @@ qualification is inside this file.
   internal source only).
 - Actions: (1) jacks: black→COM, red→VΩ (confirm aloud; current jacks must be
   EMPTY — tape them if the meter allows); (2) dial to continuity, touch probes:
-  expect beep/<1 Ω; (3) dial to DCV, read a known source (fresh AA or meter's
-  own test): expect ≈1.5 V / plausible; (4) inspect probe insulation for nicks;
-  (5) log meter make/model/fuse state.
+  expect beep/<1 Ω; (3) dial to DCV, read a known source SEPARATE from the
+  vehicle pack (a spare AA or the meter's own test — never the vehicle pack:
+  a fresh alkaline AA reads ≈1.5 V, a fresh NiMH AA reads ≈1.3–1.4 V; either
+  is acceptable if plausible for its chemistry); (4) inspect probe insulation
+  for nicks; (5) log meter make/model/fuse state.
 - Expected: beep test <1 Ω; known-source voltage plausible.
 - Pass: both self-tests recorded with values. Fail: replace leads/fuse/meter;
   do not proceed on a failed self-test.
@@ -343,8 +345,15 @@ probe an IC body pin — probe the wire/connector side of the net.
 - Actions: (1) switch OFF/removed: continuity across the rail path pack+ →
   driver VM must be OPEN; (2) switch ON (pack STILL absent — operate the
   switch mechanism only): continuity pack+ → VM must BEEP; return switch OFF;
-  (3) record one-motion drill time and hand used.
-- Pass: OFF=open, ON=continuous, drill <3 s one-handed.
+  (3) record one-motion drill time and hand used; (4) post-drill re-verify:
+  with the switch left OFF, repeat the OFF=open continuity check once and
+  confirm the rail path is OPEN before leaving the station (E-39 re-sweeps
+  isolation again at closeout).
+- Pass: OFF=open, ON=continuous, switch left OFF with OFF=open re-verified.
+  The recorded drill time is assessed, not auto-failed: <3 s one-handed is an
+  author-selected, unvalidated planning criterion (E0V F-E3), NOT a physical
+  qualification — a slower time is recorded with its reason and assessed by
+  the inspector, never a PASS/FAIL by itself.
   Fail/STOP: no break in OFF → STOP S-4 (no isolation method — Block E FAILS).
 - Record: form F + E. Next: E-37.
 
@@ -370,7 +379,7 @@ probe an IC body pin — probe the wire/connector side of the net.
   (leads removed); confirm pack still isolated and covered; sign the line.
 - Next: E-40.
 
-### E-40 Emergency-isolation accessibility ruling
+### E-40 Emergency-isolation accessibility ruling (NOT a meter check — no meter used)
 - Actions: with the vehicle posed as on the bench, demonstrate reaching the
   disconnect blind/with eyes averted (muscle memory), confirm access with the
   body/chassis fully assembled (covers on), record obstructions or PASS.
@@ -420,6 +429,12 @@ probe an IC body pin — probe the wire/connector side of the net.
 
 ## Step-ID cross-reference (inventory §3 / hazard register → this procedure)
 
+IDs E-10 through E-19 are FUNCTIONAL ALIASES, not additional chronological
+execution steps. Only the 35 chronological step IDs defined above are executed,
+in order; forms record chronological IDs only. An operator holding only the
+inventory or hazard table must resolve every E-10…E-19 citation through this
+mapping — never execute an alias as an extra physical step.
+
 The inventory wiring table and hazard register cite functional step IDs E-10…
 E-18 and E-20. They map onto the chronological steps above as follows:
 E-10 (switch/rail isolation) → E-03 + E-36/E-40; E-11/E-12 (grounds) → E-33;
@@ -430,11 +445,28 @@ E-20 (continuity set) → E-33/E-34. The E-10…E-19 numeric block is otherwise
 unnumbered here to avoid collision with the rail-energized H1A/H1B steps,
 which are NOT part of Block E.
 
-## Check census
+## Check census (E0V F-C1/F-C2 corrected)
 
-45 checks total (E-01…E-09, E-20…E-25, E-26…E-31, E-32…E-37, E-38…E-45). Of these: 14 need physical meter
-measurements (E-04, E-32…E-36 in their sub-readings, E-40 timing); 24 are
-visual/tactile only; 7 are record/decision steps (E-09, E-37, E-38, E-41…E-45).
+35 CHRONOLOGICAL checks are executed: E-01…E-09 (9) + E-20…E-25 (6) +
+E-26…E-31 (6) + E-32…E-37 (6) + E-38…E-45 (8) = 35. IDs E-10…E-19 (10) are
+functional aliases resolved by the cross-reference above — they are NOT
+additional execution steps. “45” is the count of identifiers (35 steps + 10
+aliases), never the count of physical steps; Form J records __/35.
+
+Of the 35 chronological steps: 6 are meter procedures, 21 are
+visual/tactile-only, and 8 are record/decision steps (E-09, E-37, E-38,
+E-41, E-42, E-43, E-44, E-45).
+
+Meter-operation breakdown (E0V F-C2): E-04 is meter COMMISSIONING (2 self-test
+probe operations: continuity beep test + known-source DCV read) and is counted
+as 1 setup procedure, not as a measurement. The 18 measurement operations in
+E-32…E-36 are: E-32 x3 (pack+ terminal, driver VM wire side, Nano input —
+DCV isolation proof), E-33 x5 (4 ground continuities + pack+ to ground
+isolation), E-34 x6 (D8/D9/D10/D2/D4/D12 signal continuities), E-35 x2
+(PMODE to GND tie + PMODE to Nano open), E-36 x2 (switch OFF=open + switch
+ON=continuous, pack absent). E-37 is a CONDITIONAL protocol producing no PASS
+of its own. E-40 (blind-reach accessibility ruling) uses NO meter and is NOT
+a meter check — its drill time is recorded in E-36/Form F.
 Checks that cannot yet be fully specified: encoder-supply routing (E-16 folded
 into E-27/E-33 — exact source pin UNKNOWN until traced), switch drill details
 (E-36/E-40 adapt to whatever E-03 finds), carrier-specific probe points
