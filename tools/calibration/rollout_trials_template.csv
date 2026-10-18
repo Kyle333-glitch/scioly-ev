@@ -1,0 +1,10 @@
+# Offline rollout trials - HAND-MEASURED rows only (P-H4 Part A / P-H14 Step 4).
+# Units: travel_m is METRES, start/end_ticks are raw signed encoder ticks.
+# direction is forward|reverse (physical travel direction).
+# surface/notes record setup (surface, tire pressure, build/mass, instrument).
+# One row per mark-to-mark run. Keep rejected runs with their reason.
+# Usage: python tools/calibration/rollout_scale.py tools/calibration/rollout_trials_template.csv
+trial_id,start_ticks,end_ticks,travel_m,direction,surface,notes
+A-fwd-1,0,20000,2.000,forward,lab tile,example row - replace with measured data
+A-fwd-2,20000,40005,2.000,forward,lab tile,example row - replace with measured data
+A-rev-1,40005,20010,2.000,reverse,lab tile,example row - replace with measured data
