@@ -4,6 +4,7 @@
 #include <unity.h>
 
 #include <BenchCommand.h>
+#include <SerialCommandParser.h>
 
 // Contract tests for the bench console's line grammar
 // (lib/evcore/src/BenchCommand.h): tokenizing without allocating, recognizing the
@@ -124,6 +125,97 @@ void test_a_non_bench_line_is_not_a_bench_verb(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None), static_cast<int>(ev::benchVerbFor(split("status"))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None), static_cast<int>(ev::benchVerbFor(split(""))));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None), static_cast<int>(ev::benchVerbFor(split("benches arm"))));
+}
+
+// S21: the diagnostic verbs are reachable only inside the `bench` namespace.
+//
+// `health` and `ticks` typed on their own are **not** bench verbs, so the console
+// does not execute them: it forwards the line to the production interface, which
+// refuses it by name (`test_diagnostic_verbs_are_not_production_commands` in
+// `test_serial_command_parser`). A session that forgets the prefix therefore gets
+// a refusal, not a readout - which is exactly the difference between "the console
+// answered something I did not mean" and "the port is dead".
+void test_the_diagnostic_verbs_require_the_bench_prefix(void) {
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None),
+                          static_cast<int>(ev::benchVerbFor(split("health"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None),
+                          static_cast<int>(ev::benchVerbFor(split("ticks"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None),
+                          static_cast<int>(ev::benchVerbFor(split("HEALTH"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None),
+                          static_cast<int>(ev::benchVerbFor(split("ticks 1"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::None),
+                          static_cast<int>(ev::benchVerbFor(split("health status"))));
+
+    // The prefixed spellings are the ones that reach the instruments.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Health),
+                          static_cast<int>(ev::benchVerbFor(split("bench health"))));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::BenchVerb::Ticks),
+                          static_cast<int>(ev::benchVerbFor(split("bench ticks"))));
+}
+
+// S21: variant isolation, measured across both grammars rather than asserted in a
+// comment. No spelling of a bench line is a production command, because `bench` is
+// not a production first token at all - so the production image cannot reach a
+// bench instrument through the operator interface, and the bench image cannot grow
+// a second, diverging copy of the production verbs.
+//
+// This is the offline statement of the `platformio.ini` build-graph guarantee (the
+// production environment does not compile `src/bench/`). It proves the *grammar*
+// split; it says nothing about which image is flashed on a board.
+void test_no_bench_line_is_a_production_command(void) {
+    static const char* const kBenchLines[] = {
+        "bench",         "bench help",        "bench arm",
+        "bench drive fwd 100 250",              "bench stop",
+        "bench reset",   "bench health",      "bench drive-status",
+        "bench ticks",   "bench inputs",      "bench trigger",
+        "bench pins",    "bench resetsrc",    "bench resetsrc clear",
+        "bench wdt",     "bench serial",      "health",
+        "ticks",
+    };
+    const uint8_t lineCount =
+        static_cast<uint8_t>(sizeof(kBenchLines) / sizeof(kBenchLines[0]));
+    for (uint8_t index = 0U; index < lineCount; ++index) {
+        const char* line = kBenchLines[index];
+        const ev::CommandParseResult result =
+            ev::parseOperatorCommand(line, static_cast<uint16_t>(std::strlen(line)));
+        TEST_ASSERT_FALSE_MESSAGE(result.ok, line);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::CommandError::UnknownCommand),
+                                      static_cast<int>(result.error), line);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(ev::OperatorCommandId::None),
+                                      static_cast<int>(result.request.id), line);
+    }
+}
+
+// S21: the wire path a host actually drives - `\r\n`-terminated bytes through the
+// line reader, then the grammar. The reader reports the line at the `\r`, the `\n`
+// is an empty line (no command), and the diagnostic spelling is refused once. A
+// benchmark session that sends CRLF therefore gets exactly one answer, and a
+// truncated line (no terminator) gets none.
+void test_a_crlf_diagnostic_line_is_one_refused_line(void) {
+    char buffer[ev::kCommandLineCapacity + 1U];
+    ev::CommandLineReader reader(buffer, ev::kCommandLineCapacity);
+
+    const char* text = "bench ticks";
+    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::LineEvent::None),
+                              static_cast<int>(reader.push(*cursor)));
+    }
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::LineEvent::LineReady),
+                          static_cast<int>(reader.push('\r')));
+    const ev::CommandParseResult result =
+        ev::parseOperatorCommand(reader.line(), reader.lineLength());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::CommandError::UnknownCommand),
+                          static_cast<int>(result.error));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::LineEvent::EmptyLine),
+                          static_cast<int>(reader.push('\n')));
+
+    // The same content with no terminator is never a line at all, so it is never
+    // answered: an unfinished line is the one case that looks like silence.
+    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+        reader.push(*cursor);
+    }
+    TEST_ASSERT_EQUAL_STRING("bench ticks", reader.line());
 }
 
 // --- Unsigned decimals -------------------------------------------------------
@@ -292,6 +384,9 @@ int main(int, char**) {
     RUN_TEST(test_a_prefix_of_a_verb_is_not_the_verb);
     RUN_TEST(test_the_reset_latch_and_the_reset_readout_do_not_alias);
     RUN_TEST(test_a_non_bench_line_is_not_a_bench_verb);
+    RUN_TEST(test_the_diagnostic_verbs_require_the_bench_prefix);
+    RUN_TEST(test_no_bench_line_is_a_production_command);
+    RUN_TEST(test_a_crlf_diagnostic_line_is_one_refused_line);
     RUN_TEST(test_decimals_are_plain_and_overflow_is_refused);
     RUN_TEST(test_a_well_formed_drive_line_parses_to_the_request_as_typed);
     RUN_TEST(test_each_malformed_drive_line_is_refused_with_its_own_reason);

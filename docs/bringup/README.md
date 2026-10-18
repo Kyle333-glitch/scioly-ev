@@ -183,6 +183,12 @@ with `BENCH`, and `bench health` reports `image=bench`. The analyzer treats a
 `BENCH` line as an ignored line, not as telemetry. None of these may become a
 control input.
 
+For a returning board, [`S21-hardware-return-serial-runbook.md`](S21-hardware-return-serial-runbook.md)
+records which spelling each image accepts (production has no `health`/`ticks`;
+the bench readouts are `bench health`/`bench ticks`), how to identify the running
+image without motion commands, and why a host that does not assert DTR sees a
+completely silent port.
+
 H0W needs the watchdog **enabled**, which is a separate environment rather than an
 edit to a header both images compile: `pio run -e bench-watchdog -t upload` builds
 the same bench tree with `-DEV_BENCH_WATCHDOG_ENABLEMENT_REQUESTED=1`, which is the

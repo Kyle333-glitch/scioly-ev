@@ -8702,3 +8702,56 @@ Readiness and boundaries preserved:
   `.agent-work/reviews/R23IR.md`; evidence: `.agent-work/reviews/r23i/` and
   `.agent-work/reviews/r23ir/`. No hardware operation, no serial access, no
   upload, no calibration promotion, no Git push.
+
+## D71 / S21 - 2026-10-17 - Offline serial console and encoder diagnostic readiness
+
+Offline-only session (no board, no COM port, no upload, no powered operation) on
+`a35aa41`. It answers a bring-up question raised by a prior session: a host typed
+`health` and `ticks`, received nothing, and a later attempt failed only because
+COM3 was absent.
+
+**Findings (source-grounded, nothing physical):**
+
+- The production grammar (`lib/evcore/src/SerialCommandParser.h`) has never
+  contained `health` or `ticks`, and has no `bench` namespace; both are answered
+  `ERR,cmd=none,reason=UnknownCommand`. The bench readouts are `bench health`
+  (B1) and `bench ticks` (B3), and exist only in `env:bench`/`env:bench-watchdog`.
+- No production command or telemetry field reports raw encoder ticks: `EVS`
+  carries derived `pos_m`, so tick counts are a bench-image-only readout.
+- A reply can only leave the port while the host asserts **DTR**: `Serial.write()`
+  gates on `connected()` on this USB-CDC core, and `serviceStagedText()` stages the
+  greeting only when the sampled DTR is high. With no DTR the firmware still
+  parses commands and stages answers silently, which is indistinguishable from a
+  dead board at the host. That is the leading hypothesis for the prior silence
+  (.NET `SerialPort` defaults `DtrEnable`/`RtsEnable` to false); it is **not**
+  verified, because no host-side capture exists. No source defect was
+  demonstrated, so no firmware change was made - motor control, arming gates,
+  interlocks, watchdog behavior and the electrical gates are untouched.
+- The COM3-missing retry exchange is recorded as carrying no firmware information.
+
+**Offline coverage added (4 cases, no production code change):**
+
+- `test/test_serial_command_parser/test_main.cpp`: `health`, `ticks`, `Health`,
+  `health status`, `ticks 1`, `bench`, `bench health`, `bench ticks` are all
+  `UnknownCommand`, while `status`, `telemetry status` and `reset` still parse.
+- `test/test_bench_command/test_main.cpp`: the diagnostic verbs require the
+  `bench` prefix (bare spellings are `BenchVerb::None`, hence forwarded); no
+  spelling of any bench line is a production command (cross-grammar variant
+  isolation); and a CRLF-framed `bench ticks` line yields exactly one line plus
+  one empty line, with the unterminated variant yielding no line at all.
+- Encoder semantics needed no new cases: x2 counting, sign from the landing
+  state, reversal, reset and the masked snapshot already have suites
+  (`test_quadrature_decoder`, `test_encoder_reset`). What remains unverifiable
+  offline is device-level: `ticksLine()`'s sign formatting lives in
+  `src/bench/BenchConsole.h` behind the transport and is not host-testable.
+
+**Documentation:** `docs/bringup/S21-hardware-return-serial-runbook.md` (new) -
+per-environment serial matrix, image identification, the correct diagnostic
+spellings, the encoder count collection procedure, and a no-motion
+troubleshooting ladder. Indexed from `docs/bringup/README.md`. It is explicitly
+not authorization to bypass the Block E electrical procedure.
+
+**Validation:** native `pio test -e native` 861/861 passed across 42 suites, exit
+0; `pio run` for `nano_r4`, `bench` and `bench-watchdog` all SUCCESS with 0
+compiler warnings; no upload, no serial access, no calibration promotion, no Git
+push beyond the scoped S21 commit.

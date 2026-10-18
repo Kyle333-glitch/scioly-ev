@@ -300,6 +300,36 @@ void test_unknown_commands_and_subcommands_are_named(void) {
     expectError("tele", ev::CommandError::UnknownCommand);
 }
 
+// S21: the diagnostic spellings from the bench vocabulary are not production
+// commands, and they are refused by name rather than silently ignored.
+//
+// This is the offline half of the S21 serial matrix: `health` and `ticks` are
+// `bench`-image verbs (`lib/evcore/src/BenchCommand.h`, `src/bench/BenchConsole.h`),
+// and the production grammar below has never contained them. A host that types
+// them at the vehicle image gets the same named rejection as any other unknown
+// word - the firmware does not go quiet.
+//
+// What a pass does **not** prove: that a board on the bench was running this
+// image, that a host's bytes reached it, or that a reply left the port. Those are
+// wiring and session facts (`docs/bringup/S21-hardware-return-serial-runbook.md`).
+void test_diagnostic_verbs_are_not_production_commands(void) {
+    expectError("health", ev::CommandError::UnknownCommand);
+    expectError("ticks", ev::CommandError::UnknownCommand);
+    expectError("Health", ev::CommandError::UnknownCommand);
+    // With an argument, or with the bench prefix: the first token is unknown, so
+    // the whole line is one rejection and no prefix of it is executed.
+    expectError("health status", ev::CommandError::UnknownCommand);
+    expectError("ticks 1", ev::CommandError::UnknownCommand);
+    expectError("bench", ev::CommandError::UnknownCommand);
+    expectError("bench health", ev::CommandError::UnknownCommand);
+    expectError("bench ticks", ev::CommandError::UnknownCommand);
+    // The neighbouring real commands still parse, so the refusals above are the
+    // grammar's decision and not a parser that rejects everything.
+    expectCommand("status", ev::OperatorCommandId::Status);
+    expectCommand("telemetry status", ev::OperatorCommandId::TelemetryStatus);
+    expectCommand("reset", ev::OperatorCommandId::Reset);
+}
+
 // The right command with the wrong shape of arguments: counted, not guessed.
 void test_wrong_token_counts_are_rejected(void) {
     expectError("status extra", ev::CommandError::WrongTokenCount);
@@ -498,6 +528,7 @@ int main(int, char**) {
     RUN_TEST(test_telemetry_rate_parses_a_number);
     RUN_TEST(test_whitespace_is_rejected_rather_than_normalized);
     RUN_TEST(test_unknown_commands_and_subcommands_are_named);
+    RUN_TEST(test_diagnostic_verbs_are_not_production_commands);
     RUN_TEST(test_wrong_token_counts_are_rejected);
     RUN_TEST(test_argument_shape_keys_and_duplicates_are_rejected);
     RUN_TEST(test_the_numeric_grammar_rejects_everything_else);
