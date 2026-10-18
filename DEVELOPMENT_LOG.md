@@ -8718,15 +8718,12 @@ COM3 was absent.
   (B1) and `bench ticks` (B3), and exist only in `env:bench`/`env:bench-watchdog`.
 - No production command or telemetry field reports raw encoder ticks: `EVS`
   carries derived `pos_m`, so tick counts are a bench-image-only readout.
-- A reply can only leave the port while the host asserts **DTR**: `Serial.write()`
-  gates on `connected()` on this USB-CDC core, and `serviceStagedText()` stages the
-  greeting only when the sampled DTR is high. With no DTR the firmware still
-  parses commands and stages answers silently, which is indistinguishable from a
-  dead board at the host. That is the leading hypothesis for the prior silence
-  (.NET `SerialPort` defaults `DtrEnable`/`RtsEnable` to false); it is **not**
-  verified, because no host-side capture exists. No source defect was
-  demonstrated, so no firmware change was made - motor control, arming gates,
-  interlocks, watchdog behavior and the electrical gates are untouched.
+- A reply can only leave the port while the MCU sees USB-CDC **DTR** asserted:
+  `Serial.write()` gates on `connected()` on this USB-CDC core, and
+  `serviceStagedText()` stages the greeting only when the sampled DTR is high.
+  *(Note: D71/S21 originally suggested that the prior PowerShell session probably
+  left `DtrEnable` at its `.NET` default of `false`; that statement conflicted
+  with the actual session transcript and is corrected in **D72 / S21R** below.)*
 - The COM3-missing retry exchange is recorded as carrying no firmware information.
 
 **Offline coverage added (4 cases, no production code change):**
@@ -8755,3 +8752,58 @@ not authorization to bypass the Block E electrical procedure.
 0; `pio run` for `nano_r4`, `bench` and `bench-watchdog` all SUCCESS with 0
 compiler warnings; no upload, no serial access, no calibration promotion, no Git
 push beyond the scoped S21 commit.
+
+## D72 / S21R - 2026-10-17 - Correction to S21 serial troubleshooting root-cause analysis
+
+Focused offline documentation correction on `08b5af7` (no hardware access, no COM
+operations, no uploads, no firmware or test changes; S21's 861 passing native
+tests and clean `nano_r4` / `bench` / `bench-watchdog` builds stand unchanged).
+
+**Why S21's DTR-default explanation is retracted:**
+
+- In the earlier PowerShell session, the host explicitly executed:
+  `$port = [System.IO.Ports.SerialPort]::new("COM3", 115200)`,
+  `$port.DtrEnable = $true`, `$port.ReadTimeout = 1000`, `$port.Open()`. `COM3`
+  opened, `health` and `ticks` were sent, and both returned `"No response
+  received."` A subsequent attempt with `bench health` and `bench ticks` failed to
+  open `COM3` because the device was no longer connected.
+- S21's statement that the initial silence probably resulted from PowerShell
+  leaving `DtrEnable` disabled by default conflicted with that explicit session
+  evidence and is retracted in `docs/bringup/S21-hardware-return-serial-runbook.md`,
+  `docs/bringup/README.md`, and `DEVELOPMENT_LOG.md`.
+
+**Corrected separation of facts, unverified links, and unknowns:**
+
+- **Host-side `DtrEnable = $true` before `Open()`, and `COM3` opened:** Confirmed
+  from the user's PowerShell session.
+- **Whether Windows/USB-CDC successfully asserted DTR at the device:** Unverified
+  (no USB bus capture or device-side reading).
+- **Whether the firmware detected the asserted signal (`hostAttached_ == true`):**
+  Unverified.
+- **Whether the correct firmware image (`nano_r4`, `bench`, or `bench-watchdog`)
+  was installed on the board:** Unknown (no `BOOT`, `VERSION`, or `BENCH` line was
+  received).
+- **Whether the device received and parsed the `health` / `ticks` commands:**
+  Unknown (no reply or counter readout was returned).
+- **Expected response to unsupported `health` / `ticks` when functioning:**
+  Confirmed from source (`SerialCommandParser.h`, `BenchConsole.h`,
+  `VehicleRuntime.cpp`) that both `nano_r4` (directly) and `bench` (by forwarding
+  `BenchVerb::None` to `runtime.handleCommandLine()`) answer a framed `health` or
+  `ticks` line with `ERR,cmd=none,reason=UnknownCommand` when the firmware
+  receives/processes the command and the serial output path is functioning.
+  Command spelling alone therefore cannot explain total silence.
+- **Remaining candidate causes (hypotheses only, unverified):** (1) DTR assertion
+  did not propagate across the Windows CDC driver to `static_cast<bool>(Serial)`
+  on the MCU (note `RtsEnable` was not set and D22 F-4 previously observed missed
+  Windows CDC line-state transitions); (2) the board was not running a current
+  repository image or its loop was not servicing serial; (3) host-side write
+  framing (missing `\r`/`\n` terminator) or read timing around the 2 s `setup()`
+  wait; or (4) an intermittent USB/physical disconnect already starting before the
+  second attempt found `COM3` absent.
+
+**Troubleshooting procedure updated:** `docs/bringup/S21-hardware-return-serial-runbook.md`
+§5 now orders read-only, reproducible steps that separate USB enumeration, LED
+loop liveness, passive post-open `BOOT`/`EVS3` observation, bidirectional
+`boot`/`version` probing (`variant=` firmware identification), command-syntax
+checks (`ERR,cmd=none,reason=UnknownCommand` vs. `bench health`/`bench ticks`),
+and transport counter inspection (`status`, `bench health`, `bench serial`).

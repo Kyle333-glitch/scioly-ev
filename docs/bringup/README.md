@@ -184,10 +184,11 @@ with `BENCH`, and `bench health` reports `image=bench`. The analyzer treats a
 control input.
 
 For a returning board, [`S21-hardware-return-serial-runbook.md`](S21-hardware-return-serial-runbook.md)
-records which spelling each image accepts (production has no `health`/`ticks`;
-the bench readouts are `bench health`/`bench ticks`), how to identify the running
-image without motion commands, and why a host that does not assert DTR sees a
-completely silent port.
+records which spelling each image accepts (production has no `health`/`ticks` and
+answers them with `ERR,cmd=none,reason=UnknownCommand`; the bench readouts are
+`bench health`/`bench ticks`), how to separate transport/DTR issues from firmware
+selection and command syntax using read-only commands, and what remains unverified
+from the earlier silent PowerShell session.
 
 H0W needs the watchdog **enabled**, which is a separate environment rather than an
 edit to a header both images compile: `pio run -e bench-watchdog -t upload` builds

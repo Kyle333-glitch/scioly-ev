@@ -95,37 +95,95 @@ bench drive <fwd|rev> <permille> <ms>              (bounded; motion)
 
 Consequences for a session:
 
-- Expected first line after opening a port with DTR asserted:
+- Expected first line after opening a port when the device detects DTR asserted:
   `BOOT,fw=ev-nano-r4,rev=<sha|unknown>,dirty=<0|1>,variant=<production|bench|bench-watchdog>,cfg=<8 hex>,cfg_schema=1,schema=...,cadence_ms=20,watchdog=<0|1>,checks_all=<0|1>,...,ready=1`.
   `variant=` is the image identification; `bench health` also reports `image=bench`.
 - `boot` re-sends that line on request, in every state, and is the cheapest proof
   that the host can both send and receive.
-- A quiet port with a blinking LED is a **host-side or DTR problem**, not evidence
-  about the firmware's state.
+- If this project's firmware is running and the serial path (RX framing, loop
+  servicing, and DTR-gated TX) is functioning, even unsupported commands such as
+  bare `health` or `ticks` produce `ERR,cmd=none,reason=UnknownCommand` — never
+  silence.
+- A quiet port with a blinking LED can still indicate an unverified DTR path at
+  the Windows driver/USB-CDC/firmware boundary, an unterminated write or read
+  timing mismatch on the host, or a flashed image that is not one of this
+  repository's builds; it is not evidence about the vehicle's physical state.
 
 ---
 
-## 3. Prior observations, root-cause analysis
+## 3. Prior observations, root-cause analysis (corrected in S21R)
 
-Facts, from source only:
+### Session evidence
 
-| Observation | Certainty | Basis |
+In the earlier PowerShell session, the host explicitly executed:
+
+```powershell
+$port = [System.IO.Ports.SerialPort]::new("COM3", 115200)
+$port.DtrEnable = $true
+$port.ReadTimeout = 1000
+$port.Open()
+```
+
+`COM3` opened, and the session sent `health` and `ticks`; both returned **"No
+response received."** A subsequent retry using `bench health` and `bench ticks`
+failed to open `COM3` because the device was no longer connected.
+
+S21 originally suggested that the initial silence probably resulted from
+PowerShell leaving `DtrEnable` false by default. **That explanation conflicts
+with the actual session transcript above, where `$port.DtrEnable = $true` was
+explicitly set before `$port.Open()`, and is retracted here.**
+
+### Verified facts vs. unverified links and unknowns
+
+| Fact / question | Status | Basis |
 |---|---|---|
-| Production firmware has no `health` or `ticks` command | Confirmed | `SerialCommandParser.h` vocabulary; new offline test `test_diagnostic_verbs_are_not_production_commands` |
-| Production would answer either with `ERR,cmd=none,reason=UnknownCommand` | Confirmed | `VehicleRuntime::rejectWithoutCommand()` → `formatOperatorRefusal()` |
-| `bench health` / `bench ticks` exist only in the bench image | Confirmed | `README.md` build-graph guarantee, `env:bench`/`env:nano_r4` `build_src_filter`; new test `test_no_bench_line_is_a_production_command` |
-| A reply cannot leave the port unless the host asserts **DTR** | Confirmed | `SerialTransport.h` (`HostLineState`, write gate), `VehicleRuntime::serviceStagedText()` (`hostAttached_ = state.dtr`) |
-| The `BOOT` line is not staged at all while DTR reads low | Confirmed | same |
-| Production cannot report raw encoder ticks by any command or telemetry field | Confirmed | command table plus `TelemetryFormat.h` sample fields |
-| The later `bench health`/`bench ticks` attempt with COM3 absent says nothing about the firmware | Confirmed | no port, no bytes exchanged |
-| The host used a client that does not assert DTR/RTS | **Probable, unverified** | a .NET `System.IO.Ports.SerialPort` defaults `DtrEnable`/`RtsEnable` to false; no capture of the client's settings exists. This is the single explanation that matches "commands typed, absolutely nothing back" |
-| The flashed image was the bench image | **Undetermined** | requires `variant=` / `image=bench` from the board |
-| The command line was sent without a terminator, or the client never read | **Undetermined** | host-side; no capture exists |
+| Host-side `$port.DtrEnable = $true` was set before `$port.Open()`, and `COM3` opened | **Confirmed (session fact)** | User's PowerShell session transcript (`SerialPort::new("COM3", 115200)`, `$port.DtrEnable = $true`, `$port.ReadTimeout = 1000`, `$port.Open()`) |
+| Sending `health` and `ticks` in that first session returned "No response received" | **Confirmed (session fact)** | User's PowerShell session transcript |
+| The later `bench health` / `bench ticks` retry failed to open `COM3` because the device was absent | **Confirmed (session fact)** | `COM3` was no longer present; no port opened and no bytes were exchanged, so that retry carries no firmware information |
+| Production firmware (`env:nano_r4`) has no `health`, `ticks`, or `bench ...` commands | **Confirmed (source)** | `SerialCommandParser.h` vocabulary; offline test `test_diagnostic_verbs_are_not_production_commands` |
+| Bench firmware (`env:bench`, `env:bench-watchdog`) requires the `bench` prefix (`bench health`, `bench ticks`) and forwards bare `health`/`ticks` to the production parser | **Confirmed (source)** | `BenchCommand.h`, `BenchConsole.h`; offline tests `test_the_diagnostic_verbs_require_the_bench_prefix` and `test_no_bench_line_is_a_production_command` |
+| If either production or bench firmware from this tree receives and processes a newline-terminated `health` or `ticks` and the serial output path is functioning, it stages and emits `ERR,cmd=none,reason=UnknownCommand` (plus `EVE3` `CommandRejected` if telemetry drains) | **Confirmed (source)** | `BenchConsole::handleLine()` forwards `BenchVerb::None` to `VehicleRuntime::handleCommandLine()` → `rejectWithoutCommand()` → `formatOperatorRefusal()` |
+| Production cannot report raw encoder ticks by any command or telemetry field | **Confirmed (source)** | Command table plus `TelemetryFormat.h` sample fields |
+| Firmware TX (`Serial.write()`) and `BOOT` staging require the core's USB-CDC DTR state (`static_cast<bool>(Serial)` / `connected()`) to read high on the MCU | **Confirmed (source)** | `SerialTransport.h` (`HostLineState`), `VehicleRuntime::serviceStagedText()` (`hostAttached_ = state.dtr`), `HostGreetPolicy.h` |
+| Whether Windows and the USB-CDC driver actually propagated DTR assertion to the device on that `Open()` | **Unverified** | Host property assignment is confirmed, but no USB bus trace or device-side line-state readout was captured (cf. D22 F-4 on Windows CDC line-state transitions) |
+| Whether the firmware detected the asserted DTR signal (`hostAttached_ == true`) | **Unverified** | Requires device-side observation (a received `BOOT` or command reply) |
+| Which firmware image was installed on the board (`nano_r4`, `bench`, `bench-watchdog`, or an older/non-repo sketch) | **Unknown** | No `BOOT`, `VERSION`, or `BENCH` line was received to report `variant=` or `image=bench` |
+| Whether the device actually received and parsed the `health` and `ticks` commands | **Unknown** | No reply or counter readout (`STATUS` `cmd_rejected` / `bench health` `lines_forwarded` / `bench serial`) was returned |
 
-Leading explanation, stated as a hypothesis: with no DTR the firmware parses and
-answers into a port that cannot transmit, so the session looks identical to a dead
-board. The remedy is a host that asserts DTR (and RTS), not a firmware change. No
-source defect has been demonstrated, and none is patched in S21.
+### Candidate explanations for the initial silence (hypotheses only, unverified)
+
+Because a functioning production or bench image from this repository would have
+answered a framed `health` or `ticks` command with
+`ERR,cmd=none,reason=UnknownCommand` (and would also have emitted `BOOT,...` and
+default-enabled `EVS3` telemetry within the 1000 ms read window once DTR was seen
+high after `setup()`), command spelling alone **cannot** explain "No response
+received." The remaining candidate mechanisms are hypotheses to be separated when
+hardware returns, not conclusions:
+
+1. **Unverified DTR propagation or firmware detection across the USB-CDC link:**
+   Although `$port.DtrEnable = $true` was set in PowerShell, `$port.RtsEnable`
+   was not explicitly set, and whether the Windows `usbser`/CDC stack delivered a
+   SET_CONTROL_LINE_STATE with DTR=1 that `static_cast<bool>(Serial)` observed on
+   the RA4M1 is unverified. If the MCU continued to read DTR low, `Serial.write()`
+   accepted zero bytes and both `BOOT` and `ERR,cmd=none,reason=UnknownCommand`
+   remained silent.
+2. **Unknown flashed firmware image or non-running loop:** The board may not have
+   been running a current `nano_r4` or `bench` image from this repository (or its
+   main loop was not servicing USB-CDC), in which case this tree's parser and
+   greeter were not what was executing.
+3. **Host-side write framing or read timing in the script after `Open()`:** If
+   `health`/`ticks` were sent without a `\r` or `\n` terminator (e.g.,
+   `Write(...)` without a newline rather than `WriteLine(...)`), `CommandLineReader`
+   would hold the partial line without dispatching `LineReady`; or if the port
+   opened during the 2 s `setup()` wait / USB enumeration transition or was closed
+   before a line was read back, the 1000 ms read could time out without proving
+   what the firmware did.
+4. **Transient USB/cable disconnect already in progress:** The device was absent on
+   the very next connection attempt (`COM3` missing), so an intermittent physical
+   or USB enumeration drop during the first session cannot be ruled out.
+
+No source-code defect has been demonstrated from these observations, and no
+firmware code is changed in S21 or S21R.
 
 ---
 
@@ -181,32 +239,67 @@ cannot calibrate distance, and no software test here substitutes for it.
 
 ---
 
-## 5. No-response troubleshooting ladder (no motion commands)
+## 5. Hardware-return troubleshooting procedure (read-only, reproducible, no motion commands)
 
-Work top to bottom; each step is read-only.
+Work top to bottom. Every step is read-only, uses no motion/arm/reset command, and
+isolates **transport**, **firmware selection**, and **command syntax** in that
+order.
 
-1. **Port present?** `pio device list` - expect `USB VID:PID=2341:0074`. No port
-   means USB/enumeration/cable, not firmware. (The earlier COM3-is-missing error
-   was exactly this and carried no firmware information.)
-2. **Is the firmware running?** The status LED toggles every 500 ms in both images.
-   No blink → not this firmware, or a hung/reset loop.
-3. **Open with line state asserted.** Prefer `pio device monitor -b 115200`
-   (DTR/RTS asserted, CRLF supported). If using a raw
-   `System.IO.Ports.SerialPort` in PowerShell, set `DtrEnable = $true`,
-   `RtsEnable = $true`, `NewLine = "`r`n"`, and read until timeout. Defaults leave
-   both lines low and the firmware mute by design.
-4. **Expect `BOOT,...` within ~10 s** of opening. If it does not arrive, type
-   `boot` + Enter; an answer proves RX and TX, no answer keeps the question host-side.
-5. **Check the host's own habits:** correct COM port, terminator actually sent
-   (`WriteLine`, not `Write`), no local-echo confusion, monitor not holding the
-   port while another tool opens it.
-6. **Identify the image:** `version` → `variant=`; on a bench image `bench health`
-   → `image=bench`. If `version` reports `UnknownCommand`, the image is not one of
-   this tree's builds.
-7. **Use the right spelling:** production `health`/`ticks` is a refusal by design;
-   on a bench image the readouts are `bench health` / `bench ticks`. A named `ERR`
-   line means the serial path works.
-8. **Only if all of the above answered:** proceed to `bench ticks` and §4.
+1. **Confirm USB enumeration and single-process ownership (Transport - host OS):**
+   Run `pio device list` and confirm the Nano R4 appears with
+   `USB VID:PID=2341:0074` on the expected `COMx` port, and that no other
+   terminal, monitor, or script holds the port.
+   - *If absent:* stop; this is a cable, USB port, power, or enumeration issue
+     (like the second prior retry where `COM3` had disappeared) and says nothing
+     about firmware.
+2. **Observe the status LED before sending anything (Firmware loop liveness):**
+   In `nano_r4`, `bench`, and `bench-watchdog`, `LED_BUILTIN` toggles every
+   500 ms inside `loop()`.
+   - *If not blinking at ~1 Hz:* the board is either not running an image from
+     this repository or is stuck before/inside `loop()`.
+3. **Open the port reproducibly and listen passively before typing (Transport - DTR/TX):**
+   Prefer `pio device monitor -b 115200` (or, in PowerShell, open with
+   `DtrEnable = $true`, `RtsEnable = $true`, `NewLine = "`n"`,
+   `ReadTimeout = 2500`, wait ~300 ms after `Open()`, and drain incoming lines for
+   2–3 s before writing).
+   - *Expected on any current repo image once the MCU sees DTR high:* an initial
+     `BOOT,fw=ev-nano-r4,...,variant=<production|bench|bench-watchdog>,...,ready=1`
+     greeting (or periodic `EVS3,...` telemetry samples every 20 ms while
+     telemetry is in its default enabled state).
+4. **Probe bidirectional RX/TX with `boot` and `version` (Transport vs. Firmware selection):**
+   Send `boot` followed by `\n` (or `\r\n`), then send `version`. Both are
+   read-only and accepted in every state by **all three** environments
+   (`nano_r4`, `bench`, `bench-watchdog`).
+   - *If `BOOT,...` and `VERSION,fw=ev-nano-r4,rev=...,dirty=...,variant=<production|bench|bench-watchdog>,cfg=...` return:*
+     both RX framing and DTR-gated TX are verified, and **`variant=`**
+     conclusively identifies which firmware environment is flashed.
+   - *If `ERR,cmd=none,reason=UnknownCommand` returns to `version`:* serial RX/TX
+     works, but the flashed firmware is not a current build from this tree.
+   - *If nothing returns at all (and no `EVS3` lines appear):* the failure is in
+     transport/DTR propagation, host line termination, or a non-repo flashed
+     image — **not** `bench` vs. `production` command spelling. Test with a
+     second client (`pio device monitor -b 115200`) before suspecting the image.
+5. **Verify command-syntax and namespace behavior (Command syntax vs. Firmware selection):**
+   Once `version` has identified `variant=`:
+   - If `variant=production`: `status` and `checks` are valid read-only queries.
+     Typing `health`, `ticks`, `bench health`, or `bench ticks` will return
+     `ERR,cmd=none,reason=UnknownCommand` by design (proving the parser and TX
+     path work, and confirming that raw encoder ticks are unavailable until
+     `env:bench` is flashed in an authorized session).
+   - If `variant=bench` or `variant=bench-watchdog`: type **`bench health`**,
+     **`bench serial`**, and **`bench ticks`** (with the required `bench `
+     prefix). Bare `health` or `ticks` is forwarded to the production parser and
+     returns `ERR,cmd=none,reason=UnknownCommand` (`lines_forwarded` increments in
+     `bench health`).
+6. **Check serial-path counters if any reply was missed:**
+   Read `status` (`cmd_accepted`, `cmd_rejected`, `responses_lost`,
+   `serial_abandoned`, `serial_sent`, `serial_staged`) and, on a bench image,
+   `bench health` (`lines_accepted`, `lines_refused`, `lines_forwarded`,
+   `responses_lost`) plus `bench serial`. These counters distinguish "the
+   firmware never received a framed line" from "the firmware parsed the line and a
+   reply was staged or abandoned."
+7. **Only after `variant=bench` and `bench health` (`image=bench`) are confirmed:**
+   Proceed to `bench ticks` and the unpowered manual encoder procedure in §4.
 
 Never use `arm`, `bench arm`, `bench drive`, `bench h1a-brake`, `announce` or
 `reset` to "see if the link works". A 1200-bps touch is an upload mechanism, not a
