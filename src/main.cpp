@@ -82,7 +82,10 @@ constexpr unsigned long kSerialBaud = 115200;
 constexpr uint32_t kSerialWaitTimeoutMs = 2000;
 constexpr uint32_t kStatusLedIntervalMs = 500;
 
-evhw::VehicleRuntime runtime;
+evhw::VehicleRuntime& runtimeRef() {
+    static evhw::VehicleRuntime instance;
+    return instance;
+}
 evhw::WatchdogCheckpoint watchdog;
 IntervalTimer statusLedTimer(kStatusLedIntervalMs);
 bool statusLedState = false;
@@ -113,7 +116,7 @@ void setup() {
 
     // 1. The vehicle layer's safe initialization: the motor driver is
     //    de-energized before anything else exists to ask for motion.
-    runtime.begin(millis());
+    runtimeRef().begin(millis());
 
     // 2. The central watchdog checkpoint. It records the boot instant here but
     //    opens nothing yet: opening happens at the end of this function, after
@@ -143,7 +146,7 @@ void setup() {
 void loop() {
     const uint32_t nowMs = millis();
 
-    const evhw::PassOutcome outcome = runtime.runPass(nowMs);
+    const evhw::PassOutcome outcome = runtimeRef().runPass(nowMs);
 
     // The single watchdog health checkpoint. `refreshable()` is false only when a
     // control tick ran and did not complete in order. The stamp is read again
@@ -156,7 +159,7 @@ void loop() {
     // Low-priority work, after the checkpoint: the operator interface first (a
     // command's answer and the queued records), then the status LED. Neither can
     // hold up a tick, and both are serviced whether or not anything is attached.
-    runtime.serviceSerial(nowMs);
+    runtimeRef().serviceSerial(nowMs);
 
     updateStatusLed(nowMs);
 }
