@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
-#include <IntervalTimer.h>
+#include <StandaloneArming.h>
+#include <StandaloneIndicator.h>
 
 #include "SerialTransport.h"
 #include "VehicleRuntime.h"
@@ -59,12 +60,42 @@ static_assert(!evhw::kWatchdogEnablementRequested,
 //      without ever hiding the fact that the loop ran, and it means the serial
 //      path can never refresh the watchdog or delay a due tick's checkpoint.
 //
+// Standalone (battery-only) operation
+//
+//   This image is the laptop-free one. Nothing below needs a USB host, a DTR
+//   line, `Serial.available()` or a typed command:
+//
+//     * after boot the motor is de-energized, and it stays de-energized until a
+//       deliberate onboard gesture arms a run;
+//     * the gesture is a 1.5 s HOLD of the physical start trigger
+//       (`ev::StandaloneArmingGate`). It loads the competition preset
+//       (`ev::standalonePreset`), announces it and arms it through exactly the
+//       same rule validation, configuration-build checks and
+//       `ev::SafetyAuthority` a typed `announce`/`arm` uses. A refused arm
+//       (any Provisional calibration value - today's state) leaves the vehicle
+//       unable to move;
+//     * once armed, a separate short, debounced PRESS of the same trigger starts
+//       the run. The trigger's edge is produced by `ev::StartTriggerDetector`,
+//       so a trigger held during boot starts nothing and a held pencil cannot
+//       retrigger a run;
+//     * the onboard LED reports the state without a monitor: heartbeat = waiting,
+//       steady = armed and ready, blink = running, double blink = finished,
+//       fast blink = fault;
+//     * the serial interface is still there for diagnosis when a host happens to
+//       be attached, and a typed `disarm` still stops the vehicle. Neither is
+//       required for any of the above.
+//
+//   What standalone mode does NOT do: it does not bypass a check, invent a
+//   measurement or turn a Provisional value into an armed run. Until the
+//   calibration in `docs/standalone-ev-operation.md` section E exists, the arm is
+//   refused and the LED keeps the heartbeat - the vehicle is safe, not ready.
+//
 // What this build does NOT do, on purpose:
 //
-//   * it never arms, announces or starts a run by itself: those are commands an
-//     operator types, each gated by `ev::OperatorPolicy`, and every value in
-//     `VehicleConfig.h` is provisional, so the configuration-build checks refuse
-//     them. The run policy stays in `Idle` and every drive request is refused;
+//   * it never announces or arms from a boot: arming needs the deliberate hold
+//     gesture above, and every value in `VehicleConfig.h` is provisional, so the
+//     configuration-build checks refuse it today. The run policy stays in `Idle`
+//     and every drive request is refused;
 //   * it enables no watchdog: `kWatchdogEnablementRequested` is false.
 //
 // The serial path is a *consumer* of the control path and never a participant: it
@@ -80,23 +111,56 @@ namespace {
 
 constexpr unsigned long kSerialBaud = 115200;
 constexpr uint32_t kSerialWaitTimeoutMs = 2000;
-constexpr uint32_t kStatusLedIntervalMs = 500;
 
 evhw::VehicleRuntime& runtimeRef() {
     static evhw::VehicleRuntime instance;
     return instance;
 }
 evhw::WatchdogCheckpoint watchdog;
-IntervalTimer statusLedTimer(kStatusLedIntervalMs);
-bool statusLedState = false;
+
+// The deliberate onboard arming gesture. Constructed in the "nothing prepared"
+// state, and only ever moved by the physical trigger.
+ev::StandaloneArmingGate standaloneArming;
+
+// The trigger's verdict as of the last control tick, kept so the arming gate and
+// the LED can be serviced on passes where no tick ran.
+ev::StartTriggerVerdict lastTriggerVerdict{};
+
+// The onboard arming gesture, serviced every pass after the control tick. The
+// hold is timed against `nowMs` here rather than inside the tick because a
+// gesture is a human-scale interval (1.5 s), not a control interval.
+void serviceStandaloneArming(uint32_t nowMs) {
+    // A firmware `reset` (typed over USB when a host happens to be attached) is the
+    // new-run boundary: if this gesture had prepared a run and the runtime is back
+    // at `Idle`, disarmed, the gate returns to "nothing prepared" so a fresh hold
+    // is required. It never re-arms by itself - the next 1.5 s hold is still a
+    // deliberate act. A finished or faulted run is not `Idle`, so it is not
+    // re-armed here either; that still needs a power cycle (or `reset`).
+    if (standaloneArming.prepared() && !runtimeRef().armed() &&
+        runtimeRef().runPhase() == ev::RunPhase::Idle) {
+        standaloneArming.reset();
+    }
+
+    lastTriggerVerdict = runtimeRef().startTriggerVerdict();
+    const ev::StandaloneArmVerdict arm = standaloneArming.update(nowMs, lastTriggerVerdict);
+    if (!arm.requestPrepare) {
+        return;
+    }
+    const evhw::StandalonePrepareResult result = runtimeRef().prepareStandaloneRun(nowMs);
+    // The gate is told the authority's answer, not the attempt's: a refused arm
+    // leaves the vehicle un-prepared and waiting, exactly as it is.
+    standaloneArming.reportPreparation(result.armed);
+}
 
 // Low-priority work: the status LED. Deliberately outside the control tick, and
-// deliberately last, so it cannot delay a due tick or the checkpoint.
+// deliberately last, so it cannot delay a due tick or the checkpoint. It is the
+// only status a battery-only operator has, so its pattern is the mapping in
+// `StandaloneIndicator.h` and nothing ad hoc.
 void updateStatusLed(uint32_t nowMs) {
-    if (statusLedTimer.elapsed(nowMs)) {
-        statusLedState = !statusLedState;
-        digitalWrite(LED_BUILTIN, statusLedState ? HIGH : LOW);
-    }
+    const ev::StandaloneIndicatorState state = ev::productionIndicatorState(
+        runtimeRef().runPhase(), runtimeRef().armed(), runtimeRef().faultLatched(),
+        lastTriggerVerdict.inactiveQualified);
+    digitalWrite(LED_BUILTIN, ev::standaloneIndicatorLedOn(state, nowMs) ? HIGH : LOW);
 }
 
 // Nothing is printed here any more. The boot line (`BOOT,...`, staged by
@@ -161,5 +225,9 @@ void loop() {
     // hold up a tick, and both are serviced whether or not anything is attached.
     runtimeRef().serviceSerial(nowMs);
 
+    // The onboard arming gesture, then the status indicator that reports its
+    // outcome. Neither can command motion: preparing a run only reaches the
+    // motor through the armed control tick, and the LED is an output only.
+    serviceStandaloneArming(nowMs);
     updateStatusLed(nowMs);
 }

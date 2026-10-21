@@ -655,8 +655,13 @@ struct RunInputs {
     // never arms itself and this fact is what moves it out of ParameterValid.
     bool authorityArmed = false;
 
-    // The go signal. A level, not an edge: a trigger that is already asserted
-    // when the run reaches Armed starts it on that update.
+    // The go signal. This machine reads it as a level: an asserted value on the
+    // update that reaches Armed starts the run. The **production producer** is
+    // `ev::StartTriggerDetector`, which supplies a single debounced activation
+    // edge per intentional press rather than a raw level, so a trigger already
+    // held when the board booted starts nothing and a held pencil cannot start a
+    // second run. The level reading here is what makes the machine reusable by a
+    // scripted scenario; it is not a claim about what the vehicle layer feeds it.
     bool startTriggered = false;
 
     // Forward-progression completion, one fact per forward phase. Each says "the

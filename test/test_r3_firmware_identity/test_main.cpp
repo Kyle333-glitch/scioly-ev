@@ -50,7 +50,7 @@ void test_identity_renders_the_full_fragment(void) {
         "fw=ev-nano-r4,rev=d5b2651,dirty=0,variant=bench,cfg=9f3ac2e1,cfg_schema=1", buffer);
 }
 
-void test_variant_names_cover_all_three_images(void) {
+void test_variant_names_cover_every_image(void) {
     TEST_ASSERT_EQUAL_STRING("production",
                              ev::firmwareVariantName(ev::FirmwareVariant::Production));
     TEST_ASSERT_EQUAL_STRING("bench", ev::firmwareVariantName(ev::FirmwareVariant::Bench));
@@ -58,6 +58,11 @@ void test_variant_names_cover_all_three_images(void) {
                              ev::firmwareVariantName(ev::FirmwareVariant::BenchWatchdog));
     TEST_ASSERT_EQUAL_STRING("unknown",
                              ev::firmwareVariantName(ev::FirmwareVariant::Unknown));
+    // The laptop-free bounded-pulse image is its own variant: a log that says
+    // `standalone-diag` cannot be mistaken for a competition image.
+    TEST_ASSERT_EQUAL_STRING(
+        "standalone-diag",
+        ev::firmwareVariantName(ev::FirmwareVariant::StandaloneDiagnostic));
 }
 
 // --- Commit A vs commit B ---------------------------------------------------
@@ -217,7 +222,7 @@ void test_identity_worst_case_holds_a_full_rendering(void) {
     identity.family = "123456789012345";   // 15, the capped width
     identity.revision = "1234567890123456";  // 16, the capped width
     identity.dirty = true;
-    identity.variant = ev::FirmwareVariant::BenchWatchdog;  // longest name
+    identity.variant = ev::FirmwareVariant::StandaloneDiagnostic;  // longest name
     identity.configFingerprint = 0xFFFFFFFFU;
     identity.configSchema = 255U;
     TEST_ASSERT_TRUE(render(identity, buffer, sizeof(buffer)) > 0U);
@@ -237,7 +242,7 @@ void test_truncated_identity_reports_did_not_fit_with_an_empty_buffer(void) {
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_identity_renders_the_full_fragment);
-    RUN_TEST(test_variant_names_cover_all_three_images);
+    RUN_TEST(test_variant_names_cover_every_image);
     RUN_TEST(test_different_revisions_render_differently);
     RUN_TEST(test_same_source_config_renders_identically);
     RUN_TEST(test_dirty_build_never_renders_as_clean);

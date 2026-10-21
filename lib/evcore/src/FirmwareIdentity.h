@@ -52,6 +52,12 @@ enum class FirmwareVariant : uint8_t {
     Bench = 1,         // env:bench, console + bounded drive instruments
     BenchWatchdog = 2, // env:bench-watchdog, bench tree with the timer open
     Unknown = 3,       // no variant define reached the build; never a guess
+    // env:standalone-diag, the laptop-free bounded-pulse diagnostic image. It
+    // shares the production entry point's vehicle layer and adds one
+    // trigger-driven, time-bounded motor activation for a supervised
+    // wheels-raised test (`lib/evcore/src/StandaloneDiagnostic.h`). It is NOT
+    // the competition image and must never be mistaken for it in a log.
+    StandaloneDiagnostic = 4,
 };
 
 inline const char* firmwareVariantName(FirmwareVariant variant) {
@@ -64,6 +70,8 @@ inline const char* firmwareVariantName(FirmwareVariant variant) {
             return "bench-watchdog";
         case FirmwareVariant::Unknown:
             return "unknown";
+        case FirmwareVariant::StandaloneDiagnostic:
+            return "standalone-diag";
     }
     return "unknown";
 }
@@ -99,15 +107,15 @@ inline bool firmwareIdentityIsCleanBuild(const FirmwareIdentity& identity) {
 // Worst-case rendering, in characters:
 //
 //   `fw=` 3 + family 15 + `,rev=` 5 + revision 16 + `,dirty=` 7 + 1 +
-//   `,variant=` 9 + 14 (`bench-watchdog`) + `,cfg=` 5 + 8 + `,cfg_schema=` 12
-//   + 3 = 98.
+//   `,variant=` 9 + 15 (`standalone-diag`, the longest current name) +
+//   `,cfg=` 5 + 8 + `,cfg_schema=` 12 + 3 = 99.
 //
 // The family/revision caps are forward tolerance, not current widths
 // (today: 10 and 7). A longer literal still renders - `BoundedText`
 // truncates safely - but exceeding these caps breaks this bound visibly in
 // the test that pins it, which is the point: identity growth must stay
 // inside the serial line budget (`kSerialLineCapacity`) on purpose.
-constexpr uint16_t kFirmwareIdentityWorstCaseChars = 98U;
+constexpr uint16_t kFirmwareIdentityWorstCaseChars = 99U;
 
 // 32-bit FNV-1a over arbitrary bytes. The fold behind the configuration
 // fingerprint: order-sensitive, deterministic for identical inputs on any

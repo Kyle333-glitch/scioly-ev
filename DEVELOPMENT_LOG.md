@@ -8807,3 +8807,67 @@ loop liveness, passive post-open `BOOT`/`EVS3` observation, bidirectional
 `boot`/`version` probing (`variant=` firmware identification), command-syntax
 checks (`ERR,cmd=none,reason=UnknownCommand` vs. `bench health`/`bench ticks`),
 and transport counter inspection (`status`, `bench health`, `bench serial`).
+
+## D73 / S25 - 2026-10-21 - Standalone battery-powered trigger operation
+
+Software-only change on top of `57e7a61`. No hardware access, no USB session, no
+upload, no powered motor test. **Bench testing and physical calibration remain
+outstanding**; nothing here promotes a row in `VERIFIED_STATE.md`.
+
+**What changed, and why:**
+
+- **The start trigger is now edge-driven and debounced** (`lib/evcore/src/
+  StartTrigger.h`, stepped in control-tick stage 3). 100 ms of continuous release
+  qualifies the contact after boot/reset; 40 ms of continuous contact is one
+  press; a press produces exactly one activation. `RunInputs::startTriggered` is
+  fed that edge instead of the raw level, so a trigger held through boot or a
+  reset cannot start a run and a held pencil cannot retrigger one. This is a
+  behaviour change to the production start path, and it is the one the previous
+  level-triggered wiring could not survive without a serial operator watching.
+- **The competition run can be prepared with no host** (`prepareStandaloneRun()`
+  in `VehicleRuntime`, preset in `lib/evcore/src/StandalonePreset.h`:
+  Regional/Invitational, 5.00 m, 20.0 s, 1.00 m bottle line). The preset travels
+  through the same `config set` field check, `announce`, rule validation,
+  configuration-build checks and `SafetyAuthority::arm()` a typed command uses.
+  **No check is bypassed**: with the current Provisional calibration the
+  announcement/arm is refused and the vehicle cannot move.
+- **The deliberate arming gesture** (`lib/evcore/src/StandaloneArming.h`): a
+  1.5 s hold of the same trigger, accepted only after a stably released contact,
+  asking for preparation once per power cycle. It exists so that an MCU reset
+  during a run cannot re-arm the vehicle by itself.
+- **The onboard LED now reports state** instead of a fixed 500 ms toggle
+  (`lib/evcore/src/StandaloneIndicator.h`): heartbeat = waiting, steady = armed
+  and ready, blink = running, double blink = finished, fast blink = fault.
+- **A separate bounded diagnostic image** (`env:standalone-diag`,
+  `src/standalone/StandaloneDiagMain.cpp`,
+  `lib/evcore/src/StandaloneDiagnostic.h`): one trigger-driven pulse of 50/1000
+  effort for at most 250 ms per power cycle (ceilings 150/1000 and 500 ms from
+  `BenchDrive`), one command per arm, disabled afterwards, aborted and latched by
+  any runtime fault, armed run or tick-order violation through
+  `ev::benchApplyVerdict()`. It is a new firmware variant
+  (`FirmwareVariant::StandaloneDiagnostic`, `variant=standalone-diag`). The
+  production and bench images exclude `src/standalone/` in their source filters.
+- **The bench image constructs its runtime on first use** (`src/bench/
+  BenchMain.cpp`), matching the e31c82d production fix, instead of at namespace
+  scope before USB is up.
+- **`applyAnnounce()` refreshes the configuration-build report** after it sets
+  `announcedConfigValid_`, so an announcement and the arm that follows it in one
+  pass (the standalone path) do not arm against the previous tick's stale
+  `ConfigurationValid`. Serial mode's substance is unchanged.
+- `docs/standalone-ev-operation.md` is the operating guide; `P-H1B` Part 4 now
+  records that a debounce exists and what measurement validates its intervals.
+
+**Verification actually performed:**
+
+- `pio test -e native`: 886 test cases in 44 test binaries, all passed, including
+  the new `test_standalone` (18 cases: preset legality, boot-held trigger, bounce,
+  single activation, reset requalification, arm gesture, diagnostic pulse/expiry/
+  no-retrigger/fault abort, indicator mapping).
+- `pio run -e nano_r4`, `-e bench`, `-e bench-watchdog`, `-e standalone-diag`: all
+  SUCCESS, no compiler warnings. `nano_r4` and `standalone-diag` were also rebuilt
+  after `-t clean`.
+
+**Not verified:** that the Nano is powered from the vehicle battery at all (the
+supply pin is undocumented - W-04/H-03), that the trigger bounces less than 40 ms,
+that the LED patterns are visible as intended on the board, that the diagnostic
+pulse moves the motor, and every distance, braking and timing behaviour.

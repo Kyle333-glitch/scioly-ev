@@ -11,6 +11,7 @@
 #include <RunConfig.h>
 #include <RunExecutionPlan.h>
 #include <SafetyLimits.h>
+#include <StartTrigger.h>
 #include <Units.h>
 #include <VehicleCalibration.h>
 #include <VelocityController.h>
@@ -114,10 +115,27 @@ inline ev::FirmwareVariant firmwareVariant() {
     return ev::FirmwareVariant::Bench;
 #elif defined(EV_FIRMWARE_VARIANT) && (EV_FIRMWARE_VARIANT == 2)
     return ev::FirmwareVariant::BenchWatchdog;
+#elif defined(EV_FIRMWARE_VARIANT) && (EV_FIRMWARE_VARIANT == 4)
+    return ev::FirmwareVariant::StandaloneDiagnostic;
 #else
     return ev::FirmwareVariant::Unknown;
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// Physical start trigger (V5 harness: D12, active LOW with the internal pull-up)
+// ---------------------------------------------------------------------------
+//
+// Timing policy for the pencil-operated start input. Both numbers are policy,
+// not measurements: no bounce profile of this switch has been recorded, and
+// `PinMap.h` still records the active level as an UNVERIFIED wiring assumption.
+// The defaults are `ev::kDefaultStartTriggerConfig` - 100 ms to qualify a
+// released contact after boot/reset, 40 ms of continuous contact to accept a
+// press (two control periods at the 20 ms cadence).
+//
+// Where this matters: the same filter feeds the competition run's start edge and
+// the standalone arm gesture, so a boot-held trigger cannot start anything.
+inline ev::StartTriggerConfig startTriggerConfig() { return ev::kDefaultStartTriggerConfig; }
 
 // How old a control-path sample may be and still be used. Three control cycles,
 // chosen as a starting policy.

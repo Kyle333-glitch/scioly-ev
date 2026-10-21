@@ -114,12 +114,17 @@ to end. A value that is `Measured` without a citation fails
    `startTriggerActive` for each, with B4.
 2. Actuate the trigger at least twenty times and record the raw level transitions
    with timestamps (or, if B4 logs only level changes, the count of transitions
-   per actuation). There is no debounce in the firmware; this measures whether
-   one is needed.
-3. **Decision rule.** If the bounce exceeds the pre-registered bound, a debounce
-   is required before the trigger may start a run. That is a software
-   prerequisite to close before H7; it is not something to approximate by
-   lowering a trigger threshold.
+   per actuation). Since the standalone work the run-start path is
+   **edge-driven and debounced** (`lib/evcore/src/StartTrigger.h`): 100 ms of
+   continuous release to qualify after boot/reset, then 40 ms of continuous
+   contact to accept one press. The raw transitions measured here are what
+   validate those two intervals; B4 still reports the unfiltered level.
+3. **Decision rule.** If the measured bounce is longer than the 40 ms contact
+   debounce, raise `ev::kDefaultStartTriggerConfig` (through
+   `vehicleConfig::startTriggerConfig()`) to a bound the measurement supports,
+   and re-run the standalone trigger test. It is not something to approximate by
+   lowering a trigger threshold, and the value must not be shortened to make a
+   press feel more responsive.
 
 ## Held constant
 

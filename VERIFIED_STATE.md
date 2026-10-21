@@ -279,3 +279,18 @@ appear in the hardware table above.
    without a citation is not a promotion - it is the one edit that lets a
    provisional number start authorizing motion while looking like every other
    measured one.
+
+## Standalone (laptop-free) operation - software complete, nothing physical verified
+
+Added 2026-10-21. These are **software behaviors only**. They change no row above:
+no trigger has been pressed, no motor has moved under this control, and no battery
+supply has been traced.
+
+| Behavior | Status | What would verify it |
+|---|---|---|
+| The start trigger is debounced (100 ms release qualification, 40 ms contact) and produces one activation edge per press | HOST-TESTED ONLY (`test/test_standalone/`) | Trigger actuated 20+ times with raw transitions recorded (P-H1B Part 4), then the untethered diagnostic pulse observed |
+| A trigger held during boot or a reset cannot start a run or arm the vehicle | HOST-TESTED ONLY | Board reset with the trigger held, LED stays in the waiting pattern, no motor pulse |
+| The 1.5 s hold gesture loads the competition preset, announces and arms it | HOST-TESTED ONLY | With calibration complete: hold gesture produces a steady LED, and `status` over USB reports the announced geometry |
+| A refused arm leaves the vehicle unable to move (today: every run) | HOST-TESTED ONLY | `checks` over USB names the first failing check, and no trigger gesture produces motion |
+| The standalone diagnostic applies one 50/1000, <= 250 ms pulse per power cycle | HOST-TESTED ONLY (`test/test_standalone/`) | `env:standalone-diag` flashed, USB removed, pulse observed with wheels raised; second press does nothing |
+| The Nano runs from the vehicle battery with no USB attached | **UNKNOWN** - the supply pin is undocumented (`docs/bringup/E0-wiring-and-component-inventory.md` W-04, hazard H-03) | Trace and measure the supply path into the Nano; record it before connecting the pack |

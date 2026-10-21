@@ -59,7 +59,15 @@ constexpr unsigned long kSerialBaud = 115200;
 constexpr uint32_t kSerialWaitTimeoutMs = 2000;
 constexpr uint32_t kStatusLedIntervalMs = 500;
 
-evhw::VehicleRuntime runtime;
+// The vehicle layer is constructed on first use inside `setup()`, exactly as the
+// production entry point does it (e31c82d): a namespace-scope `VehicleRuntime`
+// runs its constructor during static initialization, before the Arduino core has
+// brought USB up, and that ordering was the production image's USB startup defect.
+// The bench image is the same chain and must not reintroduce it.
+evhw::VehicleRuntime& runtimeRef() {
+    static evhw::VehicleRuntime instance;
+    return instance;
+}
 evhw::WatchdogCheckpoint watchdog;
 IntervalTimer statusLedTimer(kStatusLedIntervalMs);
 bool statusLedState = false;
@@ -144,7 +152,7 @@ void setup() {
 
     // 1. The vehicle layer's safe initialization, in its own order: the driver is
     //    de-energized before anything else exists to ask for motion.
-    runtime.begin(millis());
+    runtimeRef().begin(millis());
 
     // 2. The watchdog checkpoint's boot instant. It opens nothing here; see step
     //    4 below.
@@ -169,14 +177,14 @@ void loop() {
     // may hold the motor pins for this pass, and one writer per pass is the point
     // (`BenchConsole.h`, `MotorDriver.h`). It also advances the bounded command's
     // own expiry and stall watch.
-    evhw::benchConsole::beginPass(nowMs, runtime);
+    evhw::benchConsole::beginPass(nowMs, runtimeRef());
 
     // One pass of the production control chain, unchanged: this image runs the
     // same scheduler, the same frozen tick order and the same safety boundary as
     // the vehicle image. What the bench adds is instrumentation around it, not a
     // different chain. The tick's own motor write yields to the bench while the
     // bench holds ownership, and de-energizes the driver otherwise.
-    const evhw::PassOutcome outcome = runtime.runPass(nowMs);
+    const evhw::PassOutcome outcome = runtimeRef().runPass(nowMs);
 
     // The single watchdog checkpoint, as in production: stamped with the
     // refresh event's own time (R2/M2), not the pass-start reading.
@@ -185,15 +193,15 @@ void loop() {
     // Low-priority work, in the production order: the operator's own output first,
     // then the console's read and dispatch, then the telemetry drain - so an
     // operator's answer outranks the log, and a bench verb outranks it too.
-    runtime.serviceStagedText(nowMs);
-    evhw::benchConsole::service(nowMs, runtime, watchdog);
+    runtimeRef().serviceStagedText(nowMs);
+    evhw::benchConsole::service(nowMs, runtimeRef(), watchdog);
 
     // The bounded bench command goes to the driver last - after the tick's own
     // write - and only on a pass the arbitration granted. `bench stop` and `bench
     // reset` take effect in the pass they are read, through this write.
     evhw::benchConsole::applyOutput(outcome);
 
-    runtime.drainTelemetry();
+    runtimeRef().drainTelemetry();
 
     updateStatusLed(nowMs);
 

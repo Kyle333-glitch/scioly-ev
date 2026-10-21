@@ -45,6 +45,7 @@ VehicleRuntime::VehicleRuntime()
       velocityController_(vehicleConfig::controllerConfig()),
       run_(vehicleConfig::runPhaseConfig(), vehicleConfig::reversalConfig()),
       recoveryStopVerifier_(vehicleConfig::reversalStopVerification()),
+      startTrigger_(vehicleConfig::startTriggerConfig()),
       scheduler_(vehicleConfig::kControlPeriodMs),
       lineReader_(commandLine_, ev::kCommandLineCapacity) {}
 
@@ -217,6 +218,13 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     // rather than a missing one.
     orderGuard_.enter(ControlTickStage::SensorSnapshot);
     rawInputs_ = sensorInputs::sample();
+    // The physical start trigger, filtered once per tick: the raw active-LOW
+    // level goes in, and a single debounced activation edge comes out for an
+    // intentional press. A trigger already held at boot never qualifies, and a
+    // held trigger cannot produce a second edge until it is stably released
+    // again - the two properties that make a laptop-free start safe
+    // (`lib/evcore/src/StartTrigger.h`).
+    startTriggerVerdict_ = startTrigger_.update(nowMs, rawInputs_.startTriggerActive);
     if (rawInputs_.driverFaultCapability == ev::DriverFaultCapability::Installed &&
         rawInputs_.driverFaultBarLow) {
         ++cyclesWithDriverFaultLow_;
@@ -307,7 +315,12 @@ void VehicleRuntime::runControlTick(uint32_t nowMs, uint32_t dtMs) {
     orderGuard_.enter(ControlTickStage::RunStateMachine);
     ev::RunInputs runInputs;
     runInputs.authorityArmed = authority_.isArmed();
-    runInputs.startTriggered = rawInputs_.startTriggerActive;
+    // The debounced activation EDGE, not the raw level: a trigger that was held
+    // while the board booted cannot start a run, and holding the pencil after a
+    // press cannot produce a second start. Both were level-triggered before the
+    // standalone work, which is safe only while somebody is watching a serial
+    // monitor - the state standalone operation must not depend on.
+    runInputs.startTriggered = startTriggerVerdict_.activated;
     // The forward progression facts for this cycle, thresholded at the run's own
     // execution plan landmarks (`deriveBottleEvidence()`): this vehicle has no
     // bottle sensor, so these are statements about how far the vehicle has
@@ -1072,6 +1085,15 @@ void VehicleRuntime::applyAnnounce(uint32_t nowMs) {
     }
 
     announcedConfigValid_ = true;
+    // `ConfigurationValid` is the one check an accepted announcement itself
+    // changes, and the arm gate reads it from this report. Refreshing it here,
+    // through the same function the control tick calls, is what lets an
+    // announcement and the arm that follows it happen in one pass - the
+    // standalone path's announce-then-arm - instead of arming against the
+    // previous tick's stale verdict. Serial mode is unaffected in substance: its
+    // commands are passes apart, so the tick had already refreshed the report.
+    configurationChecks_ =
+        vehicleConfig::configurationBuildChecks(announcedConfigValid_, run_);
     // The geometry the announced configuration defines. The origin stays where it
     // is: the Start Point is established at the arming decision, which is the
     // moment the vehicle is staged on the line.
@@ -1163,6 +1185,61 @@ void VehicleRuntime::applyArm(uint32_t nowMs) {
     // The `Armed` transition is reported by the detector on the next tick.
 }
 
+// The laptop-free preparation path: preset in, announced, armed - each step
+// through the same gate a typed command passes. There is deliberately no bypass
+// here: while a required value is Provisional the announcement or the arm is
+// refused, the refusal is reported (boot line, events, LED heartbeat) and the
+// vehicle stays unable to move. That is the honest state of an uncalibrated
+// vehicle, and `docs/standalone-ev-operation.md` is the procedure that replaces
+// those placeholders with measurements.
+StandalonePrepareResult VehicleRuntime::prepareStandaloneRun(uint32_t nowMs) {
+    StandalonePrepareResult result;
+
+    // Only from the idle, unfaulted, not-yet-announced state. A latched fault
+    // must be cleared deliberately (`reset`), and a run already announced must
+    // not be silently replaced by a second preparation.
+    const ev::OperatorSystemState state = systemState();
+    if (state.faultLatched || state.phase != ev::RunPhase::Idle) {
+        result.firstFailedCheck = configurationChecks_.firstFailure();
+        return result;
+    }
+
+    const ev::RunConfigFields preset = ev::standalonePreset::fields();
+    // The preset is judged exactly as a typed `config set` is judged (H0 finding
+    // F-5): an out-of-grid or non-finite value is refused before it becomes held
+    // state, so a bad preset edit cannot be announced from a stale buffer.
+    if (!ev::validateSuppliedConfigFields(preset).ok) {
+        ++commandsRejected_;
+        return result;
+    }
+
+    if (!ev::admissibilityOf(ev::OperatorCommandId::Announce, systemState()).allowed) {
+        result.firstFailedCheck = configurationChecks_.firstFailure();
+        return result;
+    }
+
+    ++commandsAccepted_;
+    applyConfigSet(preset, nowMs);
+    applyAnnounce(nowMs);
+    result.announced = announcedConfigValid_;
+    if (!result.announced) {
+        // A refused announcement latches nothing; the vehicle simply stays idle.
+        result.firstFailedCheck = configurationChecks_.firstFailure();
+        return result;
+    }
+
+    if (!ev::admissibilityOf(ev::OperatorCommandId::Arm, systemState()).allowed) {
+        result.firstFailedCheck = configurationChecks_.firstFailure();
+        return result;
+    }
+
+    ++commandsAccepted_;
+    applyArm(nowMs);
+    result.armed = authority_.isArmed();
+    result.firstFailedCheck = configurationChecks_.firstFailure();
+    return result;
+}
+
 void VehicleRuntime::applyReset(uint32_t nowMs) {
     // The whole new-run sequence, from the module that owns it - not a subset
     // assembled here: run policy, regulator, estimator, target and authority.
@@ -1199,6 +1276,12 @@ void VehicleRuntime::applyReset(uint32_t nowMs) {
     odometrySampleMs_ = 0U;
     hasOdometrySample_ = false;
     positionUsable_ = false;
+
+    // A reset is a boot-equivalent boundary for the trigger filter: the next
+    // press must start from a stably released contact, so a pencil resting on the
+    // trigger through a reset cannot start the next run.
+    startTrigger_.reset();
+    startTriggerVerdict_ = ev::StartTriggerVerdict{};
 
     regulatorEnabled_ = report.controllerEnabled;
     announcedConfigValid_ = false;

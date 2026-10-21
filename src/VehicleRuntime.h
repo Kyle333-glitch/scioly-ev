@@ -19,6 +19,8 @@
 #include <RunExecutionPlan.h>
 #include <SafetyAuthority.h>
 #include <SerialCommandParser.h>
+#include <StandalonePreset.h>
+#include <StartTrigger.h>
 #include <TelemetryFormat.h>
 #include <TelemetryQueue.h>
 #include <VehicleCalibration.h>
@@ -253,6 +255,22 @@ struct TelemetrySnapshot {
 // its record in the queue `serviceSerial()` drains after the checkpoint.
 using TelemetryHook = void (*)(void* context, const TelemetrySnapshot& snapshot);
 
+// The outcome of a standalone (laptop-free) preparation attempt: the preset was
+// loaded, announced and then armed through the same transitions a typed
+// `config set` / `announce` / `arm` sequence uses. Nothing here bypasses a rule
+// check or a configuration-build check - a refusal is reported, not stepped
+// around, and `armed` is the authority's live answer.
+struct StandalonePrepareResult {
+    // The announcement was accepted (the run policy holds this run's geometry).
+    bool announced = false;
+    // `ev::SafetyAuthority::arm()` accepted. False while any required value is
+    // still Provisional - the expected outcome on the uncalibrated vehicle.
+    bool armed = false;
+    // The most fundamental failing configuration-build check, or `Count` when
+    // every check passed. This is the named reason an arming attempt was refused.
+    ev::ConfigurationCheckId firstFailedCheck = ev::ConfigurationCheckId::Count;
+};
+
 // What one pass of the main loop did.
 struct PassOutcome {
     // A control tick was due and ran.
@@ -316,6 +334,21 @@ public:
     bool armed() const { return authority_.isArmed(); }
 
     ev::RunPhase runPhase() const { return run_.phase(); }
+
+    // The physical start trigger as the last control tick saw it: the debounced,
+    // boot-held-rejecting verdict from `ev::StartTriggerDetector`. The run policy
+    // is fed `activated` (a single edge per intentional press) rather than the raw
+    // level, so a trigger already held at boot cannot start a run and a held
+    // pencil cannot retrigger one. Exposed for the standalone arm gesture and the
+    // status LED, which run outside the control tick.
+    const ev::StartTriggerVerdict& startTriggerVerdict() const { return startTriggerVerdict_; }
+
+    // Prepares a competition run with the standalone preset, with no host
+    // present: loads the preset into the held configuration, announces it and
+    // arms it, each step gated exactly as the typed command is. Called once per
+    // power cycle by the standalone arm gesture; a refused attempt changes
+    // nothing that would make the vehicle drive.
+    StandalonePrepareResult prepareStandaloneRun(uint32_t nowMs);
 
     // True while either fault latch of record is set: the run policy's or the
     // safety authority's. Exactly the fact `status` reports as `faultLatched`,
@@ -496,6 +529,12 @@ private:
     // standstill, never on the reset itself. While armed the run policy alone
     // owns that fact. Reset at the new-run boundary with everything else.
     ev::NearZeroVerifier recoveryStopVerifier_;
+    // The physical start trigger's filter (`ev::StartTriggerDetector`): debounce,
+    // boot-held rejection and one activation edge per intentional press. Stepped
+    // once per control tick from the raw active-LOW reading in stage 3. Declared
+    // here because the constructor initialises it here.
+    ev::StartTriggerDetector startTrigger_;
+    ev::StartTriggerVerdict startTriggerVerdict_{};
     ev::ControlScheduler scheduler_;
     ev::ControlTickOrderGuard orderGuard_;
     // The feedback-progress supervision (S18C/P4): bounds accepted powered
