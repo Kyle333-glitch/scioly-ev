@@ -1,11 +1,12 @@
 # Operating the EV without a laptop
 
-This is the operator guide for the two laptop-free images:
+This is the operator guide for the laptop-free images:
 
 | Image | Environment | What it is |
 |---|---|---|
+| **Immediate standalone (default)** | `env:nano_r4` | Open-loop, pencil-triggered movement sequence (`POWER_OFF → INITIALIZING → WAITING_FOR_TRIGGER → FORWARD → STOPPING → REVERSE → FINISHED`). No laptop, no serial arming, no 1.5 s hold gesture, and no competition calibration gates. |
 | **Standalone diagnostic** | `env:standalone-diag` | Supervised, wheels-raised test: one bounded, low-effort motor pulse from the physical pencil trigger. Proves the trigger, the driver enable path and the onboard battery supply work with no computer attached. |
-| **Standalone competition** | `env:nano_r4` | The vehicle image. Arms itself from the physical trigger, loads the competition preset, and runs the competition state machine after a start press. |
+| **Standalone competition** | `env:nano_r4-competition` | The calibrated competition image. Arms itself from the physical trigger (1.5 s hold), loads the competition preset, and runs the full competition state machine after a start press once calibration in section E is complete. |
 
 Status of each claim in this file:
 
@@ -110,7 +111,9 @@ approximate duration) in your test notes.
 
 ---
 
-## C. Uploading the autonomous competition firmware
+## C. Uploading the autonomous firmware
+
+### C1. Immediate standalone movement sequence (default `env:nano_r4`)
 
 ```powershell
 Set-Location "$HOME\Projects\scioly-ev"
@@ -118,13 +121,36 @@ pio run -e nano_r4
 pio run -e nano_r4 -t upload
 ```
 
-`pio run` with no `-e` also builds `env:nano_r4`, because that is the default
-environment. Optional identity check over USB: `pio device monitor`, expect
+`pio run -e nano_r4 -t upload` installs the immediate open-loop standalone
+sequence (`src/main.cpp` + `lib/evcore/src/ImmediateSequence.h`):
+
+1. Power on with the pencil trigger released. The orange LED blinks a slow
+   heartbeat for 100 ms while `INITIALIZING`, then turns **steady ON** in
+   `WAITING_FOR_TRIGGER`.
+2. Activate the pencil trigger **once** (≥ 40 ms debounced press; no 1.5 s hold
+   required).
+3. The vehicle executes `FORWARD` (150/1000 effort for 1,000 ms) → `STOPPING`
+   (motor disabled for 500 ms) → `REVERSE` (150/1000 effort for 800 ms) →
+   `FINISHED` (motor disabled, double-blink LED, retrigger locked out until
+   reset/power cycle, 4,000 ms overall run timeout).
+
+Adjust effort and durations in the `IMMEDIATE MOVEMENT SEQUENCE CONFIGURATION`
+block in `src/main.cpp`.
+
+### C2. Calibrated competition firmware (`env:nano_r4-competition`)
+
+```powershell
+Set-Location "$HOME\Projects\scioly-ev"
+pio run -e nano_r4-competition
+pio run -e nano_r4-competition -t upload
+```
+
+Optional identity check over USB: `pio device monitor`, expect
 `variant=production` in the `BOOT,...` line.
 
-> Do **not** run the competition image on the ground until section E is complete
-> and the arm gesture produces a steady LED. Until then the arm is refused by
-> design and the vehicle cannot move.
+> Do **not** run the `nano_r4-competition` image on the ground until section E is
+> complete and the 1.5 s arm gesture produces a steady LED. Until then the arm is
+> refused by design and the vehicle cannot move.
 
 ---
 

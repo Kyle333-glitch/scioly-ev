@@ -9,6 +9,8 @@
 #include <StandaloneIndicator.h>
 #include <StandalonePreset.h>
 #include <StartTrigger.h>
+#include <ImmediateSequence.h>
+#include <MotorDriverPlan.h>
 
 // Contract tests for laptop-free ("standalone") operation:
 //
@@ -584,6 +586,281 @@ void test_standalone_names_are_wire_safe(void) {
         TEST_ASSERT_TRUE(strlen(name) > 0U);
         TEST_ASSERT_NULL(strchr(name, ','));
     }
+    for (uint8_t index = 0U; index <= static_cast<uint8_t>(ev::ImmediateSequenceState::FAULT);
+         ++index) {
+        const char* name =
+            ev::immediateSequenceStateName(static_cast<ev::ImmediateSequenceState>(index));
+        TEST_ASSERT_NOT_NULL(name);
+        TEST_ASSERT_TRUE(strlen(name) > 0U);
+        TEST_ASSERT_NULL(strchr(name, ','));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Immediate standalone sequence controller (POWER_OFF -> INITIALIZING ->
+// WAITING_FOR_TRIGGER -> FORWARD -> STOPPING -> REVERSE -> FINISHED)
+// ---------------------------------------------------------------------------
+
+void test_immediate_sequence_default_config_matches_spec(void) {
+    const ev::ImmediateSequenceConfig& cfg = ev::kDefaultImmediateSequenceConfig;
+    TEST_ASSERT_TRUE(ev::immediateSequenceConfigValid(cfg));
+    TEST_ASSERT_EQUAL_UINT16(150U, cfg.forwardEffortPermille);
+    TEST_ASSERT_EQUAL_UINT32(1000U, cfg.forwardDurationMs);
+    TEST_ASSERT_EQUAL_UINT32(500U, cfg.stoppingDurationMs);
+    TEST_ASSERT_EQUAL_UINT16(150U, cfg.reverseEffortPermille);
+    TEST_ASSERT_EQUAL_UINT32(800U, cfg.reverseDurationMs);
+    TEST_ASSERT_EQUAL_UINT32(4000U, cfg.runTimeoutMs);
+}
+
+void test_immediate_sequence_boot_starts_disabled_in_initializing(void) {
+    ev::ImmediateSequenceController ctrl;
+    // Before begin(): POWER_OFF, motor disabled.
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::POWER_OFF),
+                          static_cast<int>(ctrl.state()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(ctrl.currentOutput().mode()));
+    TEST_ASSERT_EQUAL_UINT16(0U, ctrl.currentOutput().magnitudePermille());
+
+    const ev::ImmediateSequenceStep powerOffStep = ctrl.update(0U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::POWER_OFF),
+                          static_cast<int>(powerOffStep.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(powerOffStep.output.mode()));
+
+    // On begin(): transitions to INITIALIZING, motor still disabled.
+    ctrl.begin(0U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                          static_cast<int>(ctrl.state()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(ctrl.currentOutput().mode()));
+    TEST_ASSERT_EQUAL_UINT16(0U, ctrl.currentOutput().magnitudePermille());
+}
+
+void test_immediate_sequence_boot_held_trigger_cannot_start(void) {
+    ev::ImmediateSequenceController ctrl;
+    ctrl.begin(0U);
+    uint32_t nowMs = 0U;
+    for (uint32_t i = 0U; i < 600U; ++i) {  // 6 seconds with trigger held LOW
+        const ev::ImmediateSequenceStep step = ctrl.update(nowMs, true);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                              static_cast<int>(step.state));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                              static_cast<int>(step.output.mode()));
+        TEST_ASSERT_EQUAL_UINT16(0U, step.output.magnitudePermille());
+        nowMs += kStepMs;
+    }
+}
+
+void test_immediate_sequence_trigger_release_and_debounce_to_start(void) {
+    ev::ImmediateSequenceController ctrl;
+    ctrl.begin(0U);
+    uint32_t nowMs = 0U;
+
+    // Release for 0..90 ms (< 100 ms qualification): still INITIALIZING.
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        const ev::ImmediateSequenceStep step = ctrl.update(nowMs, false);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                              static_cast<int>(step.state));
+        nowMs += kStepMs;
+    }
+
+    // At 100 ms of release: enters WAITING_FOR_TRIGGER.
+    ev::ImmediateSequenceStep step = ctrl.update(nowMs, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::WAITING_FOR_TRIGGER),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::StandaloneIndicatorState::Ready),
+                          static_cast<int>(step.indicator));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    nowMs += kStepMs;
+
+    // Brief 20 ms contact bounce (< 40 ms debounce): does not start FORWARD.
+    ctrl.update(nowMs, true);
+    nowMs += kStepMs;
+    ctrl.update(nowMs, true);
+    nowMs += kStepMs;
+    step = ctrl.update(nowMs, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::WAITING_FOR_TRIGGER),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    nowMs += kStepMs;
+
+    // Intentional 40 ms press: starts FORWARD immediately without a 1.5 s hold.
+    ctrl.update(nowMs, true);      // t + 0 ms
+    nowMs += 20U;
+    ctrl.update(nowMs, true);      // t + 20 ms
+    nowMs += 20U;
+    step = ctrl.update(nowMs, true);  // t + 40 ms
+    TEST_ASSERT_TRUE(step.sequenceStartedThisPass);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::DriveForward),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(150U, step.output.magnitudePermille());
+}
+
+void test_immediate_sequence_full_autonomous_run_and_no_retrigger(void) {
+    ev::ImmediateSequenceController ctrl;
+    ctrl.begin(0U);
+
+    // Qualify release (0 -> 100 ms).
+    ctrl.update(0U, false);
+    ev::ImmediateSequenceStep step = ctrl.update(100U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::WAITING_FOR_TRIGGER),
+                          static_cast<int>(step.state));
+
+    // Press trigger (100 -> 140 ms) to enter FORWARD at t = 140 ms.
+    ctrl.update(100U, true);
+    step = ctrl.update(140U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::DriveForward),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(150U, step.output.magnitudePermille());
+
+    // Verify DRV8874 inputs during FORWARD: nSLEEP HIGH, PH HIGH, duty 150.
+    const ev::Drv8874Inputs fwdPins =
+        ev::drv8874InputsForRequest(step.output.mode(), step.output.magnitudePermille());
+    TEST_ASSERT_TRUE(fwdPins.nSleepHigh);
+    TEST_ASSERT_TRUE(fwdPins.phaseHigh);
+    TEST_ASSERT_EQUAL_UINT16(150U, fwdPins.dutyPermille);
+    TEST_ASSERT_TRUE(ev::pwmCountFromPermille(fwdPins.dutyPermille, ev::kPlannedPwmResolutionBits) > 0U);
+
+    // Release trigger during FORWARD (e.g. at 200 ms) and press again at 400 ms:
+    // repeated trigger activations during FORWARD are ignored.
+    ctrl.update(200U, false);
+    ctrl.update(350U, false);
+    ctrl.update(400U, true);
+    step = ctrl.update(500U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::DriveForward),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(150U, step.output.magnitudePermille());
+
+    // Just before 1,000 ms of FORWARD (at t = 1139 ms): still FORWARD.
+    step = ctrl.update(1139U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+
+    // At 1,000 ms of FORWARD (t = 1140 ms): transitions to STOPPING (motor-off interval).
+    step = ctrl.update(1140U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::STOPPING),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(0U, step.output.magnitudePermille());
+    const ev::Drv8874Inputs stopPins =
+        ev::drv8874InputsForRequest(step.output.mode(), step.output.magnitudePermille());
+    TEST_ASSERT_TRUE(ev::drv8874InputsAreDeEnergized(stopPins));
+
+    // Just before 500 ms of STOPPING (t = 1639 ms): still STOPPING.
+    step = ctrl.update(1639U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::STOPPING),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+
+    // At 500 ms of STOPPING (t = 1640 ms): transitions to REVERSE (150/1000 effort).
+    step = ctrl.update(1640U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::REVERSE),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::DriveReverse),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(150U, step.output.magnitudePermille());
+    const ev::Drv8874Inputs revPins =
+        ev::drv8874InputsForRequest(step.output.mode(), step.output.magnitudePermille());
+    TEST_ASSERT_TRUE(revPins.nSleepHigh);
+    TEST_ASSERT_FALSE(revPins.phaseHigh);
+    TEST_ASSERT_EQUAL_UINT16(150U, revPins.dutyPermille);
+    TEST_ASSERT_TRUE(ev::pwmCountFromPermille(revPins.dutyPermille, ev::kPlannedPwmResolutionBits) > 0U);
+
+    // Just before 800 ms of REVERSE (t = 2439 ms): still REVERSE.
+    step = ctrl.update(2439U, false);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::REVERSE),
+                          static_cast<int>(step.state));
+
+    // At 800 ms of REVERSE (t = 2440 ms): transitions to FINISHED, motor disabled.
+    step = ctrl.update(2440U, false);
+    TEST_ASSERT_TRUE(step.sequenceFinishedThisPass);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FINISHED),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(0U, step.output.magnitudePermille());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::StandaloneIndicatorState::Finished),
+                          static_cast<int>(step.indicator));
+
+    // Repeated trigger presses after completion do NOT retrigger the sequence.
+    ctrl.update(2600U, false);
+    ctrl.update(2700U, true);
+    step = ctrl.update(2800U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FINISHED),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_FALSE(step.sequenceStartedThisPass);
+}
+
+void test_immediate_sequence_overall_timeout_stops_and_latches_fault(void) {
+    ev::ImmediateSequenceController ctrl;
+    ctrl.begin(0U);
+    ctrl.update(0U, false);
+    ctrl.update(100U, false);
+    ctrl.update(100U, true);
+    ev::ImmediateSequenceStep step = ctrl.update(140U, true);  // FORWARD starts at 140 ms
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+
+    // Jump past the 4,000 ms overall timeout (e.g. t = 4200 ms): must fault and disable motor.
+    step = ctrl.update(4200U, false);
+    TEST_ASSERT_TRUE(step.faultedThisPass);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FAULT),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+    TEST_ASSERT_EQUAL_UINT16(0U, step.output.magnitudePermille());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::StandaloneIndicatorState::Faulted),
+                          static_cast<int>(step.indicator));
+
+    // Subsequent trigger press while faulted cannot restart.
+    ctrl.update(4400U, false);
+    ctrl.update(4500U, true);
+    step = ctrl.update(4600U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FAULT),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
+}
+
+void test_immediate_sequence_unexpected_reset_returns_to_disabled(void) {
+    ev::ImmediateSequenceController ctrl;
+    ctrl.begin(0U);
+    ctrl.update(0U, false);
+    ctrl.update(100U, false);
+    ctrl.update(100U, true);
+    ev::ImmediateSequenceStep step = ctrl.update(140U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_TRUE(step.output.isDriving());
+
+    // Unexpected reset while running: returns to POWER_OFF -> INITIALIZING with motor disabled.
+    ctrl.reset();
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::POWER_OFF),
+                          static_cast<int>(ctrl.state()));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(ctrl.currentOutput().mode()));
+
+    ctrl.begin(500U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                          static_cast<int>(ctrl.state()));
+    // Trigger still held across reset: remains disabled in INITIALIZING.
+    step = ctrl.update(500U, true);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                          static_cast<int>(step.state));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::MotorMode::Disabled),
+                          static_cast<int>(step.output.mode()));
 }
 
 int main(int, char**) {
@@ -606,5 +883,12 @@ int main(int, char**) {
     RUN_TEST(test_the_production_indicator_maps_run_state_to_led_patterns);
     RUN_TEST(test_the_led_patterns_are_distinct);
     RUN_TEST(test_standalone_names_are_wire_safe);
+    RUN_TEST(test_immediate_sequence_default_config_matches_spec);
+    RUN_TEST(test_immediate_sequence_boot_starts_disabled_in_initializing);
+    RUN_TEST(test_immediate_sequence_boot_held_trigger_cannot_start);
+    RUN_TEST(test_immediate_sequence_trigger_release_and_debounce_to_start);
+    RUN_TEST(test_immediate_sequence_full_autonomous_run_and_no_retrigger);
+    RUN_TEST(test_immediate_sequence_overall_timeout_stops_and_latches_fault);
+    RUN_TEST(test_immediate_sequence_unexpected_reset_returns_to_disabled);
     return UNITY_END();
 }

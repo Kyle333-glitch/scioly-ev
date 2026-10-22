@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include <BenchDrive.h>
+#include <ImmediateSequence.h>
 #include <MotorDriverPlan.h>
 
 #include "PinMap.h"
@@ -205,8 +206,11 @@ inline void beginDisabled() {
     analogWriteResolution(ev::kPlannedPwmResolutionBits);
 
     // The de-energized levels, through the one write path every other write
-    // uses. The tracked PH level starts low, so this cannot take the
-    // de-energize branch, and nSLEEP has already been driven low above.
+    // uses. Drive PH low explicitly here and sync `lastPhaseHighWritten()` so
+    // the physical pin is guaranteed LOW even when `lastPhaseHighWritten()` was
+    // already false at startup.
+    digitalWrite(kMotorPhase, LOW);
+    detail::lastPhaseHighWritten() = false;
     writeLevels(ev::Drv8874Inputs{false, false, 0U});
 }
 
@@ -256,6 +260,18 @@ inline void apply(const ev::AuthorizedMotorCommand& command) {
 // whose next write de-energizes a bench command the bench code can no longer
 // reach.
 inline void applyBench(const ev::BenchDriveOutput& output) {
+    writeLevels(ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille()));
+}
+
+// Applies one bounded open-loop sequence output from `ev::ImmediateSequenceController`
+// (`src/main.cpp`, the default `env:nano_r4` standalone movement image).
+//
+// `ImmediateDriveOutput` has a private constructor accessible only to
+// `ev::ImmediateSequenceController`, so only the immediate state machine can
+// construct a command for this entry point. All writes go through `writeLevels()`
+// and `ev::drv8874InputsForRequest()`, preserving the DRV8874 PH/EN/nSLEEP
+// direction-change de-energize ordering.
+inline void applyImmediate(const ev::ImmediateDriveOutput& output) {
     writeLevels(ev::drv8874InputsForRequest(output.mode(), output.magnitudePermille()));
 }
 
