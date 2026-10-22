@@ -135,7 +135,28 @@ sequence (`src/main.cpp` + `lib/evcore/src/ImmediateSequence.h`):
    reset/power cycle, 4,000 ms overall run timeout).
 
 Adjust effort and durations in the `IMMEDIATE MOVEMENT SEQUENCE CONFIGURATION`
-block in `src/main.cpp`.
+block in `src/main.cpp`. Note the 500 ms `STOPPING` interval is a bounded
+motor-off pause for this wheels-raised test mode, not a measured standstill;
+see the stop-interval note in `src/main.cpp` before running on the ground.
+
+Optional USB check (before going untethered, or to tell images apart):
+
+```powershell
+Set-Location "$HOME\Projects\scioly-ev"
+pio device monitor
+```
+
+Expect one `EV BOOT ... variant=immediate-standalone ...` line (within about
+0.5 s of the monitor attaching), then one `EV state=... trig_raw=... mode=...
+permille=... ph=... en=... nsleep=...` status line every 500 ms. The status
+line names the live phase, the raw D12 reading, the debounced trigger state,
+the commanded motor mode/effort and the requested D8/D9/D10 levels, so
+`state=WAITING_FOR_TRIGGER` with `trig_raw=1` means the right firmware is
+running but the trigger has not been pressed, while a missing `EV BOOT` line
+or a different `variant=` value means a different image is on the board.
+The diagnostic is output-only (no motor-drive command exists in this image)
+and is never required: with no USB host attached nothing is sent and the
+sequence runs identically. **Close the monitor before the untethered test.**
 
 ### C2. Calibrated competition firmware (`env:nano_r4-competition`)
 
@@ -154,7 +175,11 @@ Optional identity check over USB: `pio device monitor`, expect
 
 ---
 
-## D. Running the EV autonomously
+## D. Running the EV autonomously (competition image only)
+
+This section is the calibrated competition image (`env:nano_r4-competition`).
+It does **not** apply to the default immediate image in C1, which needs only
+the single press described there and has no arm gesture.
 
 ### D1. What the controls do
 
@@ -283,6 +308,7 @@ Distinguish three failure classes before changing code:
 | F3 | LED never leaves the fast-blink fault pattern | Firmware | A fault is latched. Power-cycle, then (USB attached) read `status` for the fault name. Common causes: control-tick order violation (a firmware defect — report it), or a diagnostic stall fault caused by a disconnected encoder. |
 | F4 | Trigger is always active (pulse fires immediately, or the LED never becomes ready) | Electrical | D12 is being held LOW. Check for a short to ground, a mis-wired switch, or a trigger mechanism resting on the contact. With the pencil off the trigger, D12 must read HIGH. Firmware deliberately refuses a boot-held trigger rather than treating it as a press. |
 | F5 | Motor does not move when triggered (diagnostic image) | Electrical or firmware | In order: (1) is the LED steady before the press? (2) is the motor supply connected and the disconnect closed? (3) is nSLEEP actually going high and EN receiving PWM — measure at the driver pins. (4) did you already use this power cycle's one activation? Power-cycle to reset it. The host test suite cannot tell you any of this: it is a measurement. |
+| F5a | LED sequence runs but the motor does not move (immediate image) | Electrical | The firmware did its part if the LED went running → double-blink. In order: (1) over USB, confirm `EV BOOT variant=immediate-standalone` and that the status line shows `mode=DriveForward permille=150 nsleep=1` during the run — otherwise the wrong image is flashed. (2) motor supply connected and disconnect closed? (3) measure nSLEEP/PH/EN at the driver pins during FORWARD. (4) 15% PWM may not break static friction: raise effort in small steps in `src/main.cpp` (never above 500) with wheels raised; do not assume a nonzero command means rotation. |
 | F6 | Motor does not move when triggered (competition image) | Configuration | The arm was refused. The LED stays in the heartbeat. Attach USB, `checks`, and fix the first failing check (section E). Note that arming also requires a usable execution plan, so an unmeasured forward-stop margin refuses the arm even with all checks otherwise green. |
 | F7 | Encoder readings never change | Electrical | With wheels raised, push the vehicle by hand and read `status` (`enc=` / tick count). No change means the A/B channels are not reaching D2/D4, the pull-ups are wrong for the encoder's output type, or the encoder is unpowered. Do not tune the tick scale against a dead encoder. |
 | F8 | Run fails readiness checks | Configuration | Expected until section E is complete; `checks` names the first failing check. Do not relabel a value `Measured` to get past it. |

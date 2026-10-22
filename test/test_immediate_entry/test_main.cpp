@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <string>
 #include <unity.h>
 
 #include <Arduino.h>
@@ -297,6 +298,113 @@ void test_driver_ownership_and_no_runtime_interference_across_direction_change(v
     TEST_ASSERT_TRUE(evhw::motorDriver::pinLevels().deEnergized);
 }
 
+void test_steady_phase_passes_do_not_rewrite_motor_pins(void) {
+    resetEntryTest(0U);
+    stepLoopAt(0U);
+    stepLoopAt(100U);
+    setTriggerPressed(true);
+    stepLoopAt(100U);
+    stepLoopAt(140U);  // Enters FORWARD
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(controllerRef().state()));
+    setTriggerPressed(false);
+
+    // The first FORWARD write already reached the pins: every further pass
+    // in the same phase must hold those levels without rewriting them, so a
+    // steady PWM output is never re-poked once per pass. (The status LED
+    // on D13 still updates; only the three motor pins must stay quiet.)
+    evmock::pinWriteLog().clear();
+    for (uint32_t t = 160U; t < 1140U; t += 20U) {
+        stepLoopAt(t);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                              static_cast<int>(controllerRef().state()));
+    }
+    for (const evmock::PinWrite& w : evmock::pinWriteLog()) {
+        TEST_ASSERT_TRUE(w.pin != evhw::kMotorPhase && w.pin != evhw::kMotorEnable &&
+                         w.pin != evhw::kMotorSleepBar);
+    }
+    const evhw::motorDriver::PinLevels held = evhw::motorDriver::pinLevels();
+    TEST_ASSERT_FALSE(held.deEnergized);
+    TEST_ASSERT_TRUE(held.nSleepHigh);
+    TEST_ASSERT_TRUE(held.phaseHigh);
+    TEST_ASSERT_EQUAL_UINT16(150U, held.dutyPermilleWritten);
+
+    // Leaving the phase still drives the pins: STOPPING de-energizes.
+    stepLoopAt(1140U);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::STOPPING),
+                          static_cast<int>(controllerRef().state()));
+    bool sawMotorWrite = false;
+    for (const evmock::PinWrite& w : evmock::pinWriteLog()) {
+        if (w.pin == evhw::kMotorPhase || w.pin == evhw::kMotorEnable ||
+            w.pin == evhw::kMotorSleepBar) {
+            sawMotorWrite = true;
+        }
+    }
+    TEST_ASSERT_TRUE(sawMotorWrite);
+    TEST_ASSERT_TRUE(evhw::motorDriver::pinLevels().deEnergized);
+}
+
+void test_usb_diagnostics_report_identity_and_status(void) {
+    resetEntryTest(0U);
+    // Disconnected USB: the diagnostic stages nothing, motion unaffected.
+    stepLoopAt(0U);
+    stepLoopAt(100U);
+    TEST_ASSERT_TRUE(Serial.takeTx().empty());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::WAITING_FOR_TRIGGER),
+                          static_cast<int>(controllerRef().state()));
+
+    // A host attaches: the BOOT identity appears once, then periodic status.
+    Serial.connected = true;
+    stepLoopAt(500U);  // stages BOOT; the pump moves it on the next pass
+    TEST_ASSERT_TRUE(Serial.takeTx().empty());
+    stepLoopAt(520U);  // pump delivers BOOT
+    const std::string boot = Serial.takeTx();
+    TEST_ASSERT_TRUE(boot.find("EV BOOT") != std::string::npos);
+    TEST_ASSERT_TRUE(boot.find("variant=immediate-standalone") != std::string::npos);
+    TEST_ASSERT_TRUE(boot.find("fwd_permille=150") != std::string::npos);
+
+    // Status follows and names the live phase, trigger and motor command.
+    setTriggerPressed(true);
+    stepLoopAt(540U);
+    stepLoopAt(580U);  // 40 ms debounced press -> FORWARD
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(controllerRef().state()));
+    stepLoopAt(1020U);  // next 500 ms boundary stages the status line
+    stepLoopAt(1040U);  // the pump delivers it
+    const std::string status = Serial.takeTx();
+    TEST_ASSERT_TRUE(status.find("state=FORWARD") != std::string::npos);
+    TEST_ASSERT_TRUE(status.find("mode=DriveForward") != std::string::npos);
+    TEST_ASSERT_TRUE(status.find("permille=150") != std::string::npos);
+    TEST_ASSERT_TRUE(status.find("nsleep=1") != std::string::npos);
+    TEST_ASSERT_TRUE(status.find("fault=none") != std::string::npos);
+    // The diagnostic changed nothing about the motor output.
+    TEST_ASSERT_FALSE(evhw::motorDriver::pinLevels().deEnergized);
+}
+
+void test_clock_rollover_keeps_trigger_debounce_and_phase_timing(void) {
+    const uint32_t bootMs = 0xFFFFFFC6U;  // 58 ms before the 32-bit wrap
+    resetEntryTest(bootMs);
+    stepLoopAt(bootMs);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::INITIALIZING),
+                          static_cast<int>(controllerRef().state()));
+    stepLoopAt(bootMs + 100U);  // wraps to 0x2A: release qualifies across the wrap
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::WAITING_FOR_TRIGGER),
+                          static_cast<int>(controllerRef().state()));
+
+    setTriggerPressed(true);
+    stepLoopAt(0x2AU);
+    stepLoopAt(0x52U);  // 40 ms of continuous press in wrapped time
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::FORWARD),
+                          static_cast<int>(controllerRef().state()));
+    TEST_ASSERT_FALSE(evhw::motorDriver::pinLevels().deEnergized);
+
+    setTriggerPressed(false);
+    stepLoopAt(0x52U + 1000U);  // full forward duration, still in wrapped time
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ev::ImmediateSequenceState::STOPPING),
+                          static_cast<int>(controllerRef().state()));
+    TEST_ASSERT_TRUE(evhw::motorDriver::pinLevels().deEnergized);
+}
+
 void test_maximum_runtime_timeout_deenergizes_pins_in_entry_loop(void) {
     resetEntryTest(0U);
     stepLoopAt(0U);
@@ -323,5 +431,8 @@ int main(int, char**) {
     RUN_TEST(test_unexpected_reset_returns_to_disabled_state);
     RUN_TEST(test_driver_ownership_and_no_runtime_interference_across_direction_change);
     RUN_TEST(test_maximum_runtime_timeout_deenergizes_pins_in_entry_loop);
+    RUN_TEST(test_steady_phase_passes_do_not_rewrite_motor_pins);
+    RUN_TEST(test_usb_diagnostics_report_identity_and_status);
+    RUN_TEST(test_clock_rollover_keeps_trigger_debounce_and_phase_timing);
     return UNITY_END();
 }

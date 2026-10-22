@@ -111,6 +111,31 @@ inline bool& lastPhaseHighWritten() {
     return high;
 }
 
+// The full driver-input combination this adapter last wrote, and whether it
+// has written anything yet. The single write path below skips the pin writes
+// when the requested combination is identical to what is already on the pins:
+// the main loop commands the output every pass, and rewriting an unchanged
+// nSLEEP level and PWM duty once per pass is a glitch risk with no benefit -
+// the pins hold their levels between writes. The skip is a pure output
+// optimization: it never changes which combination is commanded, and any
+// *change* (including every direction change, which moves PH) still goes
+// through the de-energize-before-PH rule below.
+struct LastWrittenLevels {
+    bool valid = false;
+    bool nSleepHigh = false;
+    bool phaseHigh = false;
+    uint16_t dutyPermille = 0U;
+};
+
+inline LastWrittenLevels& lastWrittenLevels() {
+    static LastWrittenLevels levels;
+    return levels;
+}
+
+inline void invalidateWrittenLevels() {
+    lastWrittenLevels().valid = false;
+}
+
 }  // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -136,6 +161,15 @@ inline bool& lastPhaseHighWritten() {
 // the de-energize write and the PH write is bounded by the part and is a
 // measurement item for H1A/H3 rather than something this comment may claim.
 inline void writeLevels(const ev::Drv8874Inputs& levels) {
+    detail::LastWrittenLevels& last = detail::lastWrittenLevels();
+    if (last.valid && last.nSleepHigh == levels.nSleepHigh &&
+        last.phaseHigh == levels.phaseHigh && last.dutyPermille == levels.dutyPermille) {
+        // Already commanding exactly this combination: the pins hold it, so
+        // there is nothing to write. The duty record is refreshed so the
+        // readback below still reports the intent.
+        lastDutyPermilleWritten() = levels.dutyPermille;
+        return;
+    }
     if (levels.phaseHigh != detail::lastPhaseHighWritten()) {
         // De-energize before the direction input moves: nSLEEP low, then EN
         // commanded to zero duty, then PH.
@@ -148,6 +182,10 @@ inline void writeLevels(const ev::Drv8874Inputs& levels) {
     analogWrite(kMotorEnable, ev::pwmCountFromPermille(levels.dutyPermille,
                                                        ev::kPlannedPwmResolutionBits));
     lastDutyPermilleWritten() = levels.dutyPermille;
+    last.nSleepHigh = levels.nSleepHigh;
+    last.phaseHigh = levels.phaseHigh;
+    last.dutyPermille = levels.dutyPermille;
+    last.valid = true;
 }
 
 // The three driver inputs as the MCU itself sees them, plus the rule's verdict.
@@ -193,6 +231,10 @@ inline PinLevels pinLevels() {
 // its first call for a pin, and paying for that inside the first drive command
 // would put an allocation inside the control loop's timing.
 inline void beginDisabled() {
+    // Force the full write below through even if the cache holds the same
+    // de-energized combination from before a reset: after a reset the
+    // physical pins must be driven, not assumed.
+    detail::invalidateWrittenLevels();
     // De-energize first, then configure: the sleep line is the driver's enable,
     // and it is driven low before anything else is touched.
     pinMode(kMotorSleepBar, OUTPUT);

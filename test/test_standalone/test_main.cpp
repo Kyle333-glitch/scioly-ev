@@ -863,6 +863,31 @@ void test_immediate_sequence_unexpected_reset_returns_to_disabled(void) {
                           static_cast<int>(step.output.mode()));
 }
 
+void test_immediate_sequence_config_rejects_wrapped_duration_sum(void) {
+    // The three phase durations are uint32_t: a 32-bit sum could wrap and
+    // admit phases that outlast the hard run timeout. The validation must
+    // see the true sum.
+    // True total 6,000,000,000 ms against a 4,000,000,000 ms timeout: the
+    // wrapped 32-bit sum (1,705,032,704) would wrongly fit, so this is the
+    // regression case for the wrap.
+    constexpr ev::ImmediateSequenceConfig wrapped(
+        150U, 3000000000U, 2000000000U, 150U, 1000000000U, 4000000000U,
+        ev::kDefaultStartTriggerConfig);
+    TEST_ASSERT_FALSE(ev::immediateSequenceConfigValid(wrapped));
+    // Each phase near UINT32_MAX with the maximum timeout: the true sum is
+    // ~3x the timeout even though every individual duration fits in 32 bits.
+    constexpr ev::ImmediateSequenceConfig huge(
+        150U, 0x80000000U, 0x80000000U, 150U, 0x80000000U, 0xFFFFFFFFU,
+        ev::kDefaultStartTriggerConfig);
+    TEST_ASSERT_FALSE(ev::immediateSequenceConfigValid(huge));
+    // A sum exactly equal to the timeout is still acceptable.
+    constexpr ev::ImmediateSequenceConfig exact(
+        150U, 1000U, 500U, 150U, 800U, 2300U, ev::kDefaultStartTriggerConfig);
+    TEST_ASSERT_TRUE(ev::immediateSequenceConfigValid(exact));
+    // The shipped default stays valid.
+    TEST_ASSERT_TRUE(ev::immediateSequenceConfigValid(ev::kDefaultImmediateSequenceConfig));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_standalone_preset_is_rule_legal_event_geometry);
@@ -890,5 +915,6 @@ int main(int, char**) {
     RUN_TEST(test_immediate_sequence_full_autonomous_run_and_no_retrigger);
     RUN_TEST(test_immediate_sequence_overall_timeout_stops_and_latches_fault);
     RUN_TEST(test_immediate_sequence_unexpected_reset_returns_to_disabled);
+    RUN_TEST(test_immediate_sequence_config_rejects_wrapped_duration_sum);
     return UNITY_END();
 }

@@ -98,6 +98,12 @@ constexpr ImmediateSequenceConfig kDefaultImmediateSequenceConfig(
     kDefaultStartTriggerConfig);
 
 constexpr bool immediateSequenceConfigValid(const ImmediateSequenceConfig& config) {
+    // The duration sum is widened to 64 bits before comparing: the three
+    // phase durations are each `uint32_t`, so a 32-bit sum could wrap (e.g.
+    // three large durations summing past 2^32 would compare as a small
+    // number) and admit phases that outlast the hard run timeout. The
+    // comparison must see the true sum. Single-return form: this header is
+    // also compiled as C++11 on the host toolchain.
     return config.forwardEffortPermille > 0U &&
            config.forwardEffortPermille <= kImmediateMaxEffortPermille &&
            config.reverseEffortPermille > 0U &&
@@ -106,8 +112,10 @@ constexpr bool immediateSequenceConfigValid(const ImmediateSequenceConfig& confi
            config.stoppingDurationMs > 0U &&
            config.reverseDurationMs > 0U &&
            config.runTimeoutMs > 0U &&
-           (config.forwardDurationMs + config.stoppingDurationMs +
-            config.reverseDurationMs) <= config.runTimeoutMs;
+           (static_cast<uint64_t>(config.forwardDurationMs) +
+            static_cast<uint64_t>(config.stoppingDurationMs) +
+            static_cast<uint64_t>(config.reverseDurationMs)) <=
+               static_cast<uint64_t>(config.runTimeoutMs);
 }
 
 static_assert(immediateSequenceConfigValid(kDefaultImmediateSequenceConfig),
